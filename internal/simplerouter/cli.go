@@ -187,15 +187,27 @@ func (a *app) openRouterKey(ctx context.Context, cfg Config) (string, error) {
 	if cfg.OpenRouterAPIKey != "" {
 		if err := validateOpenRouterKey(ctx, client, cfg.OpenRouterAPIKey); err == nil {
 			return cfg.OpenRouterAPIKey, nil
+		} else if errors.Is(err, errOpenRouterKeyRejected) {
+			fmt.Fprintln(a.stderr, newTerminalStyle(a.stderr).warning("Saved OpenRouter API key is no longer valid."))
+		} else {
+			// Transient failure (network, timeout, 429, 5xx): the saved key is
+			// probably fine — OpenRouter will reject it at request time if it
+			// isn't. Don't claim the key is invalid; proceed optimistically.
+			fmt.Fprintln(a.stderr, newTerminalStyle(a.stderr).warning("Could not reach OpenRouter to validate the saved key; using it anyway."))
+			return cfg.OpenRouterAPIKey, nil
 		}
-		fmt.Fprintln(a.stderr, newTerminalStyle(a.stderr).warning("Saved OpenRouter API key is no longer valid."))
 	}
 	key, err := a.promptAPIKey()
 	if err != nil {
 		return "", err
 	}
 	if err := validateOpenRouterKey(ctx, client, key); err != nil {
-		return "", err
+		if errors.Is(err, errOpenRouterKeyRejected) {
+			return "", err
+		}
+		// Transient failure: proceed with the pasted key optimistically.
+		fmt.Fprintln(a.stderr, newTerminalStyle(a.stderr).warning("Could not reach OpenRouter to validate the key; using it anyway."))
+		return key, nil
 	}
 	return key, nil
 }
@@ -232,7 +244,11 @@ func (a *app) promptAPIKey() (string, error) {
 func (a *app) resolveOpenRouterModel(ctx context.Context, client *openRouterClient, key, input string) (pickResult, error) {
 	models, err := openRouterModels(ctx, client, key)
 	if err != nil {
-		return pickResult{Model: Model{ID: input}}, nil
+		// Don't silently pass the raw input through on a transient fetch
+		// failure: the unverified string would be launched and persisted as
+		// LastModel with no signal to the user. Surface the failure so the
+		// caller aborts (or retries) rather than degrading to a passthrough.
+		return pickResult{}, fmt.Errorf("could not reach OpenRouter to verify model %q: %w", input, err)
 	}
 	res, ok := resolveModel(input, models)
 	if !ok {

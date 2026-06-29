@@ -35,4 +35,16 @@ $installDir = Join-Path $HOME ".local\bin"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 Copy-Item -Force $exe (Join-Path $installDir "simplerouter.exe")
 
+# ~/.local/bin is not on the default Windows PATH, so add it for the current
+# user (idempotently) so simplerouter is invocable from a new shell.
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (-not $userPath) { $userPath = "" }
+$entries = $userPath.Split(";") | Where-Object { $_ -ne "" }
+if ($entries -notcontains $installDir) {
+    $newPath = if ($userPath) { "$userPath;$installDir" } else { $installDir }
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    Write-Host "Added $installDir to the user PATH."
+    Write-Host "Open a new terminal for the change to take effect."
+}
+
 Write-Host "Installed simplerouter to $installDir"

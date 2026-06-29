@@ -3,10 +3,18 @@ package simplerouter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 )
+
+// errOpenRouterKeyRejected signals that OpenRouter explicitly rejected the
+// API key (HTTP 401/403). Every other failure — network error, timeout, 429
+// rate limit, 5xx — is transient and must NOT be treated as an invalid key,
+// so callers can proceed optimistically with the key instead of forcing a
+// re-paste on a flaky connection.
+var errOpenRouterKeyRejected = errors.New("OpenRouter rejected the API key")
 
 const (
 	defaultOpenRouterAPIBase = "https://openrouter.ai/api/v1"
@@ -40,7 +48,7 @@ func (c *openRouterClient) validateKey(ctx context.Context, key string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return fmt.Errorf("OpenRouter rejected the API key")
+		return errOpenRouterKeyRejected
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("OpenRouter key validation failed: HTTP %d", resp.StatusCode)

@@ -44,7 +44,7 @@ Run `simplerouter` to open the interactive picker.
 - **← / →** — flip pages
 - **type** — filter live by id or name
 - **↵** — launch the highlighted model
-- **p** — open provider selection for the highlighted model (see below)
+- **Tab** — open provider selection for the highlighted model (see below)
 - **esc** — cancel
 
 The list is pre-filtered to models usable by Claude Code and ordered by
@@ -52,7 +52,7 @@ OpenRouter popularity, with recommended models are pinned to the top.
 
 ## Provider / endpoint selection
 
-simplerouter default's to OpenRouter's choice of provider. If you want to select a specific inference provider, press **`p`** on a highlighted model:
+simplerouter default's to OpenRouter's choice of provider. If you want to select a specific inference provider, press **`Tab`** on a highlighted model:
 
 <img width="674" height="461" alt="image" src="https://github.com/user-attachments/assets/d2093cc0-270a-43ef-a980-b972e93439dc" />
 

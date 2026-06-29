@@ -175,9 +175,7 @@ func (st *pickerState) handleInput(buf []byte) pickerAction {
 			return pickerQuit
 		case b == 0x15: // Ctrl+U clears the search box
 			st.clearQuery()
-		case b == 'p' && st.query == "":
-			// 'p' opens providers while browsing; once a filter is being typed
-			// it is a normal search character (so names with 'p' still work).
+		case b == 0x09: // Tab opens the provider view for the highlighted model
 			return pickerProviders
 		case b >= 0x20 && b < 0x7f: // printable: letters, digits, space, ?, …
 			st.addRune(rune(b))
@@ -484,7 +482,7 @@ func (a *app) renderModelView(st *pickerState, style terminalStyle) (lines []str
 
 	lines = append(lines, "")
 	lines = append(lines, footer(style, [][2]string{
-		{"↑↓", "browse"}, {"←→", "page"}, {"↵", "select"}, {"p", "providers"}, {"esc", "quit"},
+		{"↑↓", "browse"}, {"←→", "page"}, {"↵", "select"}, {"tab", "providers"}, {"esc", "quit"},
 	}))
 	return lines, caretRow, caretCol
 }

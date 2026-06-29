@@ -120,19 +120,20 @@ func TestPickerStateStartsAtTopAndQuits(t *testing.T) {
 	}
 }
 
-func TestPickerStatePKeyOpensProvidersOnlyWhenBrowsing(t *testing.T) {
+func TestPickerStateTabOpensProviders(t *testing.T) {
 	st := newPickerState(interactiveTestModels(5))
-	// 'p' with an empty search box opens the provider view.
-	if act := st.handleInput([]byte("p")); act != pickerProviders {
-		t.Fatalf("'p' on empty query = %v, want providers", act)
+	// Tab (0x09) opens the provider view.
+	if act := st.handleInput([]byte{0x09}); act != pickerProviders {
+		t.Fatalf("Tab = %v, want providers", act)
 	}
-	// Once a filter is being typed, 'p' is a normal search character.
+	// Tab opens providers even while a filter is being typed (it is a
+	// control byte, so it never collides with search text).
 	st.handleInput([]byte("g"))
-	if act := st.handleInput([]byte("p")); act != pickerNone {
-		t.Fatalf("'p' mid-filter = %v, want none", act)
+	if act := st.handleInput([]byte{0x09}); act != pickerProviders {
+		t.Fatalf("Tab mid-filter = %v, want providers", act)
 	}
-	if st.query != "gp" {
-		t.Fatalf("query = %q, want gp", st.query)
+	if st.query != "g" {
+		t.Fatalf("query = %q, want g", st.query)
 	}
 }
 
