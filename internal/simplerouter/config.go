@@ -46,7 +46,15 @@ func loadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	cfg.OpenRouterAPIKey = cleanAPIKey(cfg.OpenRouterAPIKey)
+	cfg.GeminiAPIKey = cleanAPIKey(cfg.GeminiAPIKey)
 	cfg.LastModel = strings.TrimSpace(cfg.LastModel)
+	cfg.LastGeminiModel = strings.TrimSpace(cfg.LastGeminiModel)
+	// A hand-edited unknown provider must not break launch: fall back to the
+	// default (OpenRouter) rather than erroring.
+	cfg.Provider = strings.ToLower(strings.TrimSpace(cfg.Provider))
+	if cfg.Provider != providerOpenRouter && cfg.Provider != providerGemini {
+		cfg.Provider = ""
+	}
 	return cfg, nil
 }
 
@@ -86,12 +94,16 @@ func saveConfig(cfg Config) error {
 	return os.Rename(tmpName, path)
 }
 
+// resetSavedKey forgets all saved API keys. It runs before the provider is
+// determined, so clearing both is the honest semantic; only the provider used
+// next will re-prompt.
 func resetSavedKey() error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
 	cfg.OpenRouterAPIKey = ""
+	cfg.GeminiAPIKey = ""
 	return saveConfig(cfg)
 }
 

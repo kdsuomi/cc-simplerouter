@@ -18,7 +18,7 @@ const pickerPageSize = 12
 const (
 	cReset = "\x1b[0m"
 
-	clrAccent     = "38;2;217;119;87"   // clay / coral — the brand accent
+	clrAccent     = "38;2;217;119;87"    // clay / coral — the brand accent
 	clrAccentBold = "1;38;2;217;119;87"  // accent + bold for the active row
 	clrAccent2    = "38;2;234;179;102"   // warm gold, the far end of the wordmark gradient
 	clrHead       = "1;38;2;236;236;241" // bright white-ish, bold headings
@@ -26,16 +26,16 @@ const (
 	clrModelHi    = "1;38;2;240;242;248" // recommended model ids
 	clrName       = "38;2;146;150;166"   // vendor display names
 	clrDim        = "38;2;108;110;126"   // secondary text
-	clrFaint      = "38;2;78;80;96"       // rules / chrome
-	clrWarn       = "38;2;233;176;90"     // warnings
+	clrFaint      = "38;2;78;80;96"      // rules / chrome
+	clrWarn       = "38;2;233;176;90"    // warnings
 
 	clrCheap  = "38;2;120;201;120" // < $1 / M
 	clrModer  = "38;2;226;191;110" // < $5 / M
 	clrPricey = "38;2;230;128;110" // >= $5 / M
 
 	clrCtxHuge = "38;2;96;200;214"  // >= 1M context
-	clrCtxBig  = "38;2;120;201;140"  // >= 100k
-	clrCtxSm   = "38;2;120;122;136"  // smaller
+	clrCtxBig  = "38;2;120;201;140" // >= 100k
+	clrCtxSm   = "38;2;120;122;136" // smaller
 )
 
 type terminalStyle struct {
@@ -102,7 +102,7 @@ func printSetupBanner(w io.Writer, style terminalStyle) {
 	to := [3]int{234, 179, 102}
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  %s\n", style.gradient("◇ simplerouter", from, to))
-	fmt.Fprintf(w, "  %s\n", style.paint(clrFaint, "claude code · any model on openrouter"))
+	fmt.Fprintf(w, "  %s\n", style.paint(clrFaint, "claude code · openrouter & gemini models"))
 }
 
 // endpointsFunc fetches the provider endpoints for a model id. nil disables the
@@ -117,9 +117,9 @@ type pickResult struct {
 	ProviderName string
 }
 
-func (a *app) pickModel(models []Model, current string, endpoints endpointsFunc) (pickResult, error) {
+func (a *app) pickModel(title string, models []Model, current string, endpoints endpointsFunc) (pickResult, error) {
 	if len(models) == 0 {
-		return pickResult{}, errors.New("no OpenRouter models returned")
+		return pickResult{}, errors.New("no models returned")
 	}
 
 	models = orderModelsForPicker(models)
@@ -127,16 +127,16 @@ func (a *app) pickModel(models []Model, current string, endpoints endpointsFunc)
 	// Use the full-screen arrow-key picker when both ends are real terminals;
 	// otherwise fall back to the line-based prompt (also used under tests/pipes).
 	if in, out, ok := a.pickerTerminals(); ok {
-		res, err := a.pickModelInteractive(in, out, models, endpoints)
+		res, err := a.pickModelInteractive(in, out, title, models, endpoints)
 		if !errors.Is(err, errPickerFallback) {
 			return res, err
 		}
 	}
-	model, err := a.pickModelLineMode(models, current)
+	model, err := a.pickModelLineMode(title, models, current)
 	return pickResult{Model: model}, err
 }
 
-func (a *app) pickModelLineMode(models []Model, current string) (Model, error) {
+func (a *app) pickModelLineMode(title string, models []Model, current string) (Model, error) {
 	filter := initialModelFilter(models, current)
 	style := newTerminalStyle(a.stderr)
 	page := 0
@@ -159,7 +159,7 @@ func (a *app) pickModelLineMode(models []Model, current string) (Model, error) {
 		}
 
 		visible := visibleModels(filtered, page)
-		a.printModelPage(filtered, visible, filter, page, totalPages, style)
+		a.printModelPage(title, filtered, visible, filter, page, totalPages, style)
 		line, err := a.readLine()
 		if err != nil && !errors.Is(err, io.EOF) {
 			return Model{}, err
@@ -246,7 +246,7 @@ const (
 	wPrice  = 14
 )
 
-func (a *app) printModelPage(filtered, visible []Model, filter string, page, totalPages int, style terminalStyle) {
+func (a *app) printModelPage(title string, filtered, visible []Model, filter string, page, totalPages int, style terminalStyle) {
 	fmt.Fprintln(a.stderr)
 
 	// Title bar: accent ruler glyph, bold title, dim meta.
@@ -257,7 +257,7 @@ func (a *app) printModelPage(filtered, visible []Model, filter string, page, tot
 	meta := fmt.Sprintf("%s · page %d/%d", count, page+1, totalPages)
 	fmt.Fprintf(a.stderr, "%s%s   %s\n",
 		style.paint(clrAccent, "▌ "),
-		style.header("Select an OpenRouter model"),
+		style.header(title),
 		style.paint(clrDim, meta),
 	)
 	if filter != "" {
@@ -414,7 +414,7 @@ func (a *app) printModelDetails(model Model, style terminalStyle) {
 		fmt.Fprintf(a.stderr, "  %s %s\n", style.paint(clrDim, padRight("Warning", 9)), style.warning(warning))
 	}
 	if len(model.SupportedParameters) > 0 {
-		fmt.Fprintf(a.stderr, "  %s %s\n", style.paint(clrDim, padRight("OpenRouter parameters:", 9)), style.paint(clrName, strings.Join(model.SupportedParameters, ", ")))
+		fmt.Fprintf(a.stderr, "  %s %s\n", style.paint(clrDim, padRight("Params", 9)), style.paint(clrName, strings.Join(model.SupportedParameters, ", ")))
 	}
 }
 

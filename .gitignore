@@ -11,3 +11,12 @@ ollama-python-main/
 *.exe
 
 _tags.txt
+
+# Local reference clone of LiteLLM, not part of the project
+litellm_cloned/
+
+# Temporary API keys used for live verification
+gemini_test_key.txt
+
+# Stray Windows device-name artifact from `> NUL` redirects
+NUL

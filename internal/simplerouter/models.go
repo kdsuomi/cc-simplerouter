@@ -15,6 +15,17 @@ var recommendedModelIDs = []string{
 	"minimax/minimax-m3",
 }
 
+// recommendedGeminiModelIDs is the curated top of the Google AI Studio picker
+// (verified against the live /models listing, July 2026). Gemini ids never
+// contain "/" and OpenRouter ids always do, so the two lists can share the
+// recommendation machinery without colliding.
+var recommendedGeminiModelIDs = []string{
+	"gemini-3.1-pro-preview",
+	"gemini-3.5-flash",
+	"gemini-2.5-pro",
+	"gemini-2.5-flash",
+}
+
 var testedModelIDs = map[string]bool{
 	"z-ai/glm-5.2":                 true,
 	"qwen/qwen3-coder":             true,
@@ -117,11 +128,16 @@ func recommendedRank(modelID string) int {
 			return i
 		}
 	}
-	return len(recommendedModelIDs)
+	for i, id := range recommendedGeminiModelIDs {
+		if normalizeModelText(id) == needle {
+			return len(recommendedModelIDs) + i
+		}
+	}
+	return len(recommendedModelIDs) + len(recommendedGeminiModelIDs)
 }
 
 func isRecommendedModel(modelID string) bool {
-	return recommendedRank(modelID) < len(recommendedModelIDs)
+	return recommendedRank(modelID) < len(recommendedModelIDs)+len(recommendedGeminiModelIDs)
 }
 
 func isTestedModel(modelID string) bool {

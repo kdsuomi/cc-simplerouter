@@ -408,7 +408,8 @@ func TestFirstRunWizardRecommendsAndSavesModel(t *testing.T) {
 	var spec launchSpec
 	stderr := &strings.Builder{}
 	a := &app{
-		stdin:      strings.NewReader("sk-or-test\n\n"),
+		// First-run flow: provider choice (Enter keeps OpenRouter), key, model.
+		stdin:      strings.NewReader("\nsk-or-test\n\n"),
 		stdout:     &strings.Builder{},
 		stderr:     stderr,
 		httpClient: srv.Client(),
@@ -431,8 +432,11 @@ func TestFirstRunWizardRecommendsAndSavesModel(t *testing.T) {
 	if cfg.OpenRouterAPIKey != "sk-or-test" || cfg.LastModel != "z-ai/glm-5.2" {
 		t.Fatalf("config = %+v", cfg)
 	}
+	if cfg.Provider != providerOpenRouter {
+		t.Fatalf("provider = %q", cfg.Provider)
+	}
 	out := stderr.String()
-	for _, want := range []string{"simplerouter setup", "Fetching OpenRouter models", "Launching Claude Code"} {
+	for _, want := range []string{"simplerouter setup", "Select a provider", "Fetching OpenRouter models", "Launching Claude Code"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stderr missing %q: %q", want, out)
 		}
@@ -445,7 +449,7 @@ func TestPickerRecommendedColumnsAndEnterDefault(t *testing.T) {
 		stdin:  strings.NewReader("\n"),
 		stderr: stderr,
 	}
-	res, err := a.pickModel([]Model{
+	res, err := a.pickModel("Select an OpenRouter model", []Model{
 		{ID: "vendor/other", Name: "Other Model", ContextLength: 8192},
 		{
 			ID:                  "z-ai/glm-5.2",
@@ -488,7 +492,7 @@ func TestPickerDetailsAndPagination(t *testing.T) {
 		stdin:  strings.NewReader("? 1\nn\n1\n"),
 		stderr: stderr,
 	}
-	res, err := a.pickModel(models, "", nil)
+	res, err := a.pickModel("Select an OpenRouter model", models, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,10 +500,250 @@ func TestPickerDetailsAndPagination(t *testing.T) {
 		t.Fatalf("selected = %s", res.Model.ID)
 	}
 	out := stderr.String()
-	for _, want := range []string{"Model details", "OpenRouter parameters: tools", "page 2/2"} {
+	for _, want := range []string{"Model details", "Params", "page 2/2"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("picker output missing %q: %q", want, out)
 		}
+	}
+}
+
+func TestConfigBackCompatDefaultsToOpenRouter(t *testing.T) {
+	home := withTestHome(t)
+	path := filepath.Join(home, configDirName, "config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Old-format config from before provider support.
+	if err := os.WriteFile(path, []byte(`{"openrouter_api_key":"sk-or-test","last_model":"z-ai/glm-5.2"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "" || cfg.GeminiAPIKey != "" || cfg.LastGeminiModel != "" {
+		t.Fatalf("config = %+v", cfg)
+	}
+	// Unknown provider values are normalized away rather than breaking launch.
+	if err := os.WriteFile(path, []byte(`{"provider":"bogus"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "" {
+		t.Fatalf("unknown provider not normalized: %q", cfg.Provider)
+	}
+}
+
+func TestResetSavedKeyClearsBothKeys(t *testing.T) {
+	withTestHome(t)
+	cfg := Config{
+		Provider:         providerGemini,
+		OpenRouterAPIKey: "sk-or-test",
+		GeminiAPIKey:     "gm-test",
+		LastModel:        "z-ai/glm-5.2",
+		LastGeminiModel:  "gemini-2.5-flash",
+	}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := resetSavedKey(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OpenRouterAPIKey != "" || got.GeminiAPIKey != "" {
+		t.Fatalf("keys not cleared: %+v", got)
+	}
+	if got.Provider != providerGemini || got.LastModel != cfg.LastModel || got.LastGeminiModel != cfg.LastGeminiModel {
+		t.Fatalf("non-key fields changed: %+v", got)
+	}
+}
+
+func TestInferProviderFromModel(t *testing.T) {
+	cases := map[string]string{
+		"z-ai/glm-5.2":          providerOpenRouter,
+		"gemini-2.5-flash":      providerGemini,
+		"models/gemini-2.5-pro": providerGemini,
+		"models/other-model":    providerGemini,
+		"glm-5.2":               "",
+		"":                      "",
+	}
+	for input, want := range cases {
+		if got := inferProviderFromModel(input); got != want {
+			t.Errorf("inferProviderFromModel(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func geminiTestServer(t *testing.T, keyStatus int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if keyStatus != http.StatusOK {
+			w.WriteHeader(keyStatus)
+			fmt.Fprint(w, `{"error":{"code":400,"message":"API key not valid","status":"INVALID_ARGUMENT"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"models":[
+			{"name":"models/gemini-2.5-flash","displayName":"Gemini 2.5 Flash","inputTokenLimit":1048576,"supportedGenerationMethods":["generateContent"]},
+			{"name":"models/gemini-2.5-flash-lite","displayName":"Gemini 2.5 Flash-Lite","inputTokenLimit":1048576,"supportedGenerationMethods":["generateContent"]}
+		]}`)
+	}))
+}
+
+func TestGeminiModelFlagLaunchesThroughProxy(t *testing.T) {
+	home := withTestHome(t)
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(Config{GeminiAPIKey: "gm-test", LastModel: "z-ai/glm-5.2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := geminiTestServer(t, http.StatusOK)
+	defer srv.Close()
+
+	var proxyKeyBase, proxyModel string
+	oldProxy := startGeminiProxyFn
+	startGeminiProxyFn = func(upstreamBase, model string, _ *http.Client) (string, func(), error) {
+		proxyKeyBase, proxyModel = upstreamBase, model
+		return "http://127.0.0.1:9999", func() {}, nil
+	}
+	t.Cleanup(func() { startGeminiProxyFn = oldProxy })
+
+	var spec launchSpec
+	stderr := &strings.Builder{}
+	a := &app{
+		stdin:         strings.NewReader(""),
+		stdout:        &strings.Builder{},
+		stderr:        stderr,
+		httpClient:    srv.Client(),
+		geminiAPIBase: srv.URL,
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
+	}
+	if err := a.run(context.Background(), []string{"--model", "gemini-2.5-flash"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if proxyModel != "gemini-2.5-flash" || proxyKeyBase != srv.URL {
+		t.Fatalf("proxy stub got (%q, %q)", proxyKeyBase, proxyModel)
+	}
+	if !slices.Equal(spec.Args, []string{"--model", "gemini-2.5-flash[1m]"}) {
+		t.Fatalf("Args = %v", spec.Args)
+	}
+	env := envMap(spec.Env)
+	if env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:9999" {
+		t.Fatalf("base url = %q", env["ANTHROPIC_BASE_URL"])
+	}
+	if env["ANTHROPIC_AUTH_TOKEN"] != "gm-test" {
+		t.Fatalf("auth token = %q, want the real Gemini key", env["ANTHROPIC_AUTH_TOKEN"])
+	}
+	if env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] != "1048576" {
+		t.Fatalf("compact window = %q", env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"])
+	}
+	if !strings.Contains(stderr.String(), "provider Google AI Studio") {
+		t.Fatalf("launch summary missing provider label: %q", stderr.String())
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != providerGemini || cfg.LastGeminiModel != "gemini-2.5-flash" {
+		t.Fatalf("config = %+v", cfg)
+	}
+	if cfg.LastModel != "z-ai/glm-5.2" {
+		t.Fatalf("OpenRouter last model clobbered: %+v", cfg)
+	}
+}
+
+func TestGeminiRelaunchSkipsProviderPicker(t *testing.T) {
+	home := withTestHome(t)
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(Config{Provider: providerGemini, GeminiAPIKey: "gm-test", LastGeminiModel: "gemini-2.5-flash"}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := geminiTestServer(t, http.StatusOK)
+	defer srv.Close()
+	oldProxy := startGeminiProxyFn
+	startGeminiProxyFn = func(string, string, *http.Client) (string, func(), error) {
+		return "http://127.0.0.1:9999", func() {}, nil
+	}
+	t.Cleanup(func() { startGeminiProxyFn = oldProxy })
+
+	stderr := &strings.Builder{}
+	a := &app{
+		stdin:         strings.NewReader("\n"), // Enter accepts the preselected model
+		stdout:        &strings.Builder{},
+		stderr:        stderr,
+		httpClient:    srv.Client(),
+		geminiAPIBase: srv.URL,
+		runCommand:    func(launchSpec) error { return nil },
+	}
+	if err := a.run(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	out := stderr.String()
+	if strings.Contains(out, "Select a provider") {
+		t.Fatalf("relaunch must not show the provider picker: %q", out)
+	}
+	if !strings.Contains(out, "Select a Gemini model") {
+		t.Fatalf("model picker missing: %q", out)
+	}
+}
+
+func TestGeminiInvalidSavedKeyPromptsForReplacement(t *testing.T) {
+	withTestHome(t)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// First validation (saved key) rejects with Google's 400; later calls succeed.
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"code":400,"message":"API key not valid","status":"INVALID_ARGUMENT"}}`)
+			return
+		}
+		fmt.Fprint(w, `{"models":[]}`)
+	}))
+	defer srv.Close()
+
+	a := &app{
+		stdin:         strings.NewReader("replacement-key\n"),
+		stdout:        &strings.Builder{},
+		stderr:        &strings.Builder{},
+		httpClient:    srv.Client(),
+		geminiAPIBase: srv.URL,
+	}
+	key, err := a.geminiKey(context.Background(), Config{GeminiAPIKey: "stale-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key != "replacement-key" {
+		t.Fatalf("key = %q", key)
+	}
+	if !strings.Contains(a.stderr.(*strings.Builder).String(), "no longer valid") {
+		t.Fatalf("missing stale-key warning: %q", a.stderr.(*strings.Builder).String())
 	}
 }
 

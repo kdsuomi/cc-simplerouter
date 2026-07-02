@@ -33,14 +33,16 @@ func (a *app) pickerTerminals() (in *os.File, out *os.File, ok bool) {
 // pickerState holds the cursor/search state of the interactive picker. It is
 // pure (no I/O) so its navigation logic can be unit tested without a terminal.
 type pickerState struct {
-	all      []Model // ordered full list
-	query    string  // current search box contents
-	filtered []Model // all filtered by query
-	cursor   int     // absolute index into filtered (the highlighted row)
+	all          []Model // ordered full list
+	query        string  // current search box contents
+	filtered     []Model // all filtered by query
+	cursor       int     // absolute index into filtered (the highlighted row)
+	title        string  // picker heading, e.g. "Select a Gemini model"
+	hasProviders bool    // whether the Tab providers view is available
 }
 
 func newPickerState(all []Model) *pickerState {
-	st := &pickerState{all: all}
+	st := &pickerState{all: all, title: "Select a model"}
 	st.refilter()
 	return st
 }
@@ -302,7 +304,7 @@ func (p *providerState) handleInput(buf []byte) pickerAction {
 // pickModelInteractive runs the full-screen arrow-key picker. It returns
 // errPickerFallback if raw mode can't be set up, so the caller degrades to
 // the line-based prompt.
-func (a *app) pickModelInteractive(in, out *os.File, models []Model, endpoints endpointsFunc) (pickResult, error) {
+func (a *app) pickModelInteractive(in, out *os.File, title string, models []Model, endpoints endpointsFunc) (pickResult, error) {
 	// Refuse on terminals too short to hold the block without scroll glitches.
 	if _, h, err := term.GetSize(int(out.Fd())); err == nil && h > 0 && h < pickerPageSize+9 {
 		return pickResult{}, errPickerFallback
@@ -319,6 +321,8 @@ func (a *app) pickModelInteractive(in, out *os.File, models []Model, endpoints e
 
 	style := newTerminalStyle(out)
 	st := newPickerState(models)
+	st.title = title
+	st.hasProviders = endpoints != nil
 	var prov *providerState // non-nil while the provider view is open
 	buf := make([]byte, 32)
 
@@ -435,7 +439,7 @@ func (a *app) renderModelView(st *pickerState, style terminalStyle) (lines []str
 	meta := fmt.Sprintf("%s · page %d/%d", count, st.page()+1, st.totalPages())
 	lines = append(lines, fmt.Sprintf("%s%s   %s",
 		style.paint(clrAccent, "▌ "),
-		style.header("Select an OpenRouter model"),
+		style.header(st.title),
 		style.paint(clrDim, meta),
 	))
 
@@ -481,9 +485,12 @@ func (a *app) renderModelView(st *pickerState, style terminalStyle) (lines []str
 	lines = append(lines, rows...)
 
 	lines = append(lines, "")
-	lines = append(lines, footer(style, [][2]string{
-		{"↑↓", "browse"}, {"←→", "page"}, {"↵", "select"}, {"tab", "providers"}, {"esc", "quit"},
-	}))
+	hints := [][2]string{{"↑↓", "browse"}, {"←→", "page"}, {"↵", "select"}}
+	if st.hasProviders {
+		hints = append(hints, [2]string{"tab", "providers"})
+	}
+	hints = append(hints, [2]string{"esc", "quit"})
+	lines = append(lines, footer(style, hints))
 	return lines, caretRow, caretCol
 }
 

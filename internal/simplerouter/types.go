@@ -1,8 +1,11 @@
 package simplerouter
 
 type Config struct {
+	Provider         string `json:"provider,omitempty"` // "openrouter" | "gemini"; empty = openrouter
 	OpenRouterAPIKey string `json:"openrouter_api_key,omitempty"`
-	LastModel        string `json:"last_model,omitempty"`
+	GeminiAPIKey     string `json:"gemini_api_key,omitempty"`
+	LastModel        string `json:"last_model,omitempty"` // OpenRouter last model (legacy key name)
+	LastGeminiModel  string `json:"last_gemini_model,omitempty"`
 }
 
 type Model struct {
@@ -54,6 +57,17 @@ type openRouterModelsResponse struct {
 
 type openRouterKeyResponse struct {
 	Data map[string]any `json:"data"`
+}
+
+type geminiModelsResponse struct {
+	Models []struct {
+		Name                       string   `json:"name"` // "models/gemini-2.5-flash"
+		DisplayName                string   `json:"displayName"`
+		InputTokenLimit            int      `json:"inputTokenLimit"`
+		OutputTokenLimit           int      `json:"outputTokenLimit"`
+		SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
+	} `json:"models"`
+	NextPageToken string `json:"nextPageToken"`
 }
 
 type launchSpec struct {
