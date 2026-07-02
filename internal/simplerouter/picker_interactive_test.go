@@ -107,28 +107,16 @@ func TestPickerStateDigitsAreSearchNotSelection(t *testing.T) {
 	}
 }
 
-func TestPickerStateStartsAtTopAndQuits(t *testing.T) {
+func TestPickerStateStartsAtTopEscBacksCtrlCQuits(t *testing.T) {
 	st := newPickerState(interactiveTestModels(300))
 	if st.cursor != 0 || st.page() != 0 {
 		t.Fatalf("picker should start at the top: cursor=%d page=%d", st.cursor, st.page())
 	}
-	if act := st.handleInput([]byte{0x1b}); act != pickerQuit {
-		t.Fatalf("bare ESC should quit, got %v", act)
+	if act := st.handleInput([]byte{0x1b}); act != pickerBack {
+		t.Fatalf("bare ESC should go back to the provider picker, got %v", act)
 	}
 	if act := st.handleInput([]byte{0x03}); act != pickerQuit {
 		t.Fatalf("Ctrl+C should quit, got %v", act)
-	}
-}
-
-func TestPickerStateEscGoesBackWhenAvailable(t *testing.T) {
-	st := newPickerState(interactiveTestModels(5))
-	st.canGoBack = true
-	if act := st.handleInput([]byte{0x1b}); act != pickerBack {
-		t.Fatalf("bare ESC with canGoBack = %v, want back", act)
-	}
-	// Ctrl+C always quits outright.
-	if act := st.handleInput([]byte{0x03}); act != pickerQuit {
-		t.Fatalf("Ctrl+C = %v, want quit", act)
 	}
 	// Arrow keys (ESC-prefixed CSI sequences) must not trigger back.
 	if act := st.handleInput([]byte("\x1b[B")); act != pickerNone {

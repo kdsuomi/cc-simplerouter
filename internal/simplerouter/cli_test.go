@@ -459,7 +459,7 @@ func TestPickerRecommendedColumnsAndEnterDefault(t *testing.T) {
 			OutputPrice:         "0.000003",
 			SupportedParameters: []string{"tools", "reasoning"},
 		},
-	}, "", nil, false)
+	}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +492,7 @@ func TestPickerDetailsAndPagination(t *testing.T) {
 		stdin:  strings.NewReader("? 1\nn\n1\n"),
 		stderr: stderr,
 	}
-	res, err := a.pickModel("Select an OpenRouter model", models, "", nil, false)
+	res, err := a.pickModel("Select an OpenRouter model", models, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,26 +808,109 @@ func TestModelPickerBackReturnsToProviderPicker(t *testing.T) {
 	}
 }
 
-func TestModelPickerBackDisabledWithoutProviderStep(t *testing.T) {
-	// Without a provider step to return to, "b" is a search filter, not a
-	// back command, and the footer shows no back hint.
+func TestRelaunchWithSavedProviderCanStillGoBack(t *testing.T) {
+	// Regression: a plain relaunch reuses the saved provider without showing
+	// the provider picker — the model picker must still offer "back" so the
+	// user can switch providers.
+	home := withTestHome(t)
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(Config{
+		Provider:         providerGemini,
+		OpenRouterAPIKey: "sk-or-test",
+		GeminiAPIKey:     "gm-test",
+		LastGeminiModel:  "gemini-2.5-flash",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	orSrv := openRouterTestServer(t, http.StatusOK, []Model{{ID: "z-ai/glm-5.2", Name: "GLM 5.2", ContextLength: 202752}})
+	defer orSrv.Close()
+	gmSrv := geminiTestServer(t, http.StatusOK)
+	defer gmSrv.Close()
+
+	var spec launchSpec
 	stderr := &strings.Builder{}
 	a := &app{
-		stdin:  strings.NewReader("b\n1\n"),
-		stderr: stderr,
+		// No flags: Gemini model picker opens directly -> b (back) ->
+		// provider picker -> 1 (OpenRouter) -> Enter (first model).
+		stdin:         strings.NewReader("b\n1\n\n"),
+		stdout:        &strings.Builder{},
+		stderr:        stderr,
+		httpClient:    orSrv.Client(),
+		apiBase:       orSrv.URL,
+		geminiAPIBase: gmSrv.URL,
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
 	}
-	res, err := a.pickModel("Select an OpenRouter model", []Model{
-		{ID: "vendor/bravo", Name: "Bravo"},
-		{ID: "vendor/other", Name: "Other"},
-	}, "", nil, false)
+	if err := a.run(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	out := stderr.String()
+	for _, want := range []string{"Select a Gemini model", "b back", "Select a provider", "Select an OpenRouter model"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stderr missing %q: %q", want, out)
+		}
+	}
+	if !slices.Equal(spec.Args, []string{"--model", "z-ai/glm-5.2"}) {
+		t.Fatalf("Args = %v", spec.Args)
+	}
+	cfg, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Model.ID != "vendor/bravo" {
-		t.Fatalf("selected = %s ('b' should filter to bravo)", res.Model.ID)
+	if cfg.Provider != providerOpenRouter || cfg.LastModel != "z-ai/glm-5.2" || cfg.LastGeminiModel != "gemini-2.5-flash" {
+		t.Fatalf("config = %+v", cfg)
 	}
-	if strings.Contains(stderr.String(), "b back") {
-		t.Fatal("back hint shown when back is unavailable")
+}
+
+func TestModelPickerBackFromExplicitProviderFlag(t *testing.T) {
+	// Back is available even when the provider was pinned by --provider: the
+	// user is at an interactive picker and may change their mind.
+	home := withTestHome(t)
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(Config{OpenRouterAPIKey: "sk-or-test", GeminiAPIKey: "gm-test"}); err != nil {
+		t.Fatal(err)
+	}
+	orSrv := openRouterTestServer(t, http.StatusOK, []Model{{ID: "z-ai/glm-5.2", Name: "GLM 5.2", ContextLength: 202752}})
+	defer orSrv.Close()
+	gmSrv := geminiTestServer(t, http.StatusOK)
+	defer gmSrv.Close()
+
+	stderr := &strings.Builder{}
+	a := &app{
+		// --provider gemini -> model picker: b (back) -> provider picker: 1
+		// (OpenRouter) -> Enter (first model).
+		stdin:         strings.NewReader("b\n1\n\n"),
+		stdout:        &strings.Builder{},
+		stderr:        stderr,
+		httpClient:    orSrv.Client(),
+		apiBase:       orSrv.URL,
+		geminiAPIBase: gmSrv.URL,
+		runCommand:    func(launchSpec) error { return nil },
+	}
+	if err := a.run(context.Background(), []string{"--provider", "gemini"}); err != nil {
+		t.Fatal(err)
+	}
+	out := stderr.String()
+	for _, want := range []string{"Select a Gemini model", "Select a provider", "Select an OpenRouter model"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stderr missing %q: %q", want, out)
+		}
 	}
 }
 

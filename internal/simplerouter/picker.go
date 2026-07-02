@@ -117,10 +117,9 @@ type pickResult struct {
 	ProviderName string
 }
 
-// pickModel shows the model picker. allowBack enables a "back" action (ESC /
-// "b") that returns errPickerBack so the caller can re-show the provider
-// picker; pass false when there is no provider step to go back to.
-func (a *app) pickModel(title string, models []Model, current string, endpoints endpointsFunc, allowBack bool) (pickResult, error) {
+// pickModel shows the model picker. ESC (interactive) or "b"/"back" (line
+// mode) returns errPickerBack so the caller can re-show the provider picker.
+func (a *app) pickModel(title string, models []Model, current string, endpoints endpointsFunc) (pickResult, error) {
 	if len(models) == 0 {
 		return pickResult{}, errors.New("no models returned")
 	}
@@ -130,16 +129,16 @@ func (a *app) pickModel(title string, models []Model, current string, endpoints 
 	// Use the full-screen arrow-key picker when both ends are real terminals;
 	// otherwise fall back to the line-based prompt (also used under tests/pipes).
 	if in, out, ok := a.pickerTerminals(); ok {
-		res, err := a.pickModelInteractive(in, out, title, models, endpoints, allowBack)
+		res, err := a.pickModelInteractive(in, out, title, models, endpoints)
 		if !errors.Is(err, errPickerFallback) {
 			return res, err
 		}
 	}
-	model, err := a.pickModelLineMode(title, models, current, allowBack)
+	model, err := a.pickModelLineMode(title, models, current)
 	return pickResult{Model: model}, err
 }
 
-func (a *app) pickModelLineMode(title string, models []Model, current string, allowBack bool) (Model, error) {
+func (a *app) pickModelLineMode(title string, models []Model, current string) (Model, error) {
 	filter := initialModelFilter(models, current)
 	style := newTerminalStyle(a.stderr)
 	page := 0
@@ -162,7 +161,7 @@ func (a *app) pickModelLineMode(title string, models []Model, current string, al
 		}
 
 		visible := visibleModels(filtered, page)
-		a.printModelPage(title, filtered, visible, filter, page, totalPages, style, allowBack)
+		a.printModelPage(title, filtered, visible, filter, page, totalPages, style)
 		line, err := a.readLine()
 		if err != nil && !errors.Is(err, io.EOF) {
 			return Model{}, err
@@ -174,11 +173,9 @@ func (a *app) pickModelLineMode(title string, models []Model, current string, al
 			return visible[0], nil
 		}
 
-		if allowBack && (strings.EqualFold(line, "b") || strings.EqualFold(line, "back")) {
-			return Model{}, errPickerBack
-		}
-
 		switch strings.ToLower(line) {
+		case "b", "back":
+			return Model{}, errPickerBack
 		case "n", "next":
 			if page+1 < totalPages {
 				page++
@@ -253,7 +250,7 @@ const (
 	wPrice  = 14
 )
 
-func (a *app) printModelPage(title string, filtered, visible []Model, filter string, page, totalPages int, style terminalStyle, allowBack bool) {
+func (a *app) printModelPage(title string, filtered, visible []Model, filter string, page, totalPages int, style terminalStyle) {
 	fmt.Fprintln(a.stderr)
 
 	// Title bar: accent ruler glyph, bold title, dim meta.
@@ -297,7 +294,7 @@ func (a *app) printModelPage(title string, filtered, visible []Model, filter str
 	}
 
 	fmt.Fprintln(a.stderr)
-	a.printHint(style, allowBack)
+	a.printHint(style)
 	fmt.Fprint(a.stderr, style.paint(clrAccentBold, "  ❯ "))
 }
 
@@ -378,16 +375,14 @@ func parsePricePerMillion(s string) float64 {
 }
 
 // printHint draws the footer legend of keyboard actions.
-func (a *app) printHint(style terminalStyle, allowBack bool) {
+func (a *app) printHint(style terminalStyle) {
 	hints := []struct{ key, desc string }{
 		{"↵", "select"},
 		{"1-9", "pick"},
 		{"type", "search"},
 		{"n/p", "page"},
 		{"? N", "details"},
-	}
-	if allowBack {
-		hints = append(hints, struct{ key, desc string }{"b", "back"})
+		{"b", "back"},
 	}
 	parts := make([]string, 0, len(hints))
 	for _, h := range hints {

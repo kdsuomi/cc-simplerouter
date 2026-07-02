@@ -17,8 +17,7 @@ var errPickerFallback = errors.New("picker: interactive mode unavailable")
 var errPickerCancelled = errors.New("model selection cancelled")
 
 // errPickerBack signals that the user backed out of the model picker to
-// return to the provider picker. Only possible when the model picker was
-// reached through the provider picker (allowBack).
+// return to the provider picker.
 var errPickerBack = errors.New("picker: back to provider selection")
 
 // pickerTerminals reports whether both stdin and stderr are real terminals,
@@ -44,7 +43,6 @@ type pickerState struct {
 	cursor       int     // absolute index into filtered (the highlighted row)
 	title        string  // picker heading, e.g. "Select a Gemini model"
 	hasProviders bool    // whether the Tab providers view is available
-	canGoBack    bool    // ESC returns to the provider picker instead of quitting
 }
 
 func newPickerState(all []Model) *pickerState {
@@ -172,12 +170,9 @@ func (st *pickerState) handleInput(buf []byte) pickerAction {
 				st.applyCSI(string(buf[i+2:j]), buf[j])
 				i = j
 			} else if i+1 >= len(buf) {
-				// A lone ESC backs out to the provider picker when there is
-				// one to go back to; otherwise it quits.
-				if st.canGoBack {
-					return pickerBack
-				}
-				return pickerQuit
+				// A lone ESC always backs out to the provider picker;
+				// Ctrl+C quits.
+				return pickerBack
 			}
 			// ESC followed by some other byte (Alt-combo): ignore.
 		case b == '\r' || b == '\n':
@@ -315,7 +310,7 @@ func (p *providerState) handleInput(buf []byte) pickerAction {
 // pickModelInteractive runs the full-screen arrow-key picker. It returns
 // errPickerFallback if raw mode can't be set up, so the caller degrades to
 // the line-based prompt.
-func (a *app) pickModelInteractive(in, out *os.File, title string, models []Model, endpoints endpointsFunc, allowBack bool) (pickResult, error) {
+func (a *app) pickModelInteractive(in, out *os.File, title string, models []Model, endpoints endpointsFunc) (pickResult, error) {
 	// Refuse on terminals too short to hold the block without scroll glitches.
 	if _, h, err := term.GetSize(int(out.Fd())); err == nil && h > 0 && h < pickerPageSize+9 {
 		return pickResult{}, errPickerFallback
@@ -334,7 +329,6 @@ func (a *app) pickModelInteractive(in, out *os.File, title string, models []Mode
 	st := newPickerState(models)
 	st.title = title
 	st.hasProviders = endpoints != nil
-	st.canGoBack = allowBack
 	var prov *providerState // non-nil while the provider view is open
 	buf := make([]byte, 32)
 
@@ -504,11 +498,7 @@ func (a *app) renderModelView(st *pickerState, style terminalStyle) (lines []str
 	if st.hasProviders {
 		hints = append(hints, [2]string{"tab", "providers"})
 	}
-	if st.canGoBack {
-		hints = append(hints, [2]string{"esc", "back"}, [2]string{"^C", "quit"})
-	} else {
-		hints = append(hints, [2]string{"esc", "quit"})
-	}
+	hints = append(hints, [2]string{"esc", "back"}, [2]string{"^C", "quit"})
 	lines = append(lines, footer(style, hints))
 	return lines, caretRow, caretCol
 }
