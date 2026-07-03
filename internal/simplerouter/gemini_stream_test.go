@@ -239,6 +239,23 @@ func TestReadGeminiSSEOversizedLine(t *testing.T) {
 	}
 }
 
+func TestReadGeminiSSEMalformedPayload(t *testing.T) {
+	transcript := geminiChunk(`{"text":"ok"}`, "") +
+		"data: <html>not json</html>\n\n" +
+		geminiChunk(`{"text":"never reached"}`, "")
+	count := 0
+	err := readGeminiSSE(strings.NewReader(transcript), func(*geminiResponse) error {
+		count++
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "malformed gemini SSE payload") {
+		t.Fatalf("err = %v, want malformed payload error", err)
+	}
+	if count != 1 {
+		t.Errorf("emit count = %d, want 1 (only the chunk before the bad one)", count)
+	}
+}
+
 func TestReadGeminiSSEFinalEventWithoutTrailingBlank(t *testing.T) {
 	// Some servers end the body right after the last data line.
 	transcript := `data: {"candidates":[{"content":{"parts":[{"text":"end"}]},"finishReason":"STOP"}]}`

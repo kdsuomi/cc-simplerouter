@@ -141,6 +141,131 @@ func TestGeminiProxyUpstreamError(t *testing.T) {
 	}
 }
 
+func TestGeminiProxyStreamingMalformedUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}]}`+"\n\n")
+		io.WriteString(w, "data: <html>gateway timeout</html>\n\n")
+	}))
+	defer upstream.Close()
+
+	baseURL, stop, err := startGeminiProxy(upstream.URL, "gemini-2.5-flash", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	resp, err := http.Post(baseURL+"/v1/messages", "application/json", strings.NewReader(
+		`{"model":"gemini-2.5-flash","max_tokens":8,"stream":true,"messages":[{"role":"user","content":"x"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	out, _ := io.ReadAll(resp.Body)
+	events := parseSSE(t, string(out))
+	last := events[len(events)-1]
+	if last.Name != "error" {
+		t.Fatalf("last event = %q, want error (not a fake clean end_turn)", last.Name)
+	}
+	errObj := last.Data["error"].(map[string]any)
+	if errObj["type"] != "api_error" || !strings.Contains(errObj["message"].(string), "malformed gemini SSE payload") {
+		t.Errorf("error = %+v", errObj)
+	}
+	for _, name := range eventNames(events) {
+		if name == "message_stop" {
+			t.Error("message_stop must not follow a malformed stream")
+		}
+	}
+}
+
+func TestGeminiProxyNonStreamingErrorOn200(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"error":{"code":429,"message":"slow down","status":"RESOURCE_EXHAUSTED"}}`)
+	}))
+	defer upstream.Close()
+
+	baseURL, stop, err := startGeminiProxy(upstream.URL, "gemini-2.5-flash", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	resp, err := http.Post(baseURL+"/v1/messages", "application/json", strings.NewReader(
+		`{"model":"gemini-2.5-flash","max_tokens":8,"messages":[{"role":"user","content":"x"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want 429 despite upstream HTTP 200", resp.StatusCode)
+	}
+	var errBody map[string]any
+	json.NewDecoder(resp.Body).Decode(&errBody)
+	errObj := errBody["error"].(map[string]any)
+	if errObj["type"] != "rate_limit_error" || errObj["message"] != "slow down" {
+		t.Errorf("error body = %+v", errBody)
+	}
+}
+
+func TestGeminiProxyUpstreamErrorTruncatesNonJSON(t *testing.T) {
+	page := "<html><body>" + strings.Repeat("x", 4096) + "</body></html>"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		io.WriteString(w, page)
+	}))
+	defer upstream.Close()
+
+	baseURL, stop, err := startGeminiProxy(upstream.URL, "gemini-2.5-flash", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	resp, err := http.Post(baseURL+"/v1/messages", "application/json", strings.NewReader(
+		`{"model":"gemini-2.5-flash","max_tokens":8,"messages":[{"role":"user","content":"x"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var errBody map[string]any
+	json.NewDecoder(resp.Body).Decode(&errBody)
+	msg := errBody["error"].(map[string]any)["message"].(string)
+	if !strings.HasSuffix(msg, "…") || len(msg) > 600 {
+		t.Errorf("message not truncated: len=%d suffix=%q", len(msg), msg[len(msg)-10:])
+	}
+	if !strings.HasPrefix(msg, "<html>") {
+		t.Errorf("truncation should keep the head of the body, got %q", msg[:20])
+	}
+}
+
+func TestAnthropicErrorForStatus(t *testing.T) {
+	cases := []struct {
+		code       int
+		wantStatus int
+		wantType   string
+	}{
+		{400, 400, "invalid_request_error"},
+		{401, 401, "authentication_error"},
+		{403, 403, "permission_error"},
+		{404, 404, "not_found_error"},
+		{429, 429, "rate_limit_error"},
+		{503, 529, "overloaded_error"},
+		{529, 529, "overloaded_error"},
+		{500, 500, "api_error"},
+		{502, 500, "api_error"},
+	}
+	for _, tc := range cases {
+		status, errType := anthropicErrorForStatus(tc.code)
+		if status != tc.wantStatus || errType != tc.wantType {
+			t.Errorf("anthropicErrorForStatus(%d) = (%d, %q), want (%d, %q)",
+				tc.code, status, errType, tc.wantStatus, tc.wantType)
+		}
+	}
+}
+
 func TestGeminiProxyCountTokens(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, ":countTokens") {

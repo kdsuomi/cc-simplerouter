@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 )
@@ -66,25 +67,25 @@ func (s *signatureStore) lookup(id string) (toolCallRecord, bool) {
 
 func newToolUseID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "toolu_fallback"
-	}
+	rand.Read(b[:]) // never fails as of Go 1.24
 	return "toolu_" + hex.EncodeToString(b[:])
 }
 
 func newMessageID() string {
 	var b [12]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "msg_fallback"
-	}
+	rand.Read(b[:])
 	return "msg_" + hex.EncodeToString(b[:])
 }
 
 // anthropicToGemini translates an Anthropic Messages request into a Gemini
 // generateContent request body.
 func anthropicToGemini(req *anthropicRequest, sigs *signatureStore) (*geminiRequest, error) {
+	contents, err := convertMessages(req.Messages, sigs)
+	if err != nil {
+		return nil, err
+	}
 	out := &geminiRequest{
-		Contents:          convertMessages(req.Messages, sigs),
+		Contents:          contents,
 		SystemInstruction: systemInstructionFromRaw(req.System),
 		Tools:             convertTools(req.Tools),
 		ToolConfig:        convertToolChoice(req.ToolChoice),
@@ -140,16 +141,16 @@ func blocksFromContent(raw json.RawMessage) ([]anthropicBlock, error) {
 // convertMessages maps Anthropic messages to Gemini contents, merging
 // consecutive same-role turns (Gemini expects alternating history) and
 // dropping turns that translate to zero parts.
-func convertMessages(msgs []anthropicMessage, sigs *signatureStore) []geminiContent {
+func convertMessages(msgs []anthropicMessage, sigs *signatureStore) ([]geminiContent, error) {
 	var out []geminiContent
-	for _, msg := range msgs {
+	for i, msg := range msgs {
 		role := "user"
 		if msg.Role == "assistant" {
 			role = "model"
 		}
 		blocks, err := blocksFromContent(msg.Content)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("messages[%d]: unparseable content: %w", i, err)
 		}
 		var parts []geminiPart
 		for _, b := range blocks {
@@ -164,7 +165,7 @@ func convertMessages(msgs []anthropicMessage, sigs *signatureStore) []geminiCont
 		}
 		out = append(out, geminiContent{Role: role, Parts: parts})
 	}
-	return out
+	return out, nil
 }
 
 func convertBlock(b anthropicBlock, sigs *signatureStore) []geminiPart {
@@ -198,6 +199,9 @@ func convertBlock(b anthropicBlock, sigs *signatureStore) []geminiPart {
 			part.ThoughtSignature = rec.signature
 		} else {
 			part.ThoughtSignature = geminiDummySignature
+			// Seed the store from replayed history (e.g. session resumed after
+			// a proxy restart) so the matching tool_result can recover the name.
+			sigs.record(b.ID, b.Name, geminiDummySignature)
 		}
 		return []geminiPart{part}
 	case "tool_result":

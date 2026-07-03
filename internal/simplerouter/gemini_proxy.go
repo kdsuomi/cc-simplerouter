@@ -3,6 +3,7 @@ package simplerouter
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -133,8 +134,15 @@ func (p *geminiProxy) handleMessages(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
 		tr := newGeminiStreamTranslator(w, flusher, req.Model, p.sigs, p.newID)
-		if err := readGeminiSSE(resp.Body, tr.onChunk); err == nil {
+		switch err := readGeminiSSE(resp.Body, tr.onChunk); {
+		case err == nil:
 			tr.finishStream()
+		case errors.Is(err, errStreamAborted):
+			// upstream error chunk already translated into an SSE error event
+		default:
+			// malformed payload or dropped connection: an explicit error event
+			// beats a fake clean end_turn built from partial content
+			tr.emitError(&geminiError{Code: http.StatusBadGateway, Message: err.Error()})
 		}
 		return
 	}
@@ -142,6 +150,11 @@ func (p *geminiProxy) handleMessages(w http.ResponseWriter, r *http.Request) {
 	var gemResp geminiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&gemResp); err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "decode gemini response: "+err.Error())
+		return
+	}
+	if gemResp.Error != nil {
+		status, errType := anthropicErrorForStatus(gemResp.Error.Code)
+		writeAnthropicError(w, status, errType, gemResp.Error.Message)
 		return
 	}
 	writeJSON(w, http.StatusOK, geminiToAnthropic(&gemResp, req.Model, p.sigs, p.newID))
@@ -201,6 +214,10 @@ func (p *geminiProxy) relayUpstreamError(w http.ResponseWriter, resp *http.Respo
 	}
 	if err := json.Unmarshal(body, &wrapped); err == nil && wrapped.Error != nil {
 		message = wrapped.Error.Message
+	} else if len(message) > 512 {
+		// non-Gemini body (e.g. an intermediary's HTML error page): keep enough
+		// to diagnose, not the whole page
+		message = message[:512] + "…"
 	}
 	if resp.StatusCode == http.StatusBadRequest && os.Getenv("SIMPLEROUTER_DEBUG") != "" {
 		fmt.Fprintf(os.Stderr, "simplerouter: gemini 400: %s\nrequest body: %s\n", message, sentPayload)

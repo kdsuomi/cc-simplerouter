@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -27,7 +28,7 @@ func readGeminiSSE(body io.Reader, emit func(*geminiResponse) error) error {
 		data.Reset()
 		var resp geminiResponse
 		if err := json.Unmarshal([]byte(payload), &resp); err != nil {
-			return nil // tolerate malformed keepalive/comment payloads
+			return fmt.Errorf("malformed gemini SSE payload: %w", err)
 		}
 		return emit(&resp)
 	}

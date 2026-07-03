@@ -204,6 +204,39 @@ func TestAnthropicToGeminiToolResultImagesAndUnknownID(t *testing.T) {
 	}
 }
 
+func TestAnthropicToGeminiToolResultNameSeededFromHistory(t *testing.T) {
+	// Fresh store (session resumed after a proxy restart): replaying the
+	// tool_use must seed the store so the tool_result recovers the real
+	// function name instead of sending the toolu_ id as the name.
+	req := mustAnthropicRequest(t, `{"model":"m","max_tokens":1,"messages":[
+		{"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_resumed", "name": "get_weather", "input": {"city":"London"}}]},
+		{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_resumed", "content": "22C"}]}
+	]}`)
+	out, err := anthropicToGemini(req, newSignatureStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc := out.Contents[0].Parts[0]
+	if fc.FunctionCall == nil || fc.ThoughtSignature != geminiDummySignature {
+		t.Errorf("replayed functionCall = %+v, want dummy signature", fc)
+	}
+	fr := out.Contents[1].Parts[0]
+	if fr.FunctionResponse == nil || fr.FunctionResponse.Name != "get_weather" {
+		t.Errorf("functionResponse = %+v, want name seeded from tool_use history", fr)
+	}
+}
+
+func TestAnthropicToGeminiUnparseableContent(t *testing.T) {
+	req := mustAnthropicRequest(t, `{"model":"m","max_tokens":1,"messages":[
+		{"role": "user", "content": "ok"},
+		{"role": "user", "content": 42}
+	]}`)
+	_, err := anthropicToGemini(req, newSignatureStore())
+	if err == nil || !strings.Contains(err.Error(), "messages[1]") {
+		t.Errorf("err = %v, want unparseable-content error naming the message", err)
+	}
+}
+
 func TestAnthropicToGeminiToolsAndChoice(t *testing.T) {
 	req := mustAnthropicRequest(t, `{"model":"m","max_tokens":1,"messages":[{"role":"user","content":"x"}],
 		"tools": [
