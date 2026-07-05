@@ -137,6 +137,7 @@ type anthropicBlock struct {
 	Text      string                `json:"text,omitempty"`
 	Thinking  string                `json:"thinking,omitempty"`
 	Signature string                `json:"signature,omitempty"`
+	Data      string                `json:"data,omitempty"`        // redacted_thinking
 	ID        string                `json:"id,omitempty"`          // tool_use
 	Name      string                `json:"name,omitempty"`        // tool_use
 	Input     json.RawMessage       `json:"input,omitempty"`       // tool_use args, opaque

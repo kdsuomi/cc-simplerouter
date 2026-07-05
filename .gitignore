@@ -1,6 +1,7 @@
 bin/
 dist/
 .gocache/
+.claude/
 
 ollama-main/
 ollama-js-main/

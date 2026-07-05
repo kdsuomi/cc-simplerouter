@@ -34,6 +34,10 @@ func findClaude() (string, error) {
 }
 
 func buildClaudeEnv(base []string, baseURL, key, model string, contextLength int, disableThinking bool) []string {
+	return buildClaudeEnvWithEffort(base, baseURL, key, model, contextLength, disableThinking, "")
+}
+
+func buildClaudeEnvWithEffort(base []string, baseURL, key, model string, contextLength int, disableThinking bool, effortLevel string) []string {
 	claudeModel := claudeCodeModel(model, contextLength)
 	env := envWithout(base,
 		"ANTHROPIC_BASE_URL",
@@ -48,6 +52,7 @@ func buildClaudeEnv(base []string, baseURL, key, model string, contextLength int
 		"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
 		"CLAUDE_CODE_DISABLE_THINKING",
 		"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+		"CLAUDE_CODE_EFFORT_LEVEL",
 		"MAX_THINKING_TOKENS",
 		"ENABLE_CLAUDEAI_MCP_SERVERS",
 	)
@@ -74,6 +79,9 @@ func buildClaudeEnv(base []string, baseURL, key, model string, contextLength int
 	)
 	if contextLength > 0 {
 		env = append(env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW="+strconv.Itoa(contextLength))
+	}
+	if effort := strings.TrimSpace(effortLevel); effort != "" && !disableThinking {
+		env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+effort)
 	}
 	if disableThinking {
 		env = append(env,

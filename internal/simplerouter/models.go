@@ -26,6 +26,16 @@ var recommendedGeminiModelIDs = []string{
 	"gemini-2.5-flash",
 }
 
+var recommendedFirstClassModelIDs = []string{
+	"gpt-5.5",
+	"gpt-5.4",
+	"gpt-5.4-mini",
+	"deepseek-v4-flash",
+	"deepseek-v4-pro",
+	"glm-5.2",
+	"glm-5",
+}
+
 var testedModelIDs = map[string]bool{
 	"z-ai/glm-5.2":                 true,
 	"qwen/qwen3-coder":             true,
@@ -36,6 +46,33 @@ var testedModelIDs = map[string]bool{
 	"deepseek/deepseek-v4-pro":     true,
 	"moonshotai/kimi-k2.6":         true,
 	"minimax/minimax-m3":           true,
+	"deepseek-v4-flash":            true,
+	"deepseek-v4-pro":              true,
+	"glm-5.2":                      true,
+	"glm-5":                        true,
+}
+
+func curatedProviderModels(provider string) []Model {
+	var models []Model
+	switch provider {
+	case providerOpenAI:
+		models = []Model{
+			{ID: "gpt-5.5", Name: "GPT-5.5", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
+			{ID: "gpt-5.4", Name: "GPT-5.4", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
+			{ID: "gpt-5.4-mini", Name: "GPT-5.4 mini", ContextLength: 400_000, SupportedParameters: []string{"tools", "reasoning"}},
+		}
+	case providerDeepSeek:
+		models = []Model{
+			{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
+			{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
+		}
+	case providerZAI:
+		models = []Model{
+			{ID: "glm-5.2", Name: "GLM-5.2", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning", "reasoning_effort"}},
+			{ID: "glm-5", Name: "GLM-5", ContextLength: 200_000, SupportedParameters: []string{"tools", "reasoning"}},
+		}
+	}
+	return append([]Model(nil), models...)
 }
 
 type modelResolution struct {
@@ -133,11 +170,17 @@ func recommendedRank(modelID string) int {
 			return len(recommendedModelIDs) + i
 		}
 	}
-	return len(recommendedModelIDs) + len(recommendedGeminiModelIDs)
+	offset := len(recommendedModelIDs) + len(recommendedGeminiModelIDs)
+	for i, id := range recommendedFirstClassModelIDs {
+		if normalizeModelText(id) == needle {
+			return offset + i
+		}
+	}
+	return offset + len(recommendedFirstClassModelIDs)
 }
 
 func isRecommendedModel(modelID string) bool {
-	return recommendedRank(modelID) < len(recommendedModelIDs)+len(recommendedGeminiModelIDs)
+	return recommendedRank(modelID) < len(recommendedModelIDs)+len(recommendedGeminiModelIDs)+len(recommendedFirstClassModelIDs)
 }
 
 func isTestedModel(modelID string) bool {

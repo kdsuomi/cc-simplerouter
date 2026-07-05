@@ -155,7 +155,7 @@ func TestArgParsingAndLaunchSpec(t *testing.T) {
 			return nil
 		},
 	}
-	if err := a.run(context.Background(), []string{"--model", "glm-5.2", work, "--", "--debug"}); err != nil {
+	if err := a.run(context.Background(), []string{"--model", "z-ai/glm-5.2", work, "--", "--debug"}); err != nil {
 		t.Fatal(err)
 	}
 	if spec.Dir != work {
@@ -298,6 +298,7 @@ func TestBuildClaudeEnvRemovesExistingValues(t *testing.T) {
 		"ANTHROPIC_API_KEY=old",
 		"ANTHROPIC_AUTH_TOKEN=old",
 		"CLAUDE_CODE_DISABLE_THINKING=old",
+		"CLAUDE_CODE_EFFORT_LEVEL=old",
 		"ENABLE_CLAUDEAI_MCP_SERVERS=true",
 	}, "", "new-key", "z-ai/glm-5.2", 123, false)
 	m := envMap(env)
@@ -324,6 +325,9 @@ func TestBuildClaudeEnvRemovesExistingValues(t *testing.T) {
 	}
 	if _, ok := m["CLAUDE_CODE_DISABLE_THINKING"]; ok {
 		t.Fatalf("thinking should not be disabled by default: %+v", m)
+	}
+	if _, ok := m["CLAUDE_CODE_EFFORT_LEVEL"]; ok {
+		t.Fatalf("effort level should not leak from parent env: %+v", m)
 	}
 }
 
@@ -540,11 +544,17 @@ func TestConfigBackCompatDefaultsToOpenRouter(t *testing.T) {
 func TestResetSavedKeyClearsBothKeys(t *testing.T) {
 	withTestHome(t)
 	cfg := Config{
-		Provider:         providerGemini,
-		OpenRouterAPIKey: "sk-or-test",
-		GeminiAPIKey:     "gm-test",
-		LastModel:        "z-ai/glm-5.2",
-		LastGeminiModel:  "gemini-2.5-flash",
+		Provider:          providerGemini,
+		OpenRouterAPIKey:  "sk-or-test",
+		GeminiAPIKey:      "gm-test",
+		OpenAIAPIKey:      "sk-openai",
+		DeepSeekAPIKey:    "sk-deepseek",
+		ZAIAPIKey:         "sk-zai",
+		LastModel:         "z-ai/glm-5.2",
+		LastGeminiModel:   "gemini-2.5-flash",
+		LastOpenAIModel:   "gpt-5.5",
+		LastDeepSeekModel: "deepseek-v4-flash",
+		LastZAIModel:      "glm-5.2",
 	}
 	if err := saveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -556,10 +566,10 @@ func TestResetSavedKeyClearsBothKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.OpenRouterAPIKey != "" || got.GeminiAPIKey != "" {
+	if got.OpenRouterAPIKey != "" || got.GeminiAPIKey != "" || got.OpenAIAPIKey != "" || got.DeepSeekAPIKey != "" || got.ZAIAPIKey != "" {
 		t.Fatalf("keys not cleared: %+v", got)
 	}
-	if got.Provider != providerGemini || got.LastModel != cfg.LastModel || got.LastGeminiModel != cfg.LastGeminiModel {
+	if got.Provider != providerGemini || got.LastModel != cfg.LastModel || got.LastGeminiModel != cfg.LastGeminiModel || got.LastOpenAIModel != cfg.LastOpenAIModel || got.LastDeepSeekModel != cfg.LastDeepSeekModel || got.LastZAIModel != cfg.LastZAIModel {
 		t.Fatalf("non-key fields changed: %+v", got)
 	}
 }
@@ -570,7 +580,7 @@ func TestInferProviderFromModel(t *testing.T) {
 		"gemini-2.5-flash":      providerGemini,
 		"models/gemini-2.5-pro": providerGemini,
 		"models/other-model":    providerGemini,
-		"glm-5.2":               "",
+		"glm-5.2":               providerZAI,
 		"":                      "",
 	}
 	for input, want := range cases {
@@ -672,7 +682,161 @@ func TestGeminiModelFlagLaunchesThroughProxy(t *testing.T) {
 	}
 }
 
-func TestGeminiRelaunchSkipsProviderPicker(t *testing.T) {
+func TestDeepSeekLaunchUsesClaudeCodeEnv(t *testing.T) {
+	home := withTestHome(t)
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(Config{Provider: providerDeepSeek, DeepSeekAPIKey: "ds-test", LastDeepSeekModel: "deepseek-v4-flash"}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer ds-test" {
+			t.Fatalf("auth = %q", r.Header.Get("Authorization"))
+		}
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+
+	var spec launchSpec
+	stderr := &strings.Builder{}
+	a := &app{
+		stdin:           strings.NewReader("\n\n"),
+		stdout:          &strings.Builder{},
+		stderr:          stderr,
+		httpClient:      srv.Client(),
+		deepSeekAPIBase: srv.URL,
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
+	}
+	if err := a.run(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	env := envMap(spec.Env)
+	if env["ANTHROPIC_BASE_URL"] != srv.URL+"/anthropic" {
+		t.Fatalf("base url = %q", env["ANTHROPIC_BASE_URL"])
+	}
+	if env["ANTHROPIC_AUTH_TOKEN"] != "ds-test" || env["ANTHROPIC_API_KEY"] != "" {
+		t.Fatalf("auth env = %+v", env)
+	}
+	if env["CLAUDE_CODE_EFFORT_LEVEL"] != "max" {
+		t.Fatalf("effort env = %q, want max", env["CLAUDE_CODE_EFFORT_LEVEL"])
+	}
+	if !strings.Contains(stderr.String(), "provider DeepSeek") {
+		t.Fatalf("launch summary missing provider label: %q", stderr.String())
+	}
+}
+
+func TestOpenAILaunchesThroughProxy(t *testing.T) {
+	home := withTestHome(t)
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(Config{Provider: providerOpenAI, OpenAIAPIKey: "oa-test", LastOpenAIModel: "gpt-5.5"}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+
+	var proxyBase, proxyModel string
+	oldProxy := startOpenAIProxyFn
+	startOpenAIProxyFn = func(upstreamBase, model string, _ *http.Client) (string, func(), error) {
+		proxyBase, proxyModel = upstreamBase, model
+		return "http://127.0.0.1:9191", func() {}, nil
+	}
+	t.Cleanup(func() { startOpenAIProxyFn = oldProxy })
+
+	var spec launchSpec
+	a := &app{
+		stdin:         strings.NewReader("\n\n"),
+		stdout:        &strings.Builder{},
+		stderr:        &strings.Builder{},
+		httpClient:    srv.Client(),
+		openAIAPIBase: srv.URL,
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
+	}
+	if err := a.run(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if proxyBase != srv.URL || proxyModel != "gpt-5.5" {
+		t.Fatalf("proxy got (%q, %q)", proxyBase, proxyModel)
+	}
+	env := envMap(spec.Env)
+	if env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:9191" || env["ANTHROPIC_AUTH_TOKEN"] != "oa-test" {
+		t.Fatalf("env = %+v", env)
+	}
+}
+
+func TestZAILaunchesThroughProxy(t *testing.T) {
+	home := withTestHome(t)
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(Config{Provider: providerZAI, ZAIAPIKey: "zai-test", LastZAIModel: "glm-5.2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var proxyBase, proxyModel string
+	var proxyDisableThinking bool
+	oldProxy := startZAIProxyFn
+	startZAIProxyFn = func(upstreamBase, model string, _ *http.Client, disableThinking bool) (string, func(), error) {
+		proxyBase, proxyModel, proxyDisableThinking = upstreamBase, model, disableThinking
+		return "http://127.0.0.1:9292", func() {}, nil
+	}
+	t.Cleanup(func() { startZAIProxyFn = oldProxy })
+
+	var spec launchSpec
+	a := &app{
+		stdin:  strings.NewReader("\n\n"),
+		stdout: &strings.Builder{},
+		stderr: &strings.Builder{},
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
+	}
+	if err := a.run(context.Background(), []string{"--disable-thinking"}); err != nil {
+		t.Fatal(err)
+	}
+	if proxyBase != defaultZAIAPIBase || proxyModel != "glm-5.2" || !proxyDisableThinking {
+		t.Fatalf("proxy got (%q, %q, %v)", proxyBase, proxyModel, proxyDisableThinking)
+	}
+	env := envMap(spec.Env)
+	if env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:9292" || env["ANTHROPIC_AUTH_TOKEN"] != "zai-test" {
+		t.Fatalf("env = %+v", env)
+	}
+}
+
+func TestBareRelaunchShowsProviderPicker(t *testing.T) {
 	home := withTestHome(t)
 	binDir := filepath.Join(home, ".local", "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -695,7 +859,7 @@ func TestGeminiRelaunchSkipsProviderPicker(t *testing.T) {
 
 	stderr := &strings.Builder{}
 	a := &app{
-		stdin:         strings.NewReader("\n"), // Enter accepts the preselected model
+		stdin:         strings.NewReader("\n\n"), // provider Enter, model Enter
 		stdout:        &strings.Builder{},
 		stderr:        stderr,
 		httpClient:    srv.Client(),
@@ -706,11 +870,56 @@ func TestGeminiRelaunchSkipsProviderPicker(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := stderr.String()
-	if strings.Contains(out, "Select a provider") {
-		t.Fatalf("relaunch must not show the provider picker: %q", out)
+	if !strings.Contains(out, "Select a provider") {
+		t.Fatalf("bare relaunch must show the provider picker: %q", out)
 	}
 	if !strings.Contains(out, "Select a Gemini model") {
 		t.Fatalf("model picker missing: %q", out)
+	}
+}
+
+func TestBareCommandWithLegacyLastModelShowsProviderPicker(t *testing.T) {
+	home := withTestHome(t)
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(Config{LastModel: "z-ai/glm-5.2", ZAIAPIKey: "zai-test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldProxy := startZAIProxyFn
+	startZAIProxyFn = func(string, string, *http.Client, bool) (string, func(), error) {
+		return "http://127.0.0.1:9292", func() {}, nil
+	}
+	t.Cleanup(func() { startZAIProxyFn = oldProxy })
+
+	stderr := &strings.Builder{}
+	a := &app{
+		stdin:      strings.NewReader("5\n\n"), // Z.AI, first model
+		stdout:     &strings.Builder{},
+		stderr:     stderr,
+		runCommand: func(launchSpec) error { return nil },
+	}
+	if err := a.run(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "Select a provider") || !strings.Contains(out, "Select a Z.AI model") {
+		t.Fatalf("bare legacy config should start at provider picker: %q", out)
+	}
+	if strings.Contains(out, "Paste your OpenRouter API key") {
+		t.Fatalf("must not prompt for OpenRouter key before provider choice: %q", out)
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != providerZAI || cfg.LastZAIModel != "glm-5.2" {
+		t.Fatalf("config = %+v", cfg)
 	}
 }
 
@@ -809,9 +1018,8 @@ func TestModelPickerBackReturnsToProviderPicker(t *testing.T) {
 }
 
 func TestRelaunchWithSavedProviderCanStillGoBack(t *testing.T) {
-	// Regression: a plain relaunch reuses the saved provider without showing
-	// the provider picker — the model picker must still offer "back" so the
-	// user can switch providers.
+	// Bare relaunch opens the provider picker first. The model picker must
+	// still offer "back" after accepting the saved provider.
 	home := withTestHome(t)
 	binDir := filepath.Join(home, ".local", "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -837,9 +1045,9 @@ func TestRelaunchWithSavedProviderCanStillGoBack(t *testing.T) {
 	var spec launchSpec
 	stderr := &strings.Builder{}
 	a := &app{
-		// No flags: Gemini model picker opens directly -> b (back) ->
-		// provider picker -> 1 (OpenRouter) -> Enter (first model).
-		stdin:         strings.NewReader("b\n1\n\n"),
+		// No flags: provider picker (Enter keeps Gemini) -> Gemini model
+		// picker: b (back) -> provider picker -> 1 (OpenRouter) -> Enter.
+		stdin:         strings.NewReader("\nb\n1\n\n"),
 		stdout:        &strings.Builder{},
 		stderr:        stderr,
 		httpClient:    orSrv.Client(),

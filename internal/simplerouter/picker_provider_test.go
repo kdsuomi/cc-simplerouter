@@ -16,7 +16,12 @@ func TestOptionStateNavigation(t *testing.T) {
 	if st.handleInput(down) != pickerNone || st.cursor != 1 {
 		t.Errorf("down should move, cursor = %d", st.cursor)
 	}
-	if st.handleInput(down) != pickerNone || st.cursor != 1 {
+	for range providerOptions() {
+		if st.handleInput(down) != pickerNone {
+			t.Error("down should keep browsing")
+		}
+	}
+	if st.cursor != len(providerOptions())-1 {
 		t.Errorf("down at bottom should clamp, cursor = %d", st.cursor)
 	}
 	if st.handleInput([]byte{'\r'}) != pickerSelect {

@@ -1,11 +1,17 @@
 package simplerouter
 
 type Config struct {
-	Provider         string `json:"provider,omitempty"` // "openrouter" | "gemini"; empty = openrouter
-	OpenRouterAPIKey string `json:"openrouter_api_key,omitempty"`
-	GeminiAPIKey     string `json:"gemini_api_key,omitempty"`
-	LastModel        string `json:"last_model,omitempty"` // OpenRouter last model (legacy key name)
-	LastGeminiModel  string `json:"last_gemini_model,omitempty"`
+	Provider          string `json:"provider,omitempty"` // empty = openrouter
+	OpenRouterAPIKey  string `json:"openrouter_api_key,omitempty"`
+	GeminiAPIKey      string `json:"gemini_api_key,omitempty"`
+	OpenAIAPIKey      string `json:"openai_api_key,omitempty"`
+	DeepSeekAPIKey    string `json:"deepseek_api_key,omitempty"`
+	ZAIAPIKey         string `json:"zai_api_key,omitempty"`
+	LastModel         string `json:"last_model,omitempty"` // OpenRouter last model (legacy key name)
+	LastGeminiModel   string `json:"last_gemini_model,omitempty"`
+	LastOpenAIModel   string `json:"last_openai_model,omitempty"`
+	LastDeepSeekModel string `json:"last_deepseek_model,omitempty"`
+	LastZAIModel      string `json:"last_zai_model,omitempty"`
 }
 
 type Model struct {

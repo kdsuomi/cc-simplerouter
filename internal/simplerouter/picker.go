@@ -102,7 +102,7 @@ func printSetupBanner(w io.Writer, style terminalStyle) {
 	to := [3]int{234, 179, 102}
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "  %s\n", style.gradient("◇ simplerouter", from, to))
-	fmt.Fprintf(w, "  %s\n", style.paint(clrFaint, "claude code · openrouter & gemini models"))
+	fmt.Fprintf(w, "  %s\n", style.paint(clrFaint, "claude code · multi-provider models"))
 }
 
 // endpointsFunc fetches the provider endpoints for a model id. nil disables the

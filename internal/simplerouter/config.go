@@ -47,12 +47,18 @@ func loadConfig() (Config, error) {
 	}
 	cfg.OpenRouterAPIKey = cleanAPIKey(cfg.OpenRouterAPIKey)
 	cfg.GeminiAPIKey = cleanAPIKey(cfg.GeminiAPIKey)
+	cfg.OpenAIAPIKey = cleanAPIKey(cfg.OpenAIAPIKey)
+	cfg.DeepSeekAPIKey = cleanAPIKey(cfg.DeepSeekAPIKey)
+	cfg.ZAIAPIKey = cleanAPIKey(cfg.ZAIAPIKey)
 	cfg.LastModel = strings.TrimSpace(cfg.LastModel)
 	cfg.LastGeminiModel = strings.TrimSpace(cfg.LastGeminiModel)
+	cfg.LastOpenAIModel = strings.TrimSpace(cfg.LastOpenAIModel)
+	cfg.LastDeepSeekModel = strings.TrimSpace(cfg.LastDeepSeekModel)
+	cfg.LastZAIModel = strings.TrimSpace(cfg.LastZAIModel)
 	// A hand-edited unknown provider must not break launch: fall back to the
 	// default (OpenRouter) rather than erroring.
 	cfg.Provider = strings.ToLower(strings.TrimSpace(cfg.Provider))
-	if cfg.Provider != providerOpenRouter && cfg.Provider != providerGemini {
+	if !isKnownProvider(cfg.Provider) {
 		cfg.Provider = ""
 	}
 	return cfg, nil
@@ -104,6 +110,9 @@ func resetSavedKey() error {
 	}
 	cfg.OpenRouterAPIKey = ""
 	cfg.GeminiAPIKey = ""
+	cfg.OpenAIAPIKey = ""
+	cfg.DeepSeekAPIKey = ""
+	cfg.ZAIAPIKey = ""
 	return saveConfig(cfg)
 }
 
