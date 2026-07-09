@@ -50,11 +50,13 @@ func loadConfig() (Config, error) {
 	cfg.OpenAIAPIKey = cleanAPIKey(cfg.OpenAIAPIKey)
 	cfg.DeepSeekAPIKey = cleanAPIKey(cfg.DeepSeekAPIKey)
 	cfg.ZAIAPIKey = cleanAPIKey(cfg.ZAIAPIKey)
+	cfg.MetaAPIKey = cleanAPIKey(cfg.MetaAPIKey)
 	cfg.LastModel = strings.TrimSpace(cfg.LastModel)
 	cfg.LastGeminiModel = strings.TrimSpace(cfg.LastGeminiModel)
 	cfg.LastOpenAIModel = strings.TrimSpace(cfg.LastOpenAIModel)
 	cfg.LastDeepSeekModel = strings.TrimSpace(cfg.LastDeepSeekModel)
 	cfg.LastZAIModel = strings.TrimSpace(cfg.LastZAIModel)
+	cfg.LastMetaModel = strings.TrimSpace(cfg.LastMetaModel)
 	// A hand-edited unknown provider must not break launch: fall back to the
 	// default (OpenRouter) rather than erroring.
 	cfg.Provider = strings.ToLower(strings.TrimSpace(cfg.Provider))
@@ -113,6 +115,7 @@ func resetSavedKey() error {
 	cfg.OpenAIAPIKey = ""
 	cfg.DeepSeekAPIKey = ""
 	cfg.ZAIAPIKey = ""
+	cfg.MetaAPIKey = ""
 	return saveConfig(cfg)
 }
 

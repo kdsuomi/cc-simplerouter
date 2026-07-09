@@ -27,6 +27,7 @@ var recommendedGeminiModelIDs = []string{
 }
 
 var recommendedFirstClassModelIDs = []string{
+	"muse-spark-1.1",
 	"gpt-5.5",
 	"gpt-5.4",
 	"gpt-5.4-mini",
@@ -50,6 +51,7 @@ var testedModelIDs = map[string]bool{
 	"deepseek-v4-pro":              true,
 	"glm-5.2":                      true,
 	"glm-5":                        true,
+	"muse-spark-1.1":               true,
 }
 
 func curatedProviderModels(provider string) []Model {
@@ -70,6 +72,10 @@ func curatedProviderModels(provider string) []Model {
 		models = []Model{
 			{ID: "glm-5.2", Name: "GLM-5.2", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning", "reasoning_effort"}},
 			{ID: "glm-5", Name: "GLM-5", ContextLength: 200_000, SupportedParameters: []string{"tools", "reasoning"}},
+		}
+	case providerMeta:
+		models = []Model{
+			{ID: "muse-spark-1.1", Name: "Muse Spark 1.1", ContextLength: 1_048_576, SupportedParameters: []string{"tools", "reasoning"}},
 		}
 	}
 	return append([]Model(nil), models...)

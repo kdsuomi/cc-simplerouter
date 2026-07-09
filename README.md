@@ -1,7 +1,7 @@
 # cc-simplerouter
 
 `simplerouter` instantly launches [Claude Code](https://claude.com/claude-code) against
-[OpenRouter](https://openrouter.ai), Google AI Studio Gemini, OpenAI, DeepSeek, or Z.AI models, with
+[OpenRouter](https://openrouter.ai), Google AI Studio Gemini, OpenAI, DeepSeek, Z.AI, or Meta models, with
 a launch ui for selecting your provider, model, and OpenRouter inference provider if desired.
 
 The only configuration required is pasting your provider API key on first launch.
@@ -17,6 +17,7 @@ simplerouter --provider gemini --select-model  # pick a Gemini model from Google
 simplerouter --provider openai --model gpt-5.5
 simplerouter --provider deepseek --model deepseek-v4-flash
 simplerouter --provider zai --model glm-5.2
+simplerouter --provider meta --model muse-spark-1.1
 ```
 
 
@@ -70,8 +71,8 @@ Run `simplerouter` or `simplerouter --select-model` to open the provider and mod
 
 The list is pre-filtered to models usable by Claude Code. OpenRouter models are ordered by
 OpenRouter popularity, with recommended models pinned at the top; Gemini models are fetched from
-Google AI Studio and filtered to text/function-calling models. OpenAI, DeepSeek, and Z.AI use small
-curated model lists.
+Google AI Studio and filtered to text/function-calling models. OpenAI, DeepSeek, Z.AI, and Meta use
+small curated model lists.
 
 ## Provider / endpoint selection
 
@@ -90,7 +91,9 @@ Gemini also uses a session-only localhost proxy, but as a translator: Claude Cod
 Messages, and the proxy forwards Gemini `generateContent` requests to Google AI Studio.
 
 OpenAI and Z.AI also use session-only localhost translators. DeepSeek is launched directly through
-DeepSeek's Anthropic-compatible API.
+DeepSeek's Anthropic-compatible API. Meta's Messages API is also Anthropic-compatible; its localhost
+proxy is a thin passthrough that only strips the request fields Meta rejects (`stop_sequences`,
+`top_k`).
 
 > **Note:** pinning sets `allow_fallbacks: false`, so a transient error from the
 > chosen provider isn't absorbed by OpenRouter's fallback and Claude Code will
@@ -104,7 +107,7 @@ simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key
 ```
 
 - `--model MODEL` — model id, name, or unique suffix (skips the picker)
-- `--provider PROVIDER` — `openrouter`, `gemini`, `openai`, `deepseek`, or `zai`
+- `--provider PROVIDER` — `openrouter`, `gemini`, `openai`, `deepseek`, `zai`, or `meta`
 - `--select-model` — show the provider/model picker even when a model is saved
 - `--reset-key` — forget saved API keys, then prompt again
 - `--disable-thinking` — drop Claude Code's Anthropic-specific thinking/beta
@@ -124,10 +127,17 @@ Only for the launched process. Notably:
 
 ## Model compatibility
 
-`simplerouter` targets OpenRouter models that work through Claude Code's Anthropic-compatible API
-path, Gemini models through Google AI Studio's `generateContent` API, OpenAI models through the
-Responses API, DeepSeek through its Anthropic-compatible API, and Z.AI through its Chat Completions
-API. The picker filters or curates these lists to text models that support tool calling.
+`simplerouter` targets OpenRouter models through OpenRouter's Chat Completions API (via a
+session-only local proxy that streams reasoning live and round-trips `reasoning_details` across
+turns), Gemini models through Google AI Studio's `generateContent` API, OpenAI models through the
+Responses API, DeepSeek through its Anthropic-compatible API, Z.AI through its Chat Completions
+API, and Meta (Muse Spark) through its Anthropic-compatible Messages API. The picker filters or
+curates these lists to text models that support tool calling.
+
+For OpenRouter, model reasoning streams into Claude Code as it is generated: a patched
+copy of Claude Code renders it token by token, and even without the patch the proxies rotate
+thinking blocks every half second so thoughts appear progressively instead of only when the
+response finishes.
 
 By default it preserves Claude Code's normal thinking behavior. If a provider
 chokes on Claude Code's thinking/beta request fields, retry with

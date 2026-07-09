@@ -1,7 +1,10 @@
 bin/
 dist/
 .gocache/
+.cache/
+.private/
 .claude/
+design_plan.html
 
 ollama-main/
 ollama-js-main/

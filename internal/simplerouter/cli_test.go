@@ -161,7 +161,7 @@ func TestArgParsingAndLaunchSpec(t *testing.T) {
 	if spec.Dir != work {
 		t.Fatalf("Dir = %q, want %q", spec.Dir, work)
 	}
-	wantArgs := []string{"--model", "z-ai/glm-5.2", "--debug"}
+	wantArgs := []string{"--model", "z-ai/glm-5.2", "--thinking-display", "summarized", "--debug"}
 	if !slices.Equal(spec.Args, wantArgs) {
 		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
 	}
@@ -175,8 +175,49 @@ func TestArgParsingAndLaunchSpec(t *testing.T) {
 	if env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] != "202752" {
 		t.Fatalf("compact window = %q", env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"])
 	}
-	if !strings.Contains(stderr.String(), "Launching Claude Code: model z-ai/glm-5.2 | claude z-ai/glm-5.2 | context 202,752 | thinking default | dir "+work) {
+	if !strings.Contains(stderr.String(), "Launching Claude Code: model z-ai/glm-5.2 | claude z-ai/glm-5.2 | context 202,752 | thinking summarized | dir "+work) {
 		t.Fatalf("launch summary missing or wrong: %q", stderr.String())
+	}
+}
+
+func TestOpenRouterLaunchUsesPatchedClaudeByDefault(t *testing.T) {
+	t.Setenv("SIMPLEROUTER_DISABLE_CLAUDE_PATCH", "")
+	home := withTestHome(t)
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claude := filepath.Join(binDir, "claude.exe")
+	if err := os.WriteFile(claude, fakePatchableClaudeBundle(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(Config{OpenRouterAPIKey: "sk-or-test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := openRouterTestServer(t, http.StatusOK, []Model{{ID: "z-ai/glm-5.2", Name: "GLM 5.2", ContextLength: 202752}})
+	defer srv.Close()
+
+	var spec launchSpec
+	a := &app{
+		stdin:      strings.NewReader(""),
+		stdout:     &strings.Builder{},
+		stderr:     &strings.Builder{},
+		httpClient: srv.Client(),
+		apiBase:    srv.URL,
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
+	}
+	if err := a.run(context.Background(), []string{"--model", "z-ai/glm-5.2"}); err != nil {
+		t.Fatal(err)
+	}
+	if spec.Path == claude {
+		t.Fatalf("claude path was not patched: %q", spec.Path)
+	}
+	if !stringsHasPathPrefix(spec.Path, filepath.Join(home, configDirName, "claude-patches")) {
+		t.Fatalf("patched claude path = %q", spec.Path)
 	}
 }
 
@@ -212,7 +253,7 @@ func TestOneMillionContextUsesClaudeSuffix(t *testing.T) {
 	if err := a.run(context.Background(), []string{"--model", "z-ai/glm-5.2"}); err != nil {
 		t.Fatal(err)
 	}
-	wantArgs := []string{"--model", "z-ai/glm-5.2[1m]"}
+	wantArgs := []string{"--model", "z-ai/glm-5.2[1m]", "--thinking-display", "summarized"}
 	if !slices.Equal(spec.Args, wantArgs) {
 		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
 	}
@@ -342,6 +383,38 @@ func TestBuildClaudeEnvCanDisableThinking(t *testing.T) {
 	}
 }
 
+func TestEnsureClaudeArgInjectsMissingValue(t *testing.T) {
+	got := ensureClaudeArg([]string{"-p", "hello"}, "--thinking-display", "summarized")
+	want := []string{"--thinking-display", "summarized", "-p", "hello"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("args = %v, want %v", got, want)
+	}
+}
+
+func TestEnsureClaudeArgPreservesExistingValue(t *testing.T) {
+	for _, args := range [][]string{
+		{"--thinking-display", "omitted", "-p"},
+		{"--thinking-display=omitted", "-p"},
+	} {
+		got := ensureClaudeArg(args, "--thinking-display", "summarized")
+		if !slices.Equal(got, args) {
+			t.Fatalf("args = %v, want unchanged %v", got, args)
+		}
+	}
+}
+
+func TestLaunchThinkingMode(t *testing.T) {
+	if got := launchThinkingMode(providerOpenRouter, false); got != "summarized" {
+		t.Fatalf("OpenRouter thinking mode = %q", got)
+	}
+	if got := launchThinkingMode(providerZAI, false); got != "default" {
+		t.Fatalf("Z.AI thinking mode = %q", got)
+	}
+	if got := launchThinkingMode(providerOpenRouter, true); got != "disabled" {
+		t.Fatalf("disabled thinking mode = %q", got)
+	}
+}
+
 func TestClaudeCodeModelAddsOneMillionSuffix(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -426,7 +499,7 @@ func TestFirstRunWizardRecommendsAndSavesModel(t *testing.T) {
 	if err := a.run(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(spec.Args, []string{"--model", "z-ai/glm-5.2[1m]"}) {
+	if !slices.Equal(spec.Args, []string{"--model", "z-ai/glm-5.2[1m]", "--thinking-display", "summarized"}) {
 		t.Fatalf("Args = %v", spec.Args)
 	}
 	cfg, err := loadConfig()
@@ -550,11 +623,13 @@ func TestResetSavedKeyClearsBothKeys(t *testing.T) {
 		OpenAIAPIKey:      "sk-openai",
 		DeepSeekAPIKey:    "sk-deepseek",
 		ZAIAPIKey:         "sk-zai",
+		MetaAPIKey:        "sk-meta",
 		LastModel:         "z-ai/glm-5.2",
 		LastGeminiModel:   "gemini-2.5-flash",
 		LastOpenAIModel:   "gpt-5.5",
 		LastDeepSeekModel: "deepseek-v4-flash",
 		LastZAIModel:      "glm-5.2",
+		LastMetaModel:     "muse-spark-1.1",
 	}
 	if err := saveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -566,10 +641,10 @@ func TestResetSavedKeyClearsBothKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.OpenRouterAPIKey != "" || got.GeminiAPIKey != "" || got.OpenAIAPIKey != "" || got.DeepSeekAPIKey != "" || got.ZAIAPIKey != "" {
+	if got.OpenRouterAPIKey != "" || got.GeminiAPIKey != "" || got.OpenAIAPIKey != "" || got.DeepSeekAPIKey != "" || got.ZAIAPIKey != "" || got.MetaAPIKey != "" {
 		t.Fatalf("keys not cleared: %+v", got)
 	}
-	if got.Provider != providerGemini || got.LastModel != cfg.LastModel || got.LastGeminiModel != cfg.LastGeminiModel || got.LastOpenAIModel != cfg.LastOpenAIModel || got.LastDeepSeekModel != cfg.LastDeepSeekModel || got.LastZAIModel != cfg.LastZAIModel {
+	if got.Provider != providerGemini || got.LastModel != cfg.LastModel || got.LastGeminiModel != cfg.LastGeminiModel || got.LastOpenAIModel != cfg.LastOpenAIModel || got.LastDeepSeekModel != cfg.LastDeepSeekModel || got.LastZAIModel != cfg.LastZAIModel || got.LastMetaModel != cfg.LastMetaModel {
 		t.Fatalf("non-key fields changed: %+v", got)
 	}
 }
@@ -581,6 +656,7 @@ func TestInferProviderFromModel(t *testing.T) {
 		"models/gemini-2.5-pro": providerGemini,
 		"models/other-model":    providerGemini,
 		"glm-5.2":               providerZAI,
+		"muse-spark-1.1":        providerMeta,
 		"":                      "",
 	}
 	for input, want := range cases {
@@ -1005,7 +1081,7 @@ func TestModelPickerBackReturnsToProviderPicker(t *testing.T) {
 	if strings.Count(out, "Select a provider") < 2 {
 		t.Fatalf("provider picker not re-shown after back: %q", out)
 	}
-	if !slices.Equal(spec.Args, []string{"--model", "z-ai/glm-5.2"}) {
+	if !slices.Equal(spec.Args, []string{"--model", "z-ai/glm-5.2", "--thinking-display", "summarized"}) {
 		t.Fatalf("Args = %v", spec.Args)
 	}
 	cfg, err := loadConfig()
@@ -1068,7 +1144,7 @@ func TestRelaunchWithSavedProviderCanStillGoBack(t *testing.T) {
 			t.Fatalf("stderr missing %q: %q", want, out)
 		}
 	}
-	if !slices.Equal(spec.Args, []string{"--model", "z-ai/glm-5.2"}) {
+	if !slices.Equal(spec.Args, []string{"--model", "z-ai/glm-5.2", "--thinking-display", "summarized"}) {
 		t.Fatalf("Args = %v", spec.Args)
 	}
 	cfg, err := loadConfig()

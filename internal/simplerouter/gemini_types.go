@@ -108,9 +108,9 @@ type geminiCountTokensResponse struct {
 	TotalTokens int `json:"totalTokens"`
 }
 
-// Anthropic Messages API subset — only the fields the proxy translates.
-// Fields absent from these structs (cache_control, metadata, betas, ...) are
-// intentionally dropped by encoding/json.
+// Anthropic Messages API subset — only the fields the proxies translate.
+// Fields absent from these structs (metadata, betas, ...) are intentionally
+// dropped by encoding/json.
 
 type anthropicRequest struct {
 	Model         string               `json:"model"`
@@ -145,6 +145,9 @@ type anthropicBlock struct {
 	Content   json.RawMessage       `json:"content,omitempty"`     // tool_result: string OR []block
 	IsError   bool                  `json:"is_error,omitempty"`
 	Source    *anthropicImageSource `json:"source,omitempty"` // image
+	// CacheControl preserves prompt-caching breakpoints for upstreams that
+	// support them (OpenRouter); other proxies ignore it.
+	CacheControl json.RawMessage `json:"cache_control,omitempty"`
 }
 
 type anthropicImageSource struct {
@@ -182,6 +185,8 @@ type anthropicMessageResponse struct {
 }
 
 type anthropicUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 }

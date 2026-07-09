@@ -147,13 +147,16 @@ type zaiToolCall struct {
 }
 
 type zaiToolFunction struct {
-	Name      string           `json:"name,omitempty"`
-	Arguments zaiToolArguments `json:"arguments,omitempty"`
+	Name      string            `json:"name,omitempty"`
+	Arguments chatToolArguments `json:"arguments,omitempty"`
 }
 
-type zaiToolArguments string
+// chatToolArguments decodes tool-call arguments that chat-completions style
+// APIs (Z.AI, OpenRouter) send either as a JSON-encoded string or as a bare
+// JSON object.
+type chatToolArguments string
 
-func (a *zaiToolArguments) UnmarshalJSON(data []byte) error {
+func (a *chatToolArguments) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		*a = ""
@@ -161,13 +164,13 @@ func (a *zaiToolArguments) UnmarshalJSON(data []byte) error {
 	}
 	var s string
 	if err := json.Unmarshal(trimmed, &s); err == nil {
-		*a = zaiToolArguments(s)
+		*a = chatToolArguments(s)
 		return nil
 	}
 	if !json.Valid(trimmed) {
 		return fmt.Errorf("invalid tool arguments JSON")
 	}
-	*a = zaiToolArguments(string(trimmed))
+	*a = chatToolArguments(string(trimmed))
 	return nil
 }
 

@@ -191,7 +191,7 @@ func TestZAITranslationPreservesReasoningAndTools(t *testing.T) {
 					ID: "call_1",
 					Function: zaiToolFunction{
 						Name:      "get_weather",
-						Arguments: zaiToolArguments(`{"city":"Paris"}`),
+						Arguments: chatToolArguments(`{"city":"Paris"}`),
 					},
 				}},
 			},

@@ -26,6 +26,7 @@ func providerOptions() []pickOption {
 		{ID: providerOpenAI, Label: "OpenAI", Detail: "GPT models, direct from OpenAI"},
 		{ID: providerDeepSeek, Label: "DeepSeek", Detail: "DeepSeek models, Anthropic API"},
 		{ID: providerZAI, Label: "Z.AI", Detail: "GLM models, direct from Z.AI"},
+		{ID: providerMeta, Label: "Meta", Detail: "Muse Spark, Anthropic API"},
 	}
 }
 

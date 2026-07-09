@@ -7,11 +7,13 @@ type Config struct {
 	OpenAIAPIKey      string `json:"openai_api_key,omitempty"`
 	DeepSeekAPIKey    string `json:"deepseek_api_key,omitempty"`
 	ZAIAPIKey         string `json:"zai_api_key,omitempty"`
+	MetaAPIKey        string `json:"meta_api_key,omitempty"`
 	LastModel         string `json:"last_model,omitempty"` // OpenRouter last model (legacy key name)
 	LastGeminiModel   string `json:"last_gemini_model,omitempty"`
 	LastOpenAIModel   string `json:"last_openai_model,omitempty"`
 	LastDeepSeekModel string `json:"last_deepseek_model,omitempty"`
 	LastZAIModel      string `json:"last_zai_model,omitempty"`
+	LastMetaModel     string `json:"last_meta_model,omitempty"`
 }
 
 type Model struct {

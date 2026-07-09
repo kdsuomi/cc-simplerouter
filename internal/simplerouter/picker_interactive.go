@@ -264,6 +264,71 @@ func (p *providerState) selected() (Endpoint, bool) {
 	return p.endpoints[p.cursor], true
 }
 
+func endpointProviderDisplayNames(endpoints []Endpoint) []string {
+	counts := make(map[string]int, len(endpoints))
+	for _, ep := range endpoints {
+		counts[endpointProviderBaseKey(ep)]++
+	}
+
+	names := make([]string, len(endpoints))
+	for i, ep := range endpoints {
+		name := strings.TrimSpace(ep.ProviderName)
+		if name == "" {
+			name = strings.TrimSpace(ep.Tag)
+		}
+		if counts[endpointProviderBaseKey(ep)] > 1 {
+			if variant := endpointVariantLabel(ep); variant != "" && !strings.Contains(strings.ToLower(name), strings.ToLower(variant)) {
+				name += " (" + variant + ")"
+			}
+		}
+		names[i] = name
+	}
+	return names
+}
+
+func endpointProviderBaseKey(ep Endpoint) string {
+	name := strings.TrimSpace(ep.ProviderName)
+	if name == "" {
+		tag := strings.Trim(strings.TrimSpace(ep.Tag), "/")
+		name, _, _ = strings.Cut(tag, "/")
+		if name == "" {
+			name = tag
+		}
+	}
+	return strings.ToLower(name)
+}
+
+func endpointVariantLabel(ep Endpoint) string {
+	tag := strings.Trim(strings.TrimSpace(ep.Tag), "/")
+	parts := strings.Split(tag, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	variant := strings.TrimSpace(parts[len(parts)-1])
+	if variant == "" || strings.EqualFold(variant, strings.TrimSpace(ep.Quantization)) {
+		return ""
+	}
+	switch strings.ToLower(variant) {
+	case "zdr":
+		return "ZDR"
+	}
+	return titleSlug(variant)
+}
+
+func titleSlug(slug string) string {
+	parts := strings.FieldsFunc(slug, func(r rune) bool { return r == '-' || r == '_' })
+	for i, part := range parts {
+		switch {
+		case part == "":
+		case len(part) <= 4:
+			parts[i] = strings.ToUpper(part)
+		default:
+			parts[i] = strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 func (p *providerState) handleInput(buf []byte) pickerAction {
 	for i := 0; i < len(buf); i++ {
 		b := buf[i]
@@ -383,9 +448,13 @@ func (a *app) pickModelInteractive(in, out *os.File, title string, models []Mode
 					if ep, ok := prov.selected(); ok {
 						m := prov.model
 						m.ContextLength = ep.ContextLength
+						providerName := ep.ProviderName
+						if names := endpointProviderDisplayNames(prov.endpoints); prov.cursor >= 0 && prov.cursor < len(names) {
+							providerName = names[prov.cursor]
+						}
 						finish("  " + style.paint(clrAccentBold, "▸ selected ") + style.paint(clrModelHi, m.ID) +
-							style.paint(clrDim, " via ") + style.paint(clrModelHi, ep.ProviderName))
-						return pickResult{Model: m, ProviderTag: ep.Tag, ProviderName: ep.ProviderName}, nil
+							style.paint(clrDim, " via ") + style.paint(clrModelHi, providerName))
+						return pickResult{Model: m, ProviderTag: ep.Tag, ProviderName: providerName}, nil
 					}
 				case pickerBack:
 					prov = nil
@@ -548,6 +617,7 @@ func (a *app) renderProviderView(p *providerState, style terminalStyle) []string
 	default:
 		start := p.page() * pickerPageSize
 		end := min(start+pickerPageSize, len(p.endpoints))
+		displayNames := endpointProviderDisplayNames(p.endpoints)
 		for i, ep := range p.endpoints[start:end] {
 			selected := start+i == p.cursor
 			nameCode := clrModel
@@ -560,7 +630,7 @@ func (a *app) renderProviderView(p *providerState, style terminalStyle) []string
 			}
 			rows = append(rows, rowLine(
 				style.marker(selected),
-				style.cell(ep.ProviderName, wProvider, nameCode),
+				style.cell(displayNames[start+i], wProvider, nameCode),
 				style.cell(quant, wQuant, clrName),
 				style.cell(formatPricePerMillion(ep.PromptPrice, ep.OutputPrice), wPrice, priceColor(Model{OutputPrice: ep.OutputPrice})),
 				style.cell(formatContextLength(ep.ContextLength), wPCtx, ctxColor(ep.ContextLength)),

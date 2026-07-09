@@ -2,6 +2,7 @@ package simplerouter
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -138,6 +139,18 @@ func TestPickerStateTabOpensProviders(t *testing.T) {
 	}
 	if st.query != "g" {
 		t.Fatalf("query = %q, want g", st.query)
+	}
+}
+
+func TestEndpointProviderDisplayNamesDisambiguateDuplicateVariants(t *testing.T) {
+	got := endpointProviderDisplayNames([]Endpoint{
+		{ProviderName: "xAI", Tag: "x-ai"},
+		{ProviderName: "xAI", Tag: "x-ai/zdr"},
+		{ProviderName: "DeepInfra", Tag: "deepinfra/fp4", Quantization: "fp4"},
+	})
+	want := []string{"xAI", "xAI (ZDR)", "DeepInfra"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("display names = %v, want %v", got, want)
 	}
 }
 

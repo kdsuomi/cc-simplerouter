@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ const (
 	providerOpenAI     = "openai"
 	providerDeepSeek   = "deepseek"
 	providerZAI        = "zai"
+	providerMeta       = "meta"
 )
 
 type app struct {
@@ -35,6 +37,7 @@ type app struct {
 	openAIAPIBase   string // OpenAI API base override (tests)
 	deepSeekAPIBase string // DeepSeek API base override (tests)
 	zaiAPIBase      string // Z.AI API base override (tests)
+	metaAPIBase     string // Meta API base override (tests)
 	lineReader      *bufio.Reader
 	runCommand      func(spec launchSpec) error
 }
@@ -43,6 +46,8 @@ type app struct {
 var startGeminiProxyFn = startGeminiProxy
 var startOpenAIProxyFn = startOpenAIProxy
 var startZAIProxyFn = startZAIProxy
+var startMetaProxyFn = startMetaProxy
+var startOpenRouterProxyFn = startOpenRouterProxy
 
 func Main(args []string) int {
 	a := &app{
@@ -70,7 +75,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("simplerouter", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
 	fs.StringVar(&modelFlag, "model", "", "Model id, name, or unique suffix")
-	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "deepseek", or "zai"`)
+	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "deepseek", "zai", or "meta"`)
 	fs.BoolVar(&selectModel, "select-model", false, "Select a provider and model interactively")
 	fs.BoolVar(&resetKey, "reset-key", false, "Forget the saved API keys before launching")
 	fs.BoolVar(&disableThinking, "disable-thinking", false, "Disable Claude Code thinking/beta request features for provider compatibility")
@@ -97,7 +102,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 		return err
 	}
 	style := newTerminalStyle(a.stderr)
-	firstRun := modelFlag == "" && cfg.Provider == "" && cfg.LastModel == "" && cfg.LastGeminiModel == "" && cfg.LastOpenAIModel == "" && cfg.LastDeepSeekModel == "" && cfg.LastZAIModel == ""
+	firstRun := modelFlag == "" && cfg.Provider == "" && cfg.LastModel == "" && cfg.LastGeminiModel == "" && cfg.LastOpenAIModel == "" && cfg.LastDeepSeekModel == "" && cfg.LastZAIModel == "" && cfg.LastMetaModel == ""
 	if firstRun {
 		printSetupBanner(a.stderr, style)
 		fmt.Fprintln(a.stderr)
@@ -125,6 +130,8 @@ func (a *app) run(ctx context.Context, args []string) error {
 			key, res, err = a.selectDeepSeek(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		case providerZAI:
 			key, res, err = a.selectZAI(ctx, cfg, modelFlag, selectModel, firstRun, style)
+		case providerMeta:
+			key, res, err = a.selectMeta(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		default:
 			key, res, err = a.selectOpenRouter(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		}
@@ -158,6 +165,9 @@ func (a *app) run(ctx context.Context, args []string) error {
 	case providerZAI:
 		cfg.ZAIAPIKey = key
 		cfg.LastZAIModel = modelID
+	case providerMeta:
+		cfg.MetaAPIKey = key
+		cfg.LastMetaModel = modelID
 	default:
 		cfg.OpenRouterAPIKey = key
 		cfg.LastModel = modelID
@@ -169,6 +179,16 @@ func (a *app) run(ctx context.Context, args []string) error {
 	claudePath, err := findClaude()
 	if err != nil {
 		return err
+	}
+
+	// The patch enables per-token thinking rendering; without it, the proxies'
+	// rotated thinking blocks still render progressively, so a failed patch
+	// only degrades granularity.
+	patchedClaudePath, claudePatched, perr := prepareClaudeLiveThinkingPatch(claudePath)
+	if perr != nil {
+		fmt.Fprintln(a.stderr, style.warning("Claude live-thinking patch failed; thinking will render in periodic blocks: "+perr.Error()))
+	} else if claudePatched {
+		claudePath = patchedClaudePath
 	}
 
 	baseURL := defaultAnthropicBaseURL
@@ -202,21 +222,41 @@ func (a *app) run(ctx context.Context, args []string) error {
 		}
 		defer stop()
 		baseURL = proxyURL
-	case res.ProviderTag != "":
-		// When an OpenRouter provider is pinned, route Claude Code through a
-		// local proxy that injects provider.only into each request body (the
-		// only way to pin a provider, since Claude Code controls the body and
-		// OpenRouter ignores it in the model string).
-		proxyURL, stop, perr := startProviderProxy(defaultAnthropicBaseURL, res.ProviderTag)
+	case provider == providerMeta:
+		// Meta's /v1/messages is Anthropic-native; the proxy only strips the
+		// request fields Meta rejects (stop_sequences, top_k) and relays the
+		// rest byte for byte.
+		proxyURL, stop, perr := startMetaProxyFn(a.metaBase(), modelID, a.httpClient, disableThinking)
 		if perr != nil {
-			return fmt.Errorf("start provider proxy: %w", perr)
+			return fmt.Errorf("start Meta proxy: %w", perr)
+		}
+		defer stop()
+		baseURL = proxyURL
+	default:
+		// OpenRouter goes through a local proxy that translates Anthropic
+		// Messages <-> chat completions. Unlike OpenRouter's own Anthropic
+		// endpoint this streams reasoning live (thought streaming), carries
+		// reasoning_details across turns, and can pin a provider endpoint by
+		// injecting provider.only (Claude Code controls the request body, so
+		// pinning is impossible without a body rewrite).
+		proxyURL, stop, perr := startOpenRouterProxyFn(a.apiBase, modelID, a.httpClient, openRouterProxyOptions{
+			ProviderTag:       res.ProviderTag,
+			DisableThinking:   disableThinking,
+			SupportsReasoning: modelSupportsReasoning(selected),
+		})
+		if perr != nil {
+			return fmt.Errorf("start OpenRouter proxy: %w", perr)
 		}
 		defer stop()
 		baseURL = proxyURL
 	}
 
 	claudeModel := claudeCodeModel(modelID, selected.ContextLength)
-	a.printLaunchSummary(modelID, claudeModel, selected.ContextLength, disableThinking, dir, launchProviderLabel(provider, res))
+	if !disableThinking && provider == providerOpenRouter {
+		passthrough = ensureClaudeArg(passthrough, "--thinking-display", "summarized")
+	}
+	thinkingMode := launchThinkingMode(provider, disableThinking)
+	a.printLaunchSummary(modelID, claudeModel, selected.ContextLength, thinkingMode, dir, launchProviderLabel(provider, res))
 	spec := launchSpec{
 		Path: claudePath,
 		Dir:  dir,
@@ -280,6 +320,9 @@ func inferProviderFromModel(model string) string {
 	if strings.HasPrefix(lower, "glm-") {
 		return providerZAI
 	}
+	if strings.HasPrefix(lower, "muse-") {
+		return providerMeta
+	}
 	return ""
 }
 
@@ -295,7 +338,7 @@ func canonicalProvider(input string) string {
 
 func isKnownProvider(provider string) bool {
 	switch provider {
-	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI:
+	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta:
 		return true
 	default:
 		return false
@@ -303,7 +346,7 @@ func isKnownProvider(provider string) bool {
 }
 
 func providerNames() []string {
-	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI}
+	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta}
 }
 
 // geminiBase returns the Gemini API base, honoring the test override.
@@ -339,6 +382,13 @@ func (a *app) zaiBase() string {
 	return defaultZAIAPIBase
 }
 
+func (a *app) metaBase() string {
+	if strings.TrimSpace(a.metaAPIBase) != "" {
+		return a.metaAPIBase
+	}
+	return defaultMetaAPIBase
+}
+
 func launchProviderLabel(provider string, res pickResult) string {
 	switch provider {
 	case providerGemini:
@@ -349,8 +399,49 @@ func launchProviderLabel(provider string, res pickResult) string {
 		return "DeepSeek"
 	case providerZAI:
 		return "Z.AI"
+	case providerMeta:
+		return "Meta"
 	}
 	return res.ProviderName // pinned OpenRouter endpoint, or ""
+}
+
+func launchThinkingMode(provider string, disableThinking bool) string {
+	if disableThinking {
+		return "disabled"
+	}
+	if provider == providerOpenRouter {
+		return "summarized"
+	}
+	return "default"
+}
+
+// modelSupportsReasoning reports whether an OpenRouter model advertises the
+// unified reasoning parameter. Models picked outside the catalog (no
+// parameter list) get the benefit of the doubt.
+func modelSupportsReasoning(m Model) bool {
+	if len(m.SupportedParameters) == 0 {
+		return true
+	}
+	return slices.Contains(m.SupportedParameters, "reasoning")
+}
+
+func ensureClaudeArg(args []string, name, value string) []string {
+	if hasClaudeArg(args, name) {
+		return args
+	}
+	out := make([]string, 0, len(args)+2)
+	out = append(out, name, value)
+	out = append(out, args...)
+	return out
+}
+
+func hasClaudeArg(args []string, name string) bool {
+	for _, arg := range args {
+		if arg == name || strings.HasPrefix(arg, name+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 // selectOpenRouter acquires the OpenRouter key and resolves the model to
@@ -519,6 +610,14 @@ func (a *app) zaiKey(ctx context.Context, cfg Config) (string, error) {
 	return a.providerKey(ctx, "Z.AI", []string{"ZAI_API_KEY", "BIGMODEL_API_KEY"}, cfg.ZAIAPIKey, nil)
 }
 
+func (a *app) metaKey(ctx context.Context, cfg Config) (string, error) {
+	// META_API_KEY is the conventional name; MODEL_API_KEY is what the Meta
+	// Model API docs use, accepted as a fallback.
+	return a.providerKey(ctx, "Meta", []string{"META_API_KEY", "MODEL_API_KEY"}, cfg.MetaAPIKey, func(ctx context.Context, key string) error {
+		return validateBearerModelsKey(ctx, a.httpClient, a.metaBase(), key, "Meta")
+	})
+}
+
 func (a *app) providerKey(ctx context.Context, label string, envNames []string, saved string, validate func(context.Context, string) error) (string, error) {
 	for _, name := range envNames {
 		if key := cleanAPIKey(os.Getenv(name)); key != "" {
@@ -629,6 +728,14 @@ func (a *app) selectZAI(ctx context.Context, cfg Config, modelFlag string, selec
 		return "", pickResult{}, err
 	}
 	return a.selectStaticModel(providerZAI, "Z.AI", key, cfg.LastZAIModel, modelFlag, selectModel, firstRun, style)
+}
+
+func (a *app) selectMeta(ctx context.Context, cfg Config, modelFlag string, selectModel, firstRun bool, style terminalStyle) (string, pickResult, error) {
+	key, err := a.metaKey(ctx, cfg)
+	if err != nil {
+		return "", pickResult{}, err
+	}
+	return a.selectStaticModel(providerMeta, "Meta", key, cfg.LastMetaModel, modelFlag, selectModel, firstRun, style)
 }
 
 func (a *app) selectStaticModel(provider, label, key, lastModel, modelFlag string, selectModel, firstRun bool, style terminalStyle) (string, pickResult, error) {
@@ -766,7 +873,7 @@ func (a *app) readLine() (string, error) {
 	return strings.TrimSpace(line), err
 }
 
-func (a *app) printLaunchSummary(modelID, claudeModel string, contextLength int, disableThinking bool, dir, providerName string) {
+func (a *app) printLaunchSummary(modelID, claudeModel string, contextLength int, thinkingMode, dir, providerName string) {
 	launchDir := dir
 	if launchDir == "" {
 		if wd, err := os.Getwd(); err == nil {
@@ -775,9 +882,8 @@ func (a *app) printLaunchSummary(modelID, claudeModel string, contextLength int,
 			launchDir = "."
 		}
 	}
-	thinking := "default"
-	if disableThinking {
-		thinking = "disabled"
+	if thinkingMode == "" {
+		thinkingMode = "default"
 	}
 	style := newTerminalStyle(a.stderr)
 	sep := style.paint(clrFaint, "|")
@@ -789,7 +895,7 @@ func (a *app) printLaunchSummary(modelID, claudeModel string, contextLength int,
 		sep,
 		style.paint(ctxColor(contextLength), formatContextLength(contextLength)),
 		sep,
-		style.paint(clrDim, thinking),
+		style.paint(clrDim, thinkingMode),
 		sep,
 		style.paint(clrDim, launchDir),
 	)
