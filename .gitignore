@@ -2,6 +2,7 @@ bin/
 dist/
 .gocache/
 .cache/
+.research/
 .private/
 .claude/
 design_plan.html
