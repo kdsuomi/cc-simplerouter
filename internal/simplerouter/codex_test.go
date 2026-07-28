@@ -125,6 +125,7 @@ func TestCodexArgsUseSessionProviderAndPreservePrompt(t *testing.T) {
 		`env_key = "SIMPLEROUTER_CODEX_API_KEY"`,
 		`wire_api = "responses"`,
 		`model_catalog_json="C:\\Temp Folder\\models.json"`,
+		`service_tier="default"`,
 		`model_reasoning_effort="none"`,
 		"--sandbox\nworkspace-write",
 		"fix the tests",
@@ -239,6 +240,7 @@ func TestInstalledCodexExecUsesGeneratedResponsesProvider(t *testing.T) {
 		"--ephemeral",
 		"--skip-git-repo-check",
 		"--color", "never",
+		"-c", `service_tier="fast"`,
 	}
 	args = append(args, codexArgs(
 		"test/provider-model",
@@ -262,6 +264,9 @@ func TestInstalledCodexExecUsesGeneratedResponsesProvider(t *testing.T) {
 	if !strings.Contains(stdout.String(), "OK") {
 		t.Fatalf("stdout did not contain model response:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}
+	if strings.Contains(stderr.String(), "Configured service tier") {
+		t.Fatalf("Codex emitted a service-tier warning:\n%s", stderr.String())
+	}
 
 	select {
 	case raw := <-requests:
@@ -271,6 +276,9 @@ func TestInstalledCodexExecUsesGeneratedResponsesProvider(t *testing.T) {
 		}
 		if body["model"] != "test/provider-model" || body["stream"] != true {
 			t.Fatalf("unexpected Responses request: %#v", body)
+		}
+		if serviceTier, ok := body["service_tier"]; ok {
+			t.Fatalf("Responses request included service_tier = %#v", serviceTier)
 		}
 		tools, _ := body["tools"].([]any)
 		if len(tools) == 0 {

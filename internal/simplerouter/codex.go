@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	codexAPIKeyEnv    = "SIMPLEROUTER_CODEX_API_KEY"
-	codexProviderName = "simplerouter_session"
+	codexAPIKeyEnv                  = "SIMPLEROUTER_CODEX_API_KEY"
+	codexProviderName               = "simplerouter_session"
+	codexDefaultServiceTierOverride = "default"
 )
 
 type codexModelCatalog struct {
@@ -189,6 +190,9 @@ func codexArgs(model, baseURL, catalogPath string, disableThinking bool, positio
 		"-c", "model_provider=" + tomlString(codexProviderName),
 		"-c", "model_providers." + codexProviderName + "=" + provider,
 		"-c", "model_catalog_json=" + tomlString(catalogPath),
+		// "default" is Codex's explicit standard-routing sentinel. Applying it
+		// here prevents a global Fast-mode preference from leaking into this child.
+		"-c", "service_tier=" + tomlString(codexDefaultServiceTierOverride),
 	}
 	if disableThinking {
 		args = append(args,

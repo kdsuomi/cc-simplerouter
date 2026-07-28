@@ -9,6 +9,8 @@ derived from the installed Codex release, preserving Codex features such as free
 The launcher does not rewrite `~/.codex/config.toml` or replace the user's Codex
 installation. Provider overrides, temporary model metadata, and any localhost proxy
 exist only for the child Codex process and are removed when that process exits.
+Launched sessions also use Codex's standard service tier, disabling Fast mode without
+changing the user's global service-tier preference for direct Codex sessions.
 
 ```powershell
 simplerouter                                      # pick provider, enter key, pick model
