@@ -48,11 +48,12 @@ func zaiResponsesOptions(disableReasoning bool) responsesChatProxyOptions {
 		}
 	}
 	return responsesChatProxyOptions{
-		Label:                "Z.AI",
-		ChatPath:             "/chat/completions",
-		DisableReasoning:     disableReasoning,
-		SendReasoningEffort:  true,
-		ReasoningReplayField: "reasoning_content",
+		Label:                   "Z.AI",
+		ChatPath:                "/chat/completions",
+		DisableReasoning:        disableReasoning,
+		SendReasoningEffort:     true,
+		SendNoneReasoningEffort: true,
+		ReasoningReplayField:    "reasoning_content",
 		ReasoningEffortMap: map[string]string{
 			"ultra": "max",
 		},

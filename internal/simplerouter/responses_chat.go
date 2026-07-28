@@ -33,16 +33,17 @@ type responsesReasoning struct {
 }
 
 type responsesChatProxyOptions struct {
-	Label                string
-	ChatPath             string
-	DisableReasoning     bool
-	SendReasoningEffort  bool
-	ReasoningReplayField string
-	ReasoningEffortMap   map[string]string
-	IncludeStreamUsage   bool
-	ToolStream           bool
-	ExtraBody            map[string]any
-	ScrubToolSchemas     bool
+	Label                   string
+	ChatPath                string
+	DisableReasoning        bool
+	SendReasoningEffort     bool
+	SendNoneReasoningEffort bool
+	ReasoningReplayField    string
+	ReasoningEffortMap      map[string]string
+	IncludeStreamUsage      bool
+	ToolStream              bool
+	ExtraBody               map[string]any
+	ScrubToolSchemas        bool
 }
 
 type responsesChatProxy struct {
@@ -134,7 +135,8 @@ func (p *responsesChatProxy) handleResponses(w http.ResponseWriter, r *http.Requ
 		upstream["parallel_tool_calls"] = req.ParallelToolCalls
 	}
 	if p.options.SendReasoningEffort && !p.options.DisableReasoning && req.Reasoning != nil {
-		if effort := mappedReasoningEffort(req.Reasoning.Effort, p.options.ReasoningEffortMap); effort != "" && effort != "none" {
+		if effort := mappedReasoningEffort(req.Reasoning.Effort, p.options.ReasoningEffortMap); effort != "" &&
+			(effort != "none" || p.options.SendNoneReasoningEffort) {
 			upstream["reasoning_effort"] = effort
 		}
 	}

@@ -130,6 +130,29 @@ func TestResolveModel(t *testing.T) {
 	}
 }
 
+func TestCurrentOpenAIModelsAndAlias(t *testing.T) {
+	models := curatedProviderModels(providerOpenAI)
+	if len(models) < 3 {
+		t.Fatalf("OpenAI models = %#v", models)
+	}
+	want := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+	for i, id := range want {
+		if models[i].ID != id || models[i].ContextLength != 1_050_000 || !modelSupportsReasoning(models[i]) {
+			t.Fatalf("OpenAI model %d = %#v", i, models[i])
+		}
+	}
+	for _, model := range models {
+		if model.ID == "gpt-5.6" {
+			t.Fatal("GPT-5.6 alias should not duplicate Sol in the picker")
+		}
+	}
+	resolveModels := append(append([]Model(nil), models...), curatedProviderModelAliases(providerOpenAI)...)
+	res, ok := resolveModel("gpt-5.6", resolveModels)
+	if !ok || !res.Exact || res.Model.ID != "gpt-5.6" || res.Model.ContextLength != 1_050_000 {
+		t.Fatalf("GPT-5.6 alias resolution = %#v, %v", res, ok)
+	}
+}
+
 func TestArgParsingAndLaunchSpec(t *testing.T) {
 	home := withTestHome(t)
 

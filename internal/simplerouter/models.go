@@ -29,6 +29,9 @@ var recommendedGeminiModelIDs = []string{
 
 var recommendedFirstClassModelIDs = []string{
 	"muse-spark-1.1",
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
 	"gpt-5.5",
 	"gpt-5.4",
 	"gpt-5.4-mini",
@@ -60,6 +63,9 @@ func curatedProviderModels(provider string) []Model {
 	switch provider {
 	case providerOpenAI:
 		models = []Model{
+			{ID: "gpt-5.6-sol", Name: "GPT-5.6 Sol", ContextLength: 1_050_000, SupportedParameters: []string{"tools", "reasoning"}},
+			{ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", ContextLength: 1_050_000, SupportedParameters: []string{"tools", "reasoning"}},
+			{ID: "gpt-5.6-luna", Name: "GPT-5.6 Luna", ContextLength: 1_050_000, SupportedParameters: []string{"tools", "reasoning"}},
 			{ID: "gpt-5.5", Name: "GPT-5.5", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
 			{ID: "gpt-5.4", Name: "GPT-5.4", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
 			{ID: "gpt-5.4-mini", Name: "GPT-5.4 mini", ContextLength: 400_000, SupportedParameters: []string{"tools", "reasoning"}},
@@ -80,6 +86,19 @@ func curatedProviderModels(provider string) []Model {
 		}
 	}
 	return append([]Model(nil), models...)
+}
+
+// curatedProviderModelAliases are accepted for explicit --model selections but
+// omitted from the picker so aliases do not appear as duplicate model rows.
+func curatedProviderModelAliases(provider string) []Model {
+	switch provider {
+	case providerOpenAI:
+		return []Model{
+			{ID: "gpt-5.6", Name: "GPT-5.6 (Sol alias)", ContextLength: 1_050_000, SupportedParameters: []string{"tools", "reasoning"}},
+		}
+	default:
+		return nil
+	}
 }
 
 type modelResolution struct {

@@ -4,7 +4,7 @@ dist/
 .cache/
 .research/
 .private/
-.claude/
+.codex/
 design_plan.html
 
 ollama-main/
