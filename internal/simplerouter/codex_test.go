@@ -290,3 +290,236 @@ func TestInstalledCodexExecUsesGeneratedResponsesProvider(t *testing.T) {
 		t.Fatal("mock server did not receive a Responses request")
 	}
 }
+
+func TestInstalledCodexExecThroughChatCompatibilityProxy(t *testing.T) {
+	codexPath, err := findCodex()
+	if err != nil {
+		t.Skip(err)
+	}
+
+	chatRequests := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer chat-provider-key" {
+			http.Error(w, "missing routed authorization", http.StatusUnauthorized)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		chatRequests <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			`data: {"id":"chatcmpl_codex","choices":[{"index":0,"delta":{"reasoning_content":"brief thought"}}]}`,
+			``,
+			`data: {"id":"chatcmpl_codex","choices":[{"index":0,"delta":{"content":"CHAT_OK"}}]}`,
+			``,
+			`data: {"id":"chatcmpl_codex","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			``,
+			`data: {"id":"chatcmpl_codex","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5,"completion_tokens_details":{"reasoning_tokens":1}}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n"))
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesChatProxy(
+		upstream.URL,
+		"test/chat-model",
+		upstream.Client(),
+		responsesChatProxyOptions{
+			Label:                "Test Chat Provider",
+			SendReasoningEffort:  true,
+			ReasoningReplayField: "reasoning_content",
+			IncludeStreamUsage:   true,
+		},
+	))
+	defer proxy.Close()
+
+	catalogPath, cleanup, err := prepareCodexModelCatalog(codexPath, Model{
+		ID:            "test/chat-model",
+		ContextLength: 512_000,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	args := []string{
+		"exec",
+		"--ignore-user-config",
+		"--ignore-rules",
+		"--ephemeral",
+		"--skip-git-repo-check",
+		"--color", "never",
+	}
+	args = append(args, codexArgs(
+		"test/chat-model",
+		proxy.URL+"/v1",
+		catalogPath,
+		false,
+		[]string{"Reply with CHAT_OK and do not call tools."},
+		nil,
+	)...)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, codexPath, args...)
+	cmd.Env = buildCodexEnv(os.Environ(), "chat-provider-key")
+	cmd.Dir = t.TempDir()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("codex exec through chat proxy: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "CHAT_OK") {
+		t.Fatalf("stdout did not contain translated response:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+
+	select {
+	case body := <-chatRequests:
+		if body["model"] != "test/chat-model" || body["stream"] != true {
+			t.Fatalf("unexpected Chat request: %#v", body)
+		}
+		tools, _ := body["tools"].([]any)
+		if len(tools) == 0 {
+			t.Fatal("translated Chat request did not include Codex tools")
+		}
+		messages, _ := body["messages"].([]any)
+		if len(messages) < 2 {
+			t.Fatalf("translated Chat messages = %#v", messages)
+		}
+	default:
+		t.Fatal("mock Chat provider did not receive a request")
+	}
+}
+
+func TestInstalledCodexExecThroughGeminiInteractionsProxy(t *testing.T) {
+	codexPath, err := findCodex()
+	if err != nil {
+		t.Skip(err)
+	}
+
+	interactionRequests := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/interactions" || r.URL.Query().Get("alt") != "sse" {
+			http.Error(w, "unexpected URL "+r.URL.String(), http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("x-goog-api-key") != "gemini-provider-key" {
+			http.Error(w, "missing Gemini key", http.StatusUnauthorized)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		interactionRequests <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			`event: interaction.created`,
+			`data: {"event_type":"interaction.created","interaction":{"id":"v1_codex","status":"in_progress","model":"gemini-3.5-flash"}}`,
+			``,
+			`event: step.start`,
+			`data: {"event_type":"step.start","index":0,"step":{"type":"thought","summary":[{"type":"text","text":"brief thought"}]}}`,
+			``,
+			`event: step.delta`,
+			`data: {"event_type":"step.delta","index":0,"delta":{"type":"thought_signature","signature":"signed-thought"}}`,
+			``,
+			`event: step.stop`,
+			`data: {"event_type":"step.stop","index":0}`,
+			``,
+			`event: step.start`,
+			`data: {"event_type":"step.start","index":1,"step":{"type":"model_output","content":[{"type":"text","text":"GEMINI_OK"}]}}`,
+			``,
+			`event: step.stop`,
+			`data: {"event_type":"step.stop","index":1}`,
+			``,
+			`event: interaction.completed`,
+			`data: {"event_type":"interaction.completed","interaction":{"id":"v1_codex","status":"completed","model":"gemini-3.5-flash","usage":{"total_input_tokens":3,"total_output_tokens":1,"total_thought_tokens":1,"total_tokens":5}}}`,
+			``,
+			`event: done`,
+			`data: [DONE]`,
+			``,
+		}, "\n"))
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newGeminiInteractionsProxy(
+		upstream.URL,
+		"gemini-3.5-flash",
+		upstream.Client(),
+		false,
+	))
+	defer proxy.Close()
+
+	catalogPath, cleanup, err := prepareCodexModelCatalog(codexPath, Model{
+		ID:            "gemini-3.5-flash",
+		ContextLength: 1_000_000,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	args := []string{
+		"exec",
+		"--ignore-user-config",
+		"--ignore-rules",
+		"--ephemeral",
+		"--skip-git-repo-check",
+		"--color", "never",
+	}
+	args = append(args, codexArgs(
+		"gemini-3.5-flash",
+		proxy.URL+"/v1",
+		catalogPath,
+		false,
+		[]string{"Reply with GEMINI_OK and do not call tools."},
+		nil,
+	)...)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, codexPath, args...)
+	cmd.Env = buildCodexEnv(os.Environ(), "gemini-provider-key")
+	cmd.Dir = t.TempDir()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("codex exec through Gemini proxy: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "GEMINI_OK") {
+		t.Fatalf("stdout did not contain translated Gemini response:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+
+	select {
+	case body := <-interactionRequests:
+		if body["model"] != "gemini-3.5-flash" || body["store"] != false || body["stream"] != true {
+			t.Fatalf("unexpected Interactions request: %#v", body)
+		}
+		tools, _ := body["tools"].([]any)
+		var sawFunction, sawSearch bool
+		for _, rawTool := range tools {
+			tool, _ := rawTool.(map[string]any)
+			switch tool["type"] {
+			case "function":
+				sawFunction = true
+			case "google_search":
+				sawSearch = true
+			}
+		}
+		if !sawFunction || !sawSearch {
+			t.Fatalf("Interactions tools lost Codex functions/search: %#v", tools)
+		}
+	default:
+		t.Fatal("mock Gemini provider did not receive a request")
+	}
+}

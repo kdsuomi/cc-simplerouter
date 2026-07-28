@@ -3,18 +3,7 @@ package simplerouter
 import "net/http"
 
 func startGeminiResponsesProxy(upstreamBase, model string, httpClient *http.Client, disableReasoning bool) (string, func(), error) {
-	return startResponsesChatProxy(upstreamBase, model, httpClient, geminiResponsesOptions(disableReasoning))
-}
-
-func geminiResponsesOptions(disableReasoning bool) responsesChatProxyOptions {
-	return responsesChatProxyOptions{
-		Label:               "Gemini",
-		ChatPath:            "/openai/chat/completions",
-		DisableReasoning:    disableReasoning,
-		SendReasoningEffort: true,
-		IncludeStreamUsage:  true,
-		ScrubToolSchemas:    true,
-	}
+	return startGeminiInteractionsProxy(upstreamBase, model, httpClient, disableReasoning)
 }
 
 func startDeepSeekResponsesProxy(upstreamBase, model string, httpClient *http.Client, disableReasoning bool) (string, func(), error) {

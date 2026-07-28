@@ -825,18 +825,18 @@ func (t *chatResponsesStreamTranslator) onEvent(raw json.RawMessage) error {
 		t.fail(firstNonEmpty(chunk.Error.Code, chunk.Error.Type, "upstream_error"), chunk.Error.Message)
 		return errStreamAborted
 	}
-	t.start()
-	if chunk.ID != "" && strings.HasPrefix(chunk.ID, "resp_") {
+	if !t.started && chunk.ID != "" && strings.HasPrefix(chunk.ID, "resp_") {
 		t.responseID = chunk.ID
 	}
+	t.start()
 	if chunk.Usage.PromptTokens != 0 || chunk.Usage.CompletionTokens != 0 || chunk.Usage.TotalTokens != 0 {
 		t.usage = chunk.Usage
 	}
 	for _, choice := range chunk.Choices {
 		if choice.FinishReason != "" {
 			t.finishReason = choice.FinishReason
-			if choice.FinishReason == "network_error" {
-				t.fail("upstream_error", "upstream response finished with network_error")
+			if code, message := chatFinishFailure(choice.FinishReason); code != "" {
+				t.fail(code, message)
 				return errStreamAborted
 			}
 		}
@@ -872,6 +872,28 @@ func (t *chatResponsesStreamTranslator) onEvent(raw json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+func chatFinishFailure(reason string) (code, message string) {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "context_length_exceeded", "model_context_window_exceeded":
+		return "context_length_exceeded", "upstream model context window exceeded"
+	case "network_error", "insufficient_system_resource", "server_error", "error":
+		return "upstream_error", "upstream response finished with " + reason
+	default:
+		return "", ""
+	}
+}
+
+func chatIncompleteReason(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_output_tokens":
+		return "max_output_tokens"
+	case "content_filter", "sensitive", "safety":
+		return "content_filter"
+	default:
+		return ""
+	}
 }
 
 func (t *chatResponsesStreamTranslator) start() {
@@ -1203,22 +1225,33 @@ func (t *chatResponsesStreamTranslator) finish() {
 	if total == 0 {
 		total = t.usage.PromptTokens + t.usage.CompletionTokens
 	}
-	t.out.event("response.completed", map[string]any{
-		"type": "response.completed",
-		"response": map[string]any{
-			"id":       t.responseID,
-			"object":   "response",
-			"status":   "completed",
-			"model":    t.model,
-			"end_turn": toolCount == 0,
-			"usage": map[string]any{
-				"input_tokens":          t.usage.PromptTokens,
-				"input_tokens_details":  inputDetails,
-				"output_tokens":         t.usage.CompletionTokens,
-				"output_tokens_details": map[string]any{"reasoning_tokens": reasoningTokens},
-				"total_tokens":          total,
-			},
+	response := map[string]any{
+		"id":       t.responseID,
+		"object":   "response",
+		"status":   "completed",
+		"model":    t.model,
+		"end_turn": toolCount == 0,
+		"usage": map[string]any{
+			"input_tokens":          t.usage.PromptTokens,
+			"input_tokens_details":  inputDetails,
+			"output_tokens":         t.usage.CompletionTokens,
+			"output_tokens_details": map[string]any{"reasoning_tokens": reasoningTokens},
+			"total_tokens":          total,
 		},
+	}
+	if reason := chatIncompleteReason(t.finishReason); reason != "" {
+		response["status"] = "incomplete"
+		response["error"] = nil
+		response["incomplete_details"] = map[string]any{"reason": reason}
+		t.out.event("response.incomplete", map[string]any{
+			"type":     "response.incomplete",
+			"response": response,
+		})
+		return
+	}
+	t.out.event("response.completed", map[string]any{
+		"type":     "response.completed",
+		"response": response,
 	})
 }
 

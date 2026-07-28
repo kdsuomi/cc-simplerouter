@@ -20,6 +20,7 @@ var recommendedModelIDs = []string{
 // contain "/" and OpenRouter ids always do, so the two lists can share the
 // recommendation machinery without colliding.
 var recommendedGeminiModelIDs = []string{
+	"gemini-3.6-flash",
 	"gemini-3.1-pro-preview",
 	"gemini-3.5-flash",
 	"gemini-2.5-pro",

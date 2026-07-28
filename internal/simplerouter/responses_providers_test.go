@@ -2,13 +2,6 @@ package simplerouter
 
 import "testing"
 
-func TestGeminiResponsesOptions(t *testing.T) {
-	got := geminiResponsesOptions(false)
-	if got.ChatPath != "/openai/chat/completions" || !got.SendReasoningEffort || !got.IncludeStreamUsage || !got.ScrubToolSchemas {
-		t.Fatalf("Gemini options = %+v", got)
-	}
-}
-
 func TestDeepSeekResponsesOptions(t *testing.T) {
 	got := deepSeekResponsesOptions(false)
 	if got.ChatPath != "/chat/completions" || got.ReasoningReplayField != "reasoning_content" || !got.IncludeStreamUsage {

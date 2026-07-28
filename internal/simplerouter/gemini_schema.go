@@ -28,7 +28,7 @@ func scrubJSONSchema(raw json.RawMessage) json.RawMessage {
 	return out
 }
 
-// Keywords Gemini's Schema proto accepts (v1beta). Anything else causes a
+// Keywords Gemini's function schema accepts. Anything else causes a
 // hard 400 "Unknown name ... Cannot find field", so scrubbing works as an
 // allow-list — Codex tool schemas carry draft-2020-12 keywords
 // (propertyNames, additionalProperties, ...) Gemini does not accept.

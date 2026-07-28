@@ -3,6 +3,7 @@ package simplerouter
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -226,6 +227,92 @@ func TestChatResponsesStreamTranslatorPreservesToolsReasoningAndUsage(t *testing
 	}
 	if replay.MessageFields == nil || replay.ToolFields["call_patch"] == nil {
 		t.Fatalf("replay state lost message/tool metadata: %#v", replay)
+	}
+}
+
+func TestChatResponsesStreamTranslatorMapsIncompleteFinishReasons(t *testing.T) {
+	tests := []struct {
+		finishReason     string
+		incompleteReason string
+	}{
+		{finishReason: "length", incompleteReason: "max_output_tokens"},
+		{finishReason: "content_filter", incompleteReason: "content_filter"},
+		{finishReason: "sensitive", incompleteReason: "content_filter"},
+	}
+	for _, test := range tests {
+		t.Run(test.finishReason, func(t *testing.T) {
+			var output bytes.Buffer
+			translator := newChatResponsesStreamTranslator(&output, nil, "vendor/model", &responseToolRegistry{})
+			if err := translator.onEvent(json.RawMessage(`{"id":"resp_upstream","choices":[{"index":0,"delta":{"content":"partial"}}]}`)); err != nil {
+				t.Fatal(err)
+			}
+			finish := fmt.Sprintf(`{"id":"resp_upstream","choices":[{"index":0,"delta":{},"finish_reason":%q}]}`, test.finishReason)
+			if err := translator.onEvent(json.RawMessage(finish)); err != nil {
+				t.Fatal(err)
+			}
+			translator.finish()
+
+			var created, incomplete map[string]any
+			for _, event := range decodeTestSSE(t, output.String()) {
+				switch event["type"] {
+				case "response.created":
+					created = event["response"].(map[string]any)
+				case "response.incomplete":
+					incomplete = event["response"].(map[string]any)
+				case "response.completed":
+					t.Fatal("incomplete response was also marked completed")
+				}
+			}
+			if created["id"] != "resp_upstream" {
+				t.Fatalf("created response id = %#v, want upstream id", created["id"])
+			}
+			if incomplete == nil || incomplete["status"] != "incomplete" {
+				t.Fatalf("incomplete response = %#v", incomplete)
+			}
+			details := incomplete["incomplete_details"].(map[string]any)
+			if details["reason"] != test.incompleteReason {
+				t.Fatalf("incomplete reason = %#v, want %q", details["reason"], test.incompleteReason)
+			}
+		})
+	}
+}
+
+func TestChatResponsesStreamTranslatorMapsFailedFinishReasons(t *testing.T) {
+	tests := []struct {
+		finishReason string
+		code         string
+	}{
+		{finishReason: "context_length_exceeded", code: "context_length_exceeded"},
+		{finishReason: "insufficient_system_resource", code: "upstream_error"},
+		{finishReason: "network_error", code: "upstream_error"},
+	}
+	for _, test := range tests {
+		t.Run(test.finishReason, func(t *testing.T) {
+			var output bytes.Buffer
+			translator := newChatResponsesStreamTranslator(&output, nil, "vendor/model", &responseToolRegistry{})
+			event := fmt.Sprintf(`{"choices":[{"index":0,"delta":{},"finish_reason":%q}]}`, test.finishReason)
+			if err := translator.onEvent(json.RawMessage(event)); !errors.Is(err, errStreamAborted) {
+				t.Fatalf("onEvent error = %v, want errStreamAborted", err)
+			}
+			translator.finish()
+
+			var failed map[string]any
+			for _, event := range decodeTestSSE(t, output.String()) {
+				switch event["type"] {
+				case "response.failed":
+					failed = event["response"].(map[string]any)
+				case "response.completed", "response.incomplete":
+					t.Fatalf("failed response also emitted terminal event %q", event["type"])
+				}
+			}
+			if failed == nil || failed["status"] != "failed" {
+				t.Fatalf("failed response = %#v", failed)
+			}
+			gotError := failed["error"].(map[string]any)
+			if gotError["code"] != test.code {
+				t.Fatalf("error code = %#v, want %q", gotError["code"], test.code)
+			}
+		})
 	}
 }
 
