@@ -11,6 +11,8 @@ installation. Provider overrides, temporary model metadata, and any localhost pr
 exist only for the child Codex process and are removed when that process exits.
 Launched sessions also use Codex's standard service tier, disabling Fast mode without
 changing the user's global service-tier preference for direct Codex sessions.
+When the companion `codex-simplerouter` binary is installed, launched sessions stream
+reasoning in the transcript by default and expose `/thinking` as a session-only toggle.
 
 ```powershell
 simplerouter                                      # pick provider, enter key, pick model
@@ -87,6 +89,19 @@ uses a different protocol.
 
 The loopback servers bind to `127.0.0.1`, forward the selected session key, and
 shut down with Codex.
+
+### Live thinking
+
+`simplerouter` prefers the companion `codex-simplerouter` binary over the normal
+Codex executable when it is available. That build ports the live reasoning behavior
+from [openai/codex#6006](https://github.com/openai/codex/pull/6006) to current Codex.
+It is enabled by default only when the active provider is `simplerouter_session`;
+running the ordinary `codex` command remains unchanged.
+
+Use `/thinking` to toggle the live reasoning block, or `/thinking on`,
+`/thinking off`, and `/thinking status` for an explicit action. The toggle changes
+only the current launched process and continues to honor Codex's
+`hide_agent_reasoning` setting.
 
 ### OpenRouter endpoint pinning
 

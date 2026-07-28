@@ -16,6 +16,7 @@ const (
 	codexAPIKeyEnv                  = "SIMPLEROUTER_CODEX_API_KEY"
 	codexProviderName               = "simplerouter_session"
 	codexDefaultServiceTierOverride = "default"
+	codexSimpleRouterBinaryName     = "codex-simplerouter"
 )
 
 type codexModelCatalog struct {
@@ -23,7 +24,7 @@ type codexModelCatalog struct {
 }
 
 func findCodex() (string, error) {
-	for _, name := range []string{"codex", "codex.cmd"} {
+	for _, name := range []string{codexSimpleRouterBinaryName, codexSimpleRouterBinaryName + ".exe"} {
 		if path, err := exec.LookPath(name); err == nil {
 			return path, nil
 		}
@@ -33,6 +34,21 @@ func findCodex() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	patchedName := codexSimpleRouterBinaryName
+	if runtime.GOOS == "windows" {
+		patchedName += ".exe"
+	}
+	patchedPath := filepath.Join(home, ".local", "bin", patchedName)
+	if info, statErr := os.Stat(patchedPath); statErr == nil && !info.IsDir() {
+		return patchedPath, nil
+	}
+
+	for _, name := range []string{"codex", "codex.cmd"} {
+		if path, lookErr := exec.LookPath(name); lookErr == nil {
+			return path, nil
+		}
+	}
+
 	var fallbacks []string
 	if runtime.GOOS == "windows" {
 		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
@@ -190,6 +206,9 @@ func codexArgs(model, baseURL, catalogPath string, disableThinking bool, positio
 		"-c", "model_provider=" + tomlString(codexProviderName),
 		"-c", "model_providers." + codexProviderName + "=" + provider,
 		"-c", "model_catalog_json=" + tomlString(catalogPath),
+		// Request raw reasoning events when a native Responses provider exposes
+		// them. The patched TUI still honors hide_agent_reasoning and /thinking.
+		"-c", `show_raw_agent_reasoning=true`,
 		// "default" is Codex's explicit standard-routing sentinel. Applying it
 		// here prevents a global Fast-mode preference from leaking into this child.
 		"-c", "service_tier=" + tomlString(codexDefaultServiceTierOverride),

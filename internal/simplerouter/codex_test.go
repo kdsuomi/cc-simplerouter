@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -125,6 +127,7 @@ func TestCodexArgsUseSessionProviderAndPreservePrompt(t *testing.T) {
 		`env_key = "SIMPLEROUTER_CODEX_API_KEY"`,
 		`wire_api = "responses"`,
 		`model_catalog_json="C:\\Temp Folder\\models.json"`,
+		`show_raw_agent_reasoning=true`,
 		`service_tier="default"`,
 		`model_reasoning_effort="none"`,
 		"--sandbox\nworkspace-write",
@@ -136,6 +139,33 @@ func TestCodexArgsUseSessionProviderAndPreservePrompt(t *testing.T) {
 	}
 	if args[len(args)-1] != "fix the tests" {
 		t.Fatalf("prompt = %q, want one final positional", args[len(args)-1])
+	}
+}
+
+func TestFindCodexPrefersSimpleRouterBinary(t *testing.T) {
+	home := t.TempDir()
+	oldUserHomeDir := userHomeDir
+	userHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { userHomeDir = oldUserHomeDir })
+
+	name := codexSimpleRouterBinaryName
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	patchedPath := filepath.Join(home, ".local", "bin", name)
+	if err := os.MkdirAll(filepath.Dir(patchedPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(patchedPath, []byte("patched codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := findCodex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != patchedPath {
+		t.Fatalf("findCodex() = %q, want patched binary %q", got, patchedPath)
 	}
 }
 
