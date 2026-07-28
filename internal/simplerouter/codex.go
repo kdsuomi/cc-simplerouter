@@ -100,9 +100,19 @@ func buildCodexModelCatalog(raw []byte, model Model, supportsReasoning bool) ([]
 
 	var template map[string]any
 	for _, candidate := range source.Models {
-		if candidate["apply_patch_tool_type"] == "freeform" && boolValue(candidate["supports_parallel_tool_calls"]) {
+		if candidate["apply_patch_tool_type"] == "freeform" &&
+			boolValue(candidate["supports_parallel_tool_calls"]) &&
+			candidate["tool_mode"] == nil {
 			template = candidate
 			break
+		}
+	}
+	if template == nil {
+		for _, candidate := range source.Models {
+			if candidate["apply_patch_tool_type"] == "freeform" && boolValue(candidate["supports_parallel_tool_calls"]) {
+				template = candidate
+				break
+			}
 		}
 	}
 	if template == nil {
@@ -143,6 +153,8 @@ func buildCodexModelCatalog(raw []byte, model Model, supportsReasoning bool) ([]
 	routed["max_context_window"] = contextWindow
 	routed["apply_patch_tool_type"] = "freeform"
 	routed["supports_parallel_tool_calls"] = true
+	routed["tool_mode"] = nil
+	routed["multi_agent_version"] = "v2"
 	routed["use_responses_lite"] = false
 	routed["upgrade"] = nil
 	routed["service_tiers"] = []any{}

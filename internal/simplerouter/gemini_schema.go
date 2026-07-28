@@ -2,8 +2,8 @@ package simplerouter
 
 import "encoding/json"
 
-// scrubJSONSchema converts an Anthropic tool input_schema (JSON Schema) into
-// the OpenAPI subset Gemini accepts for functionDeclarations.parameters.
+// scrubJSONSchema converts a Codex function schema into the OpenAPI subset
+// Gemini accepts through its OpenAI-compatible function-calling surface.
 // Gemini rejects requests containing unknown schema keywords, so this strips
 // or rewrites everything outside the accepted subset. Returns nil when the
 // schema is empty or unusable — callers should omit parameters entirely then
@@ -30,8 +30,8 @@ func scrubJSONSchema(raw json.RawMessage) json.RawMessage {
 
 // Keywords Gemini's Schema proto accepts (v1beta). Anything else causes a
 // hard 400 "Unknown name ... Cannot find field", so scrubbing works as an
-// allow-list — Claude Code's real tool schemas carry draft-2020-12 keywords
-// (propertyNames, additionalProperties, ...) Gemini has never heard of.
+// allow-list — Codex tool schemas carry draft-2020-12 keywords
+// (propertyNames, additionalProperties, ...) Gemini does not accept.
 var geminiAllowedSchemaKeys = map[string]bool{
 	"type":             true,
 	"format":           true,

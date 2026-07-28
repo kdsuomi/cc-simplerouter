@@ -18,7 +18,6 @@ var errOpenRouterKeyRejected = errors.New("OpenRouter rejected the API key")
 
 const (
 	defaultOpenRouterAPIBase = "https://openrouter.ai/api/v1"
-	defaultAnthropicBaseURL  = "https://openrouter.ai/api"
 )
 
 type openRouterClient struct {
@@ -63,7 +62,7 @@ func (c *openRouterClient) models(ctx context.Context, key string) ([]Model, err
 	if err != nil {
 		return nil, err
 	}
-	// Trim the catalog to models usable by Claude Code and order by popularity:
+	// Trim the catalog to models useful in Codex and order by popularity:
 	// text output, tool-calling support, most-popular first. This drops ~90
 	// junk/unusable entries (image-only, no-tools, obscure) before display.
 	q := req.URL.Query()

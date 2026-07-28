@@ -1,16 +1,32 @@
 package simplerouter
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildCodexModelCatalogPreservesFullToolDescriptor(t *testing.T) {
 	source := []byte(`{
 	  "models": [
+	    {
+	      "slug": "code-mode-template",
+	      "base_instructions": "Code mode only.",
+	      "apply_patch_tool_type": "freeform",
+	      "supports_parallel_tool_calls": true,
+	      "tool_mode": "code_mode_only",
+	      "context_window": 272000
+	    },
 	    {
 	      "slug": "gpt-template",
 	      "display_name": "Template",
@@ -49,10 +65,13 @@ func TestBuildCodexModelCatalogPreservesFullToolDescriptor(t *testing.T) {
 		t.Fatalf("context windows = %v/%v", model["context_window"], model["max_context_window"])
 	}
 	if model["base_instructions"] != "You are Codex." {
-		t.Fatalf("base instructions were not preserved")
+		t.Fatalf("direct-tool base instructions were not preserved")
 	}
 	if model["apply_patch_tool_type"] != "freeform" || !boolValue(model["supports_parallel_tool_calls"]) {
 		t.Fatalf("full Codex tools were not preserved: %#v", model)
+	}
+	if model["tool_mode"] != nil || model["multi_agent_version"] != "v2" {
+		t.Fatalf("expected direct tools plus multi-agent v2, got %#v", model)
 	}
 	if model["default_reasoning_level"] != "medium" {
 		t.Fatalf("reasoning descriptor was not preserved: %#v", model)
@@ -157,5 +176,117 @@ func TestPrepareCodexModelCatalogWithInstalledCodex(t *testing.T) {
 	}
 	if len(got.Models) != 1 || got.Models[0]["slug"] != "test/provider-model" {
 		t.Fatalf("generated catalog = %#v", got)
+	}
+}
+
+func TestInstalledCodexExecUsesGeneratedResponsesProvider(t *testing.T) {
+	codexPath, err := findCodex()
+	if err != nil {
+		t.Skip(err)
+	}
+	requests := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer routed-test-key" {
+			http.Error(w, "missing routed authorization", http.StatusUnauthorized)
+			return
+		}
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			http.Error(w, readErr.Error(), http.StatusBadRequest)
+			return
+		}
+		requests <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		fmt.Fprint(w, strings.Join([]string{
+			`event: response.created`,
+			`data: {"type":"response.created","response":{"id":"resp_test"}}`,
+			``,
+			`event: response.output_item.added`,
+			`data: {"type":"response.output_item.added","item":{"type":"message","id":"msg_test","role":"assistant","content":[{"type":"output_text","text":""}]}}`,
+			``,
+			`event: response.output_text.delta`,
+			`data: {"type":"response.output_text.delta","delta":"OK"}`,
+			``,
+			`event: response.output_item.done`,
+			`data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_test","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"OK"}]}}`,
+			``,
+			`event: response.completed`,
+			`data: {"type":"response.completed","response":{"id":"resp_test","end_turn":true,"usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2}}}`,
+			``,
+			``,
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	catalogPath, cleanup, err := prepareCodexModelCatalog(codexPath, Model{
+		ID:            "test/provider-model",
+		ContextLength: 512_000,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	args := []string{
+		"exec",
+		"--ignore-user-config",
+		"--ignore-rules",
+		"--ephemeral",
+		"--skip-git-repo-check",
+		"--color", "never",
+	}
+	args = append(args, codexArgs(
+		"test/provider-model",
+		server.URL+"/v1",
+		catalogPath,
+		false,
+		[]string{"Reply with OK and do not call tools."},
+		nil,
+	)...)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, codexPath, args...)
+	cmd.Env = buildCodexEnv(os.Environ(), "routed-test-key")
+	cmd.Dir = t.TempDir()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("codex exec: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "OK") {
+		t.Fatalf("stdout did not contain model response:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+	}
+
+	select {
+	case raw := <-requests:
+		var body map[string]any
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatal(err)
+		}
+		if body["model"] != "test/provider-model" || body["stream"] != true {
+			t.Fatalf("unexpected Responses request: %#v", body)
+		}
+		tools, _ := body["tools"].([]any)
+		if len(tools) == 0 {
+			t.Fatal("Codex request did not include its tools")
+		}
+		var toolKinds []string
+		for _, rawTool := range tools {
+			tool, _ := rawTool.(map[string]any)
+			toolKinds = append(toolKinds, fmt.Sprint(tool["type"])+":"+fmt.Sprint(tool["name"]))
+			if tool["type"] == "namespace" || tool["type"] == "web_search" || tool["type"] == "custom" {
+				encoded, _ := json.Marshal(tool)
+				t.Logf("captured special tool: %s", encoded)
+			}
+		}
+		t.Logf("captured Codex tools: %s", strings.Join(toolKinds, ", "))
+	default:
+		t.Fatal("mock server did not receive a Responses request")
 	}
 }

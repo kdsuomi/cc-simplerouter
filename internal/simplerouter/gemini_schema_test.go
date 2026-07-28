@@ -20,7 +20,7 @@ func scrubToMap(t *testing.T, in string) map[string]any {
 }
 
 func TestScrubJSONSchemaDropsUnsupportedKeys(t *testing.T) {
-	// Shaped like a realistic Claude Code tool schema.
+	// Shaped like a realistic Codex tool schema.
 	in := `{
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object",
@@ -51,7 +51,7 @@ func TestScrubJSONSchemaDropsUnsupportedKeys(t *testing.T) {
 }
 
 func TestScrubJSONSchemaAllowListsUnknownKeywords(t *testing.T) {
-	// Regression: real Claude Code tool schemas carry draft-2020-12 keywords
+	// Regression: real Codex tool schemas carry draft-2020-12 keywords
 	// (propertyNames, dependentRequired, ...) that made Gemini 400 with
 	// "Unknown name ... Cannot find field". The scrubber must allow-list.
 	in := `{

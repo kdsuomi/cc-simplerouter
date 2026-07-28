@@ -215,14 +215,6 @@ func modelTags(m Model) []string {
 	return tags
 }
 
-func modelWarning(m Model) string {
-	id := normalizeModelText(m.ID)
-	if strings.HasPrefix(id, "openai/gpt-5") {
-		return "known GPT-5 Claude Code issue"
-	}
-	return ""
-}
-
 func supportsParameter(m Model, param string) bool {
 	for _, got := range m.SupportedParameters {
 		if strings.EqualFold(got, param) {

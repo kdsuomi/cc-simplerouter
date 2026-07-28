@@ -11,6 +11,7 @@ import (
 var errProviderKeyRejected = errors.New("provider rejected the API key")
 
 const (
+	defaultGeminiAPIBase   = "https://generativelanguage.googleapis.com/v1beta"
 	defaultOpenAIAPIBase   = "https://api.openai.com/v1"
 	defaultDeepSeekAPIBase = "https://api.deepseek.com"
 	defaultZAIAPIBase      = "https://api.z.ai/api/paas/v4"

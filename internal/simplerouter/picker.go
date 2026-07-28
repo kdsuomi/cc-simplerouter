@@ -415,9 +415,6 @@ func (a *app) printModelDetails(model Model, style terminalStyle) {
 	field("Context", formatContextLength(model.ContextLength)+" tokens", ctxColor(model.ContextLength))
 	field("Price/M", formatPricePerMillion(model.PromptPrice, model.OutputPrice), priceColor(model))
 	field("Tags", strings.Join(modelTags(model), ", "), clrModel)
-	if warning := modelWarning(model); warning != "" {
-		fmt.Fprintf(a.stderr, "  %s %s\n", style.paint(clrDim, padRight("Warning", 9)), style.warning(warning))
-	}
 	if len(model.SupportedParameters) > 0 {
 		fmt.Fprintf(a.stderr, "  %s %s\n", style.paint(clrDim, padRight("Params", 9)), style.paint(clrName, strings.Join(model.SupportedParameters, ", ")))
 	}

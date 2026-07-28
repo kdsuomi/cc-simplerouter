@@ -7,7 +7,7 @@ import (
 	"os/exec"
 )
 
-func runClaudeCommand(spec launchSpec) error {
+func runCodexCommand(spec launchSpec) error {
 	cmd := exec.Command(spec.Path, spec.Args...)
 	cmd.Dir = spec.Dir
 	cmd.Env = spec.Env
