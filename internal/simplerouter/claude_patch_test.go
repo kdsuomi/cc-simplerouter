@@ -102,7 +102,7 @@ func TestPrepareClaudeLiveThinkingPatchCreatesPatchedCopy(t *testing.T) {
 	}
 }
 
-func TestPrepareClaudeLiveThinkingPatchRewritesIncompleteCachedCopy(t *testing.T) {
+func TestPrepareClaudeLiveThinkingPatchAcceptsCachedCopyWithRequiredPatch(t *testing.T) {
 	home := withTestHome(t)
 	src := filepath.Join(home, ".local", "bin", "claude.exe")
 	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
@@ -121,8 +121,9 @@ func TestPrepareClaudeLiveThinkingPatchRewritesIncompleteCachedCopy(t *testing.T
 		t.Fatal("patched = false, want true")
 	}
 
-	// Simulate a cached copy from an older simplerouter that only applied the
-	// live-thinking patch: it must be rebuilt with all patches.
+	// Simulate a cached copy that has the required functional patch but not the
+	// optional launch-card marker. It remains valid across cosmetic bundle
+	// changes and does not need to be rebuilt.
 	stale := append([]byte(nil), original...)
 	edits, ok, err := findLiveThinkingEdits(stale)
 	if err != nil || !ok {
@@ -149,8 +150,8 @@ func TestPrepareClaudeLiveThinkingPatchRewritesIncompleteCachedCopy(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(patchedData, []byte(launchVersionPatchMarker)) {
-		t.Fatal("cached patch was not rewritten with launch-version replacement")
+	if bytes.Contains(patchedData, []byte(launchVersionPatchMarker)) {
+		t.Fatal("cached patch was unexpectedly rewritten for optional launch-version replacement")
 	}
 }
 
@@ -165,8 +166,8 @@ func TestPrepareClaudeLiveThinkingPatchFallsBackForUnsupportedBinary(t *testing.
 	}
 
 	got, patched, err := prepareClaudeLiveThinkingPatch(src)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "required Claude live-thinking patch found no target") {
+		t.Fatalf("error = %v, want unsupported live-thinking diagnostic", err)
 	}
 	if patched || got != src {
 		t.Fatalf("patch = (%q, %v), want (%q, false)", got, patched, src)
@@ -225,7 +226,11 @@ func TestClaudePatchesMatchInstalledClaude(t *testing.T) {
 			t.Fatalf("%s: %v", patch.name, err)
 		}
 		if !ok {
-			t.Fatalf("%s patch found no target in installed Claude Code (%s)", patch.name, claudePath)
+			if patch.required {
+				t.Fatalf("%s patch found no target in installed Claude Code (%s)", patch.name, claudePath)
+			}
+			t.Logf("optional %s patch has no target in installed Claude Code (%s)", patch.name, claudePath)
+			continue
 		}
 		for _, edit := range edits {
 			if len(edit.replacement) > edit.length {

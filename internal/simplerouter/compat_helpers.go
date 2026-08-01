@@ -111,6 +111,36 @@ func reasoningEffort(budgetTokens int) string {
 	}
 }
 
+func anthropicThinkingEnabled(req *anthropicRequest) bool {
+	if req == nil || req.Thinking == nil {
+		return false
+	}
+	return req.Thinking.Type == "enabled" || req.Thinking.Type == "adaptive"
+}
+
+// anthropicReasoningEffort returns Claude Code's current output_config effort
+// when present, falling back to the legacy budget_tokens mapping.
+func anthropicReasoningEffort(req *anthropicRequest) string {
+	if req != nil && req.OutputConfig != nil {
+		if effort := normalizeReasoningEffort(req.OutputConfig.Effort); effort != "" {
+			return effort
+		}
+	}
+	if anthropicThinkingEnabled(req) {
+		return reasoningEffort(req.Thinking.BudgetTokens)
+	}
+	return ""
+}
+
+func normalizeReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "none", "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return ""
+	}
+}
+
 func zaiReasoningEffort(budgetTokens int) string {
 	switch {
 	case budgetTokens >= 16_384:
@@ -119,6 +149,21 @@ func zaiReasoningEffort(budgetTokens int) string {
 		return "high"
 	case budgetTokens > 0:
 		return "low"
+	default:
+		return "max"
+	}
+}
+
+func zaiReasoningEffortName(effort string) string {
+	switch normalizeReasoningEffort(effort) {
+	case "none":
+		return "none"
+	case "low":
+		return "low"
+	case "medium", "high":
+		return "high"
+	case "xhigh", "max":
+		return "max"
 	default:
 		return "max"
 	}

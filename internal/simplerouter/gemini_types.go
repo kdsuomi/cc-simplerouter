@@ -113,17 +113,22 @@ type geminiCountTokensResponse struct {
 // dropped by encoding/json.
 
 type anthropicRequest struct {
-	Model         string               `json:"model"`
-	MaxTokens     int                  `json:"max_tokens"`
-	System        json.RawMessage      `json:"system,omitempty"` // string OR []block
-	Messages      []anthropicMessage   `json:"messages"`
-	Tools         []anthropicTool      `json:"tools,omitempty"`
-	ToolChoice    *anthropicToolChoice `json:"tool_choice,omitempty"`
-	Temperature   *float64             `json:"temperature,omitempty"`
-	TopP          *float64             `json:"top_p,omitempty"`
-	StopSequences []string             `json:"stop_sequences,omitempty"`
-	Stream        bool                 `json:"stream,omitempty"`
-	Thinking      *anthropicThinking   `json:"thinking,omitempty"`
+	Model         string                 `json:"model"`
+	MaxTokens     int                    `json:"max_tokens"`
+	System        json.RawMessage        `json:"system,omitempty"` // string OR []block
+	Messages      []anthropicMessage     `json:"messages"`
+	Tools         []anthropicTool        `json:"tools,omitempty"`
+	ToolChoice    *anthropicToolChoice   `json:"tool_choice,omitempty"`
+	Temperature   *float64               `json:"temperature,omitempty"`
+	TopP          *float64               `json:"top_p,omitempty"`
+	StopSequences []string               `json:"stop_sequences,omitempty"`
+	Stream        bool                   `json:"stream,omitempty"`
+	Thinking      *anthropicThinking     `json:"thinking,omitempty"`
+	OutputConfig  *anthropicOutputConfig `json:"output_config,omitempty"`
+	// ContextManagement is parsed so current Claude Code request shapes remain
+	// visible to translators. Providers without an equivalent intentionally
+	// omit it; native Anthropic-compatible proxies preserve the raw body.
+	ContextManagement json.RawMessage `json:"context_management,omitempty"`
 }
 
 type anthropicMessage struct {
@@ -169,8 +174,12 @@ type anthropicToolChoice struct {
 }
 
 type anthropicThinking struct {
-	Type         string `json:"type"` // enabled | disabled
+	Type         string `json:"type"` // adaptive | enabled | disabled
 	BudgetTokens int    `json:"budget_tokens,omitempty"`
+}
+
+type anthropicOutputConfig struct {
+	Effort string `json:"effort,omitempty"` // none | low | medium | high | xhigh | max
 }
 
 type anthropicMessageResponse struct {

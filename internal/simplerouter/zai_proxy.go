@@ -218,8 +218,12 @@ func anthropicToZAIChat(req *anthropicRequest, disableThinking bool) ([]byte, er
 			out["thinking"] = map[string]any{"type": "disabled"}
 		} else {
 			out["thinking"] = map[string]any{"type": "enabled", "clear_thinking": false}
-			if req.Thinking != nil && req.Thinking.Type == "enabled" && zaiSupportsReasoningEffort(model) {
-				out["reasoning_effort"] = zaiReasoningEffort(req.Thinking.BudgetTokens)
+			if anthropicThinkingEnabled(req) && zaiSupportsReasoningEffort(model) {
+				if req.OutputConfig != nil && normalizeReasoningEffort(req.OutputConfig.Effort) != "" {
+					out["reasoning_effort"] = zaiReasoningEffortName(req.OutputConfig.Effort)
+				} else {
+					out["reasoning_effort"] = zaiReasoningEffort(req.Thinking.BudgetTokens)
+				}
 			}
 		}
 	}

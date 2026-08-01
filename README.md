@@ -2,7 +2,7 @@
 
 `simplerouter` instantly launches [Claude Code](https://claude.com/claude-code) against
 [OpenRouter](https://openrouter.ai), Google AI Studio Gemini, OpenAI, DeepSeek, Z.AI, or Meta models, with
-a launch ui for selecting your provider, model, and OpenRouter inference provider if desired.
+a launch UI for selecting your provider, model, and OpenRouter inference provider if desired.
 
 The only configuration required is pasting your provider API key on first launch.
 Unlike other "claude code routers", simplerouter configures everything automatically on launch, so
@@ -14,7 +14,7 @@ local webservers, or manually editing your .claude files.
 simplerouter                              # first run: pick provider + key + model
 simplerouter --model z-ai/glm-5.2 .       # launch with a specific model in the current dir
 simplerouter --provider gemini --select-model  # pick a Gemini model from Google AI Studio
-simplerouter --provider openai --model gpt-5.5
+simplerouter --provider openai --model gpt-5.6-sol
 simplerouter --provider deepseek --model deepseek-v4-flash
 simplerouter --provider zai --model glm-5.2
 simplerouter --provider meta --model muse-spark-1.1
@@ -42,7 +42,7 @@ The install scripts download the latest GitHub Release binary and install it to
 
 ## Build from source
 
-Requires [Go](https://go.dev/dl/).
+Requires [Go 1.24 or newer](https://go.dev/dl/).
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build_install.ps1
@@ -74,6 +74,11 @@ OpenRouter popularity, with recommended models pinned at the top; Gemini models 
 Google AI Studio and filtered to text/function-calling models. OpenAI, DeepSeek, Z.AI, and Meta use
 small curated model lists.
 
+The current OpenAI picker starts with GPT-5.6 Sol, Terra, and Luna. The official
+`gpt-5.6` Sol alias is accepted with `--model` but omitted from the picker so it
+does not appear as a duplicate. Gemini 3.6 Flash is pinned at the top of the
+recommended Gemini models when it is returned by Google AI Studio.
+
 ## Provider / endpoint selection
 
 simplerouter first asks which provider to use. From the model picker, press
@@ -84,8 +89,14 @@ OpenRouter endpoint, press **`Tab`** on a highlighted OpenRouter model:
 
 <img width="674" height="461" alt="image" src="https://github.com/user-attachments/assets/d2093cc0-270a-43ef-a980-b972e93439dc" />
 
-OpenRouter only honors provider routing in the request **body**, and Claude Code doesn't let you add body fields. So when you pin a provider, `simplerouter` starts a tiny localhost proxy for the session and points `ANTHROPIC_BASE_URL` at it; the proxy injects `provider.only` into each request before forwarding to OpenRouter. It binds to `127.0.0.1`, makes no changes to
-your OpenRouter account, and shuts down when `claude` exits.
+OpenRouter only honors provider routing in the request **body**. Current Claude
+Code exposes `CLAUDE_CODE_EXTRA_BODY` for static additions, but simplerouter
+still needs a session-only localhost proxy to translate the Anthropic Messages
+protocol, stream reasoning live, replay provider reasoning state across tool
+turns, and inject the endpoint chosen at launch. When an endpoint is pinned,
+the proxy adds `provider.only` and `allow_fallbacks: false` to every request.
+It binds to `127.0.0.1`, makes no changes to your OpenRouter account, and shuts
+down when `claude` exits.
 
 Gemini also uses a session-only localhost proxy, but as a translator: Claude Code sends Anthropic
 Messages, and the proxy forwards Gemini `generateContent` requests to Google AI Studio.
@@ -110,16 +121,40 @@ simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key
 - `--provider PROVIDER` — `openrouter`, `gemini`, `openai`, `deepseek`, `zai`, or `meta`
 - `--select-model` — show the provider/model picker even when a model is saved
 - `--reset-key` — forget saved API keys, then prompt again
-- `--disable-thinking` — drop Claude Code's Anthropic-specific thinking/beta
-  request fields (see below)
+- `--disable-thinking` — disable Claude Code thinking and experimental beta
+  request features for models that do not accept them (see below)
+
+## Keys and local configuration
+
+Environment variables take precedence over saved values:
+
+| Provider | Environment variables, in order |
+| --- | --- |
+| OpenRouter | `OPENROUTER_API_KEY` |
+| Google AI Studio | `GEMINI_API_KEY`, `GOOGLE_API_KEY` |
+| OpenAI | `OPENAI_API_KEY` |
+| DeepSeek | `DEEPSEEK_API_KEY` |
+| Z.AI | `ZAI_API_KEY`, `BIGMODEL_API_KEY` |
+| Meta | `META_API_KEY`, `MODEL_API_KEY` |
+
+If no environment value is present, simplerouter validates a saved key where
+the provider exposes a suitable endpoint or prompts without echoing in an
+interactive terminal. Keys and selected models are stored in
+`~/.simplerouter/config.json`. `--reset-key` removes the stored keys without
+discarding model choices.
 
 ## What it sets in Claude Code's environment
 
 Only for the launched process. Notably:
 
 - `ANTHROPIC_BASE_URL` → the selected provider endpoint or session-only local proxy
-- `ANTHROPIC_AUTH_TOKEN` → your selected provider key (`ANTHROPIC_API_KEY` for DeepSeek);
-  all model tiers (opus/sonnet/haiku/subagent) point at your chosen model
+- `ANTHROPIC_AUTH_TOKEN` → your selected provider key for every route;
+  `ANTHROPIC_API_KEY` is cleared so it cannot take precedence
+- Opus, Sonnet, Haiku, the custom model entry, and subagents → your chosen model
+- Model names, descriptions, and supported capabilities → the selected model;
+  this enables current effort and adaptive-thinking controls for gateway IDs
+- `CLAUDE_CODE_DISABLE_FAST_MODE=1` → prevents a saved Anthropic Fast Mode
+  preference from leaking into a non-Anthropic provider session
 - `CLAUDE_CODE_AUTO_COMPACT_WINDOW` → the model's context length
 - `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` → disables the "suggest what to
   type next" feature, which otherwise re-sends the whole conversation each turn
@@ -134,16 +169,50 @@ Responses API, DeepSeek through its Anthropic-compatible API, Z.AI through its C
 API, and Meta (Muse Spark) through its Anthropic-compatible Messages API. The picker filters or
 curates these lists to text models that support tool calling.
 
-For OpenRouter, model reasoning streams into Claude Code as it is generated: a patched
-copy of Claude Code renders it token by token, and even without the patch the proxies rotate
-thinking blocks every half second so thoughts appear progressively instead of only when the
-response finishes.
+Current Claude Code sends adaptive thinking as `thinking.type=adaptive` with
+`output_config.effort`. simplerouter maps that effort to OpenAI and OpenRouter
+directly, to the supported Z.AI effort levels, and to Gemini thinking levels or
+safe 2.5-generation budgets. Anthropic-compatible routes preserve
+`thinking`, `output_config`, and `context_management` in the original request.
+
+For OpenRouter, model reasoning streams into Claude Code as it is generated. A
+session-only patched copy of Claude Code renders it token by token without
+modifying the installed binary. The functional live-thinking patch is verified
+against the installed bundle; if a future Claude update changes that code,
+simplerouter prints a compatibility warning and uses periodic thinking blocks
+instead. The cosmetic patched-version marker is best-effort and cannot disable
+the functional patch.
 
 By default it preserves Claude Code's normal thinking behavior. If a provider
 chokes on Claude Code's thinking/beta request fields, retry with
 `--disable-thinking`:
 
 ```powershell
-simplerouter --disable-thinking --model XXX.
+simplerouter --disable-thinking --model MODEL_ID
 ```
+
+## Development
+
+```powershell
+$env:GOCACHE = Join-Path (Get-Location) ".gocache"
+go test ./... -count=1
+go vet ./...
+go build ./...
+```
+
+Build release artifacts with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1 -Version vX.Y.Z
+```
+
+Protocol and Claude Code references used by the implementation:
+
+- [Claude Code environment variables](https://code.claude.com/docs/en/env-vars)
+- [Claude Code model configuration](https://code.claude.com/docs/en/model-config)
+- [Claude Code LLM gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)
+- [OpenAI Responses and current models](https://developers.openai.com/api/docs/models)
+- [OpenRouter provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)
+- [Gemini models](https://ai.google.dev/gemini-api/docs/models)
+- [DeepSeek Anthropic API compatibility](https://api-docs.deepseek.com/guides/anthropic_api)
 

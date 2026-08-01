@@ -38,24 +38,60 @@ func buildClaudeEnv(base []string, baseURL, key, model string, contextLength int
 }
 
 func buildClaudeEnvWithEffort(base []string, baseURL, key, model string, contextLength int, disableThinking bool, effortLevel string) []string {
-	claudeModel := claudeCodeModel(model, contextLength)
-	env := envWithout(base,
-		"ANTHROPIC_BASE_URL",
-		"ANTHROPIC_AUTH_TOKEN",
-		"ANTHROPIC_API_KEY",
+	return buildClaudeEnvForModel(base, baseURL, key, Model{
+		ID:                  model,
+		Name:                model,
+		ContextLength:       contextLength,
+		SupportedParameters: []string{"tools", "reasoning"},
+	}, disableThinking, effortLevel)
+}
+
+func buildClaudeEnvForModel(base []string, baseURL, key string, model Model, disableThinking bool, effortLevel string) []string {
+	claudeModel := claudeCodeModel(model.ID, model.ContextLength)
+	modelName := strings.TrimSpace(model.Name)
+	if modelName == "" {
+		modelName = model.ID
+	}
+	modelDescription := strings.TrimSpace(modelDescription(model))
+	if modelDescription == "" {
+		modelDescription = "Routed by simplerouter"
+	} else {
+		modelDescription += " via simplerouter"
+	}
+	modelName = strings.NewReplacer("\r", " ", "\n", " ").Replace(modelName)
+	modelDescription = strings.NewReplacer("\r", " ", "\n", " ").Replace(modelDescription)
+	capabilities := ""
+	if modelSupportsReasoning(model) {
+		capabilities = "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
+	}
+
+	modelEnvPrefixes := []string{
 		"ANTHROPIC_DEFAULT_OPUS_MODEL",
 		"ANTHROPIC_DEFAULT_SONNET_MODEL",
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_CUSTOM_MODEL_OPTION",
+	}
+	blocked := []string{
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_API_KEY",
 		"CLAUDE_CODE_SUBAGENT_MODEL",
 		"CLAUDE_CODE_AUTO_COMPACT_WINDOW",
 		"CLAUDE_CODE_ATTRIBUTION_HEADER",
 		"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+		"CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+		"CLAUDE_CODE_DISABLE_FAST_MODE",
 		"CLAUDE_CODE_DISABLE_THINKING",
 		"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
 		"CLAUDE_CODE_EFFORT_LEVEL",
+		"CLAUDE_CODE_EXTRA_BODY",
 		"MAX_THINKING_TOKENS",
 		"ENABLE_CLAUDEAI_MCP_SERVERS",
-	)
+	}
+	for _, prefix := range modelEnvPrefixes {
+		blocked = append(blocked, prefix, prefix+"_NAME", prefix+"_DESCRIPTION", prefix+"_SUPPORTED_CAPABILITIES")
+	}
+	env := envWithout(base, blocked...)
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = defaultAnthropicBaseURL
 	}
@@ -66,7 +102,11 @@ func buildClaudeEnvWithEffort(base []string, baseURL, key, model string, context
 		"ANTHROPIC_DEFAULT_OPUS_MODEL="+claudeModel,
 		"ANTHROPIC_DEFAULT_SONNET_MODEL="+claudeModel,
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL="+claudeModel,
+		"ANTHROPIC_CUSTOM_MODEL_OPTION="+claudeModel,
 		"CLAUDE_CODE_SUBAGENT_MODEL="+claudeModel,
+		// Fast Mode is an Anthropic service tier. A saved /fast preference must
+		// not leak into a session routed to another provider.
+		"CLAUDE_CODE_DISABLE_FAST_MODE=1",
 		"CLAUDE_CODE_ATTRIBUTION_HEADER=0",
 		// Disable Claude Code's "suggest what to type next" feature: with a
 		// pinned model it re-sends the whole conversation just to predict the
@@ -77,8 +117,15 @@ func buildClaudeEnvWithEffort(base []string, baseURL, key, model string, context
 		// for this child process so Claude does not show the connector warning.
 		"ENABLE_CLAUDEAI_MCP_SERVERS=false",
 	)
-	if contextLength > 0 {
-		env = append(env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW="+strconv.Itoa(contextLength))
+	for _, prefix := range modelEnvPrefixes {
+		env = append(env,
+			prefix+"_NAME="+modelName,
+			prefix+"_DESCRIPTION="+modelDescription,
+			prefix+"_SUPPORTED_CAPABILITIES="+capabilities,
+		)
+	}
+	if model.ContextLength > 0 {
+		env = append(env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW="+strconv.Itoa(model.ContextLength))
 	}
 	if effort := strings.TrimSpace(effortLevel); effort != "" && !disableThinking {
 		env = append(env, "CLAUDE_CODE_EFFORT_LEVEL="+effort)

@@ -17,6 +17,9 @@ func TestSanitizeMetaRequestStripsRejectedFields(t *testing.T) {
 		"stop_sequences": ["foo"],
 		"top_k": 40,
 		"metadata": {"user_id": "u1"},
+		"thinking": {"type": "adaptive"},
+		"output_config": {"effort": "xhigh"},
+		"context_management": {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]},
 		"messages": [{"role": "user", "content": "hi"}]
 	}`)
 	out, err := sanitizeMetaRequest(body, "muse-spark-1.1[1m]", false)
@@ -42,6 +45,12 @@ func TestSanitizeMetaRequestStripsRejectedFields(t *testing.T) {
 	}
 	if _, ok := got["messages"]; !ok {
 		t.Error("messages missing")
+	}
+	if string(got["thinking"]) != `{"type":"adaptive"}` || string(got["output_config"]) != `{"effort":"xhigh"}` {
+		t.Errorf("current thinking fields not preserved: thinking=%s output_config=%s", got["thinking"], got["output_config"])
+	}
+	if _, ok := got["context_management"]; !ok {
+		t.Error("context_management missing")
 	}
 }
 

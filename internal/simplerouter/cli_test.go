@@ -120,6 +120,29 @@ func TestResolveModel(t *testing.T) {
 	}
 }
 
+func TestCurrentOpenAIModelsAndAlias(t *testing.T) {
+	models := curatedProviderModels(providerOpenAI)
+	if len(models) < 3 {
+		t.Fatalf("OpenAI models = %#v", models)
+	}
+	want := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+	for i, id := range want {
+		if models[i].ID != id || models[i].ContextLength != 1_050_000 || !modelSupportsReasoning(models[i]) {
+			t.Fatalf("OpenAI model %d = %#v", i, models[i])
+		}
+	}
+	for _, model := range models {
+		if model.ID == "gpt-5.6" {
+			t.Fatal("GPT-5.6 alias should not duplicate Sol in the picker")
+		}
+	}
+	resolveModels := append(append([]Model(nil), models...), curatedProviderModelAliases(providerOpenAI)...)
+	res, ok := resolveModel("gpt-5.6", resolveModels)
+	if !ok || !res.Exact || res.Model.ID != "gpt-5.6" || res.Model.ContextLength != 1_050_000 {
+		t.Fatalf("GPT-5.6 alias resolution = %#v, %v", res, ok)
+	}
+}
+
 func TestArgParsingAndLaunchSpec(t *testing.T) {
 	home := withTestHome(t)
 	binDir := filepath.Join(home, ".local", "bin")
@@ -340,6 +363,9 @@ func TestBuildClaudeEnvRemovesExistingValues(t *testing.T) {
 		"ANTHROPIC_AUTH_TOKEN=old",
 		"CLAUDE_CODE_DISABLE_THINKING=old",
 		"CLAUDE_CODE_EFFORT_LEVEL=old",
+		"CLAUDE_CODE_DISABLE_FAST_MODE=old",
+		"CLAUDE_CODE_EXTRA_BODY={\"service_tier\":\"auto\"}",
+		"ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES=old",
 		"ENABLE_CLAUDEAI_MCP_SERVERS=true",
 	}, "", "new-key", "z-ai/glm-5.2", 123, false)
 	m := envMap(env)
@@ -363,6 +389,26 @@ func TestBuildClaudeEnvRemovesExistingValues(t *testing.T) {
 	}
 	if m["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "z-ai/glm-5.2" {
 		t.Fatalf("model env not set")
+	}
+	if m["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "z-ai/glm-5.2" {
+		t.Fatalf("custom model option not set: %+v", m)
+	}
+	if m["CLAUDE_CODE_DISABLE_FAST_MODE"] != "1" {
+		t.Fatalf("Fast Mode not disabled: %+v", m)
+	}
+	wantCapabilities := "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
+	for _, key := range []string{
+		"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES",
+		"ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
+	} {
+		if m[key] != wantCapabilities {
+			t.Fatalf("%s = %q, want %q", key, m[key], wantCapabilities)
+		}
+	}
+	if _, ok := m["CLAUDE_CODE_EXTRA_BODY"]; ok {
+		t.Fatalf("parent extra body should not leak: %+v", m)
 	}
 	if _, ok := m["CLAUDE_CODE_DISABLE_THINKING"]; ok {
 		t.Fatalf("thinking should not be disabled by default: %+v", m)

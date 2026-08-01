@@ -278,7 +278,7 @@ func anthropicToOpenRouterChat(req *anthropicRequest, opts openRouterProxyOption
 			out["tool_choice"] = tc
 		}
 	}
-	if reasoning := openRouterReasoningParam(req.Thinking, opts); reasoning != nil {
+	if reasoning := openRouterReasoningParam(req, opts); reasoning != nil {
 		out["reasoning"] = reasoning
 	}
 	if opts.ProviderTag != "" {
@@ -295,14 +295,19 @@ func anthropicToOpenRouterChat(req *anthropicRequest, opts openRouterProxyOption
 // openRouterReasoningParam maps Anthropic's thinking config onto OpenRouter's
 // unified reasoning parameter. OpenRouter converts max_tokens to an effort
 // level (and vice versa) for models that only support one of the two.
-func openRouterReasoningParam(th *anthropicThinking, opts openRouterProxyOptions) map[string]any {
-	if opts.DisableThinking || !opts.SupportsReasoning || th == nil {
+func openRouterReasoningParam(req *anthropicRequest, opts openRouterProxyOptions) map[string]any {
+	if opts.DisableThinking || !opts.SupportsReasoning || req == nil || req.Thinking == nil {
 		return nil
 	}
-	switch th.Type {
+	switch req.Thinking.Type {
 	case "enabled", "adaptive":
-		if th.BudgetTokens > 0 {
-			return map[string]any{"max_tokens": th.BudgetTokens}
+		if req.OutputConfig != nil {
+			if effort := normalizeReasoningEffort(req.OutputConfig.Effort); effort != "" {
+				return map[string]any{"effort": effort}
+			}
+		}
+		if req.Thinking.BudgetTokens > 0 {
+			return map[string]any{"max_tokens": req.Thinking.BudgetTokens}
 		}
 		return map[string]any{"enabled": true}
 	default: // "disabled" or unknown future types: leave the model default

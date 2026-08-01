@@ -111,6 +111,54 @@ func TestOpenAITranslationUsesXHighEffortAndAssistantPhase(t *testing.T) {
 	}
 }
 
+func TestCurrentClaudeAdaptiveEffortTranslations(t *testing.T) {
+	req := &anthropicRequest{
+		Model:        "gpt-5.6",
+		MaxTokens:    1024,
+		Thinking:     &anthropicThinking{Type: "adaptive"},
+		OutputConfig: &anthropicOutputConfig{Effort: "xhigh"},
+		Messages:     []anthropicMessage{{Role: "user", Content: json.RawMessage(`"think"`)}},
+	}
+
+	payload, err := anthropicToOpenAIResponses(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var openAI map[string]any
+	if err := json.Unmarshal(payload, &openAI); err != nil {
+		t.Fatal(err)
+	}
+	if got := openAI["reasoning"].(map[string]any)["effort"]; got != "xhigh" {
+		t.Fatalf("OpenAI effort = %v, want xhigh", got)
+	}
+
+	if got := openRouterReasoningParam(req, openRouterProxyOptions{SupportsReasoning: true}); got["effort"] != "xhigh" {
+		t.Fatalf("OpenRouter reasoning = %v", got)
+	}
+
+	req.Model = "glm-5.2"
+	payload, err = anthropicToZAIChat(req, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var zai map[string]any
+	if err := json.Unmarshal(payload, &zai); err != nil {
+		t.Fatal(err)
+	}
+	if got := zai["reasoning_effort"]; got != "max" {
+		t.Fatalf("Z.AI effort = %v, want max", got)
+	}
+
+	req.Model = "gemini-3.6-flash"
+	gemini := convertGenerationConfig(req).ThinkingConfig
+	if gemini == nil || !gemini.IncludeThoughts || gemini.ThinkingLevel != "high" {
+		t.Fatalf("Gemini thinking config = %+v, want visible high thoughts", gemini)
+	}
+	if gemini.ThinkingBudget != nil {
+		t.Fatalf("Gemini 3 thinking budget = %v, want level only", gemini.ThinkingBudget)
+	}
+}
+
 func TestOpenAIStreamPreservesRawReasoningItem(t *testing.T) {
 	rawItem := json.RawMessage(`{"type":"reasoning","id":"rs_1","status":"completed","summary":[],"encrypted_content":"secret","future_field":"keep"}`)
 	var buf bytes.Buffer

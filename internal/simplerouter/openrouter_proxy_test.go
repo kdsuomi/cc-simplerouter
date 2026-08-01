@@ -169,22 +169,22 @@ func TestOpenRouterTranslationRoundTripsReasoningDetails(t *testing.T) {
 
 func TestOpenRouterReasoningParam(t *testing.T) {
 	on := openRouterProxyOptions{SupportsReasoning: true}
-	if got := openRouterReasoningParam(&anthropicThinking{Type: "adaptive"}, on); got["enabled"] != true {
+	if got := openRouterReasoningParam(&anthropicRequest{Thinking: &anthropicThinking{Type: "adaptive"}}, on); got["enabled"] != true {
 		t.Fatalf("adaptive = %v", got)
 	}
-	if got := openRouterReasoningParam(&anthropicThinking{Type: "enabled", BudgetTokens: 2048}, on); got["max_tokens"] != 2048 {
+	if got := openRouterReasoningParam(&anthropicRequest{Thinking: &anthropicThinking{Type: "enabled", BudgetTokens: 2048}}, on); got["max_tokens"] != 2048 {
 		t.Fatalf("enabled+budget = %v", got)
 	}
-	if got := openRouterReasoningParam(&anthropicThinking{Type: "disabled"}, on); got != nil {
+	if got := openRouterReasoningParam(&anthropicRequest{Thinking: &anthropicThinking{Type: "disabled"}}, on); got != nil {
 		t.Fatalf("disabled = %v", got)
 	}
 	if got := openRouterReasoningParam(nil, on); got != nil {
 		t.Fatalf("nil thinking = %v", got)
 	}
-	if got := openRouterReasoningParam(&anthropicThinking{Type: "enabled"}, openRouterProxyOptions{}); got != nil {
+	if got := openRouterReasoningParam(&anthropicRequest{Thinking: &anthropicThinking{Type: "enabled"}}, openRouterProxyOptions{}); got != nil {
 		t.Fatalf("unsupported model must not get reasoning: %v", got)
 	}
-	if got := openRouterReasoningParam(&anthropicThinking{Type: "enabled"}, openRouterProxyOptions{SupportsReasoning: true, DisableThinking: true}); got != nil {
+	if got := openRouterReasoningParam(&anthropicRequest{Thinking: &anthropicThinking{Type: "enabled"}}, openRouterProxyOptions{SupportsReasoning: true, DisableThinking: true}); got != nil {
 		t.Fatalf("disable-thinking must suppress reasoning: %v", got)
 	}
 }

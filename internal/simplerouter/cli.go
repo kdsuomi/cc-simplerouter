@@ -261,7 +261,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 		Path: claudePath,
 		Dir:  dir,
 		Args: claudeArgs(claudeModel, claudePositionals, passthrough),
-		Env:  buildClaudeEnvWithEffort(os.Environ(), baseURL, key, modelID, selected.ContextLength, disableThinking, effortLevel),
+		Env:  buildClaudeEnvForModel(os.Environ(), baseURL, key, selected, disableThinking, effortLevel),
 	}
 	if a.runCommand != nil {
 		return a.runCommand(spec)
@@ -752,7 +752,8 @@ func (a *app) selectStaticModel(provider, label, key, lastModel, modelFlag strin
 		res, err := a.pickModel("Select a "+label+" model", models, current, nil)
 		return key, res, err
 	}
-	res, err := a.resolveStaticModel(label, models, modelID)
+	resolveModels := append(append([]Model(nil), models...), curatedProviderModelAliases(provider)...)
+	res, err := a.resolveStaticModel(label, resolveModels, modelID)
 	return key, res, err
 }
 

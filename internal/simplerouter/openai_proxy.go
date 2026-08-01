@@ -180,8 +180,8 @@ func anthropicToOpenAIResponses(req *anthropicRequest) ([]byte, error) {
 	if req.TopP != nil {
 		out["top_p"] = *req.TopP
 	}
-	if req.Thinking != nil && req.Thinking.Type == "enabled" {
-		out["reasoning"] = map[string]any{"effort": reasoningEffort(req.Thinking.BudgetTokens)}
+	if anthropicThinkingEnabled(req) {
+		out["reasoning"] = map[string]any{"effort": anthropicReasoningEffort(req)}
 	}
 	return json.Marshal(out)
 }

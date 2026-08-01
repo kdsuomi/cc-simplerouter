@@ -326,20 +326,65 @@ func convertGenerationConfig(req *anthropicRequest) *geminiGenConfig {
 	}
 	// Thinking disabled or absent: omit thinkingConfig entirely (a zero budget
 	// is rejected by 2.5 Pro and gemini-3, which cannot disable thinking).
-	if req.Thinking != nil && req.Thinking.Type == "enabled" {
+	if anthropicThinkingEnabled(req) {
 		tc := &geminiThinkingConfig{IncludeThoughts: true}
 		if strings.Contains(req.Model, "gemini-3") {
-			tc.ThinkingLevel = "low"
-			if req.Thinking.BudgetTokens > geminiThinkingLevelBudget {
-				tc.ThinkingLevel = "high"
+			if req.OutputConfig != nil && normalizeReasoningEffort(req.OutputConfig.Effort) != "" {
+				tc.ThinkingLevel = geminiThinkingLevel(req.Model, req.OutputConfig.Effort)
+			} else {
+				tc.ThinkingLevel = "low"
+				if req.Thinking.BudgetTokens > geminiThinkingLevelBudget {
+					tc.ThinkingLevel = "high"
+				}
 			}
 		} else {
 			budget := req.Thinking.BudgetTokens
+			if req.OutputConfig != nil {
+				budget = geminiThinkingBudget(req.Model, req.OutputConfig.Effort)
+			}
 			tc.ThinkingBudget = &budget
 		}
 		cfg.ThinkingConfig = tc
 	}
 	return cfg
+}
+
+func geminiThinkingLevel(model, effort string) string {
+	switch normalizeReasoningEffort(effort) {
+	case "none", "low":
+		// Gemini 3 Pro does not support minimal thinking.
+		if strings.Contains(strings.ToLower(model), "pro") {
+			return "low"
+		}
+		return "minimal"
+	case "medium":
+		return "medium"
+	default:
+		return "high"
+	}
+}
+
+func geminiThinkingBudget(model, effort string) int {
+	switch normalizeReasoningEffort(effort) {
+	case "none":
+		if strings.Contains(strings.ToLower(model), "pro") {
+			return 128
+		}
+		return 0
+	case "low":
+		return 2_048
+	case "medium":
+		return 8_192
+	case "high":
+		return 16_384
+	case "xhigh", "max":
+		if strings.Contains(strings.ToLower(model), "flash") {
+			return 24_576
+		}
+		return 32_768
+	default:
+		return 8_192
+	}
 }
 
 // geminiToAnthropic translates a non-streaming Gemini response into an

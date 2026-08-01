@@ -26,7 +26,8 @@ type claudePatchEdit struct {
 // — so it keeps working across Claude Code releases that only reshuffle
 // minified names.
 type claudeBinaryPatch struct {
-	name string
+	name     string
+	required bool
 	// marker is a byte string that appears in the bundle only after the patch
 	// has been applied.
 	marker []byte
@@ -38,9 +39,10 @@ type claudeBinaryPatch struct {
 
 var claudeBinaryPatches = []claudeBinaryPatch{
 	{
-		name:   "live-thinking",
-		marker: []byte(liveThinkingPatchMarker),
-		find:   findLiveThinkingEdits,
+		name:     "live-thinking",
+		required: true,
+		marker:   []byte(liveThinkingPatchMarker),
+		find:     findLiveThinkingEdits,
 	},
 	{
 		name:   "launch-version-marker",
@@ -181,8 +183,10 @@ func findLaunchVersionEdits(data []byte) ([]claudePatchEdit, bool, error) {
 // --- patch application ------------------------------------------------
 
 // prepareClaudeLiveThinkingPatch returns a patched copy of Claude Code whose
-// interactive renderer consumes live thinking_delta text and whose launch card
-// version ends in "p". It never mutates the user's installed claude binary.
+// interactive renderer consumes live thinking_delta text. When the current
+// bundle still exposes the cosmetic launch-version target, the copy also gets
+// a trailing "p" in its launch card. It never mutates the user's installed
+// claude binary.
 func prepareClaudeLiveThinkingPatch(claudePath string) (path string, patched bool, err error) {
 	if strings.TrimSpace(os.Getenv("SIMPLEROUTER_DISABLE_CLAUDE_PATCH")) != "" {
 		return claudePath, false, nil
@@ -191,7 +195,7 @@ func prepareClaudeLiveThinkingPatch(claudePath string) (path string, patched boo
 	if err != nil {
 		return claudePath, false, err
 	}
-	if allClaudePatchesApplied(data) {
+	if requiredClaudePatchesApplied(data) {
 		return claudePath, true, nil
 	}
 
@@ -200,7 +204,7 @@ func prepareClaudeLiveThinkingPatch(claudePath string) (path string, patched boo
 	if err != nil {
 		return claudePath, false, err
 	}
-	if existing, err := os.ReadFile(target); err == nil && allClaudePatchesApplied(existing) {
+	if existing, err := os.ReadFile(target); err == nil && requiredClaudePatchesApplied(existing) {
 		return target, true, nil
 	}
 
@@ -214,7 +218,10 @@ func prepareClaudeLiveThinkingPatch(claudePath string) (path string, patched boo
 			return claudePath, false, err
 		}
 		if !ok {
-			return claudePath, false, nil
+			if patch.required {
+				return claudePath, false, fmt.Errorf("required Claude %s patch found no target; this Claude Code build is not yet supported", patch.name)
+			}
+			continue
 		}
 		for _, edit := range edits {
 			copy(patchedData[edit.offset:], edit.replacement)
@@ -223,8 +230,8 @@ func prepareClaudeLiveThinkingPatch(claudePath string) (path string, patched boo
 			}
 		}
 	}
-	if !allClaudePatchesApplied(patchedData) {
-		return claudePath, false, fmt.Errorf("Claude patch verification failed")
+	if !requiredClaudePatchesApplied(patchedData) {
+		return claudePath, false, fmt.Errorf("required Claude patch verification failed")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
@@ -260,9 +267,9 @@ func prepareClaudeLiveThinkingPatch(claudePath string) (path string, patched boo
 	return target, true, nil
 }
 
-func allClaudePatchesApplied(data []byte) bool {
+func requiredClaudePatchesApplied(data []byte) bool {
 	for _, patch := range claudeBinaryPatches {
-		if !patch.applied(data) {
+		if patch.required && !patch.applied(data) {
 			return false
 		}
 	}
