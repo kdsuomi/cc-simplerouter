@@ -181,14 +181,19 @@ func (a *app) run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// The patch enables per-token thinking rendering; without it, the proxies'
-	// rotated thinking blocks still render progressively, so a failed patch
-	// only degrades granularity.
-	patchedClaudePath, claudePatched, perr := prepareClaudeLiveThinkingPatch(claudePath)
+	// The required patch enables per-token thinking rendering; optional
+	// renderer features fail independently so a Claude update cannot disable a
+	// still-compatible patch.
+	patchResult, perr := prepareClaudePatch(claudePath)
 	if perr != nil {
 		fmt.Fprintln(a.stderr, style.warning("Claude live-thinking patch failed; thinking will render in periodic blocks: "+perr.Error()))
-	} else if claudePatched {
-		claudePath = patchedClaudePath
+	} else {
+		if patchResult.Patched {
+			claudePath = patchResult.Path
+		}
+		for _, warning := range patchResult.Warnings {
+			fmt.Fprintln(a.stderr, style.warning(warning))
+		}
 	}
 
 	baseURL := defaultAnthropicBaseURL

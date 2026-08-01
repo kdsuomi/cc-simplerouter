@@ -26,11 +26,13 @@ type claudePatchEdit struct {
 // — so it keeps working across Claude Code releases that only reshuffle
 // minified names.
 type claudeBinaryPatch struct {
-	name     string
-	required bool
-	// marker is a byte string that appears in the bundle only after the patch
-	// has been applied.
-	marker []byte
+	name              string
+	required          bool
+	warnIfUnsupported bool
+	disableEnv        string
+	// markers are byte strings that all appear in the bundle only after the
+	// patch has been fully applied.
+	markers [][]byte
 	// find returns every edit to apply on an unpatched bundle. ok=false means
 	// this build's code no longer matches the expected shape (fall back to
 	// the unpatched binary).
@@ -41,18 +43,41 @@ var claudeBinaryPatches = []claudeBinaryPatch{
 	{
 		name:     "live-thinking",
 		required: true,
-		marker:   []byte(liveThinkingPatchMarker),
+		markers:  [][]byte{[]byte(liveThinkingPatchMarker)},
 		find:     findLiveThinkingEdits,
 	},
 	{
-		name:   "launch-version-marker",
-		marker: []byte(launchVersionPatchMarker),
-		find:   findLaunchVersionEdits,
+		name:              "throughput-meter",
+		warnIfUnsupported: true,
+		disableEnv:        "SIMPLEROUTER_DISABLE_TOKEN_RATE",
+		markers: [][]byte{
+			[]byte(throughputStatePatchMarker),
+			[]byte(throughputSpinnerPatchMarker),
+			[]byte(throughputFinalPatchMarker),
+		},
+		find: findThroughputEdits,
+	},
+	{
+		name:    "launch-version-marker",
+		markers: [][]byte{[]byte(launchVersionPatchMarker)},
+		find:    findLaunchVersionEdits,
 	},
 }
 
 func (p claudeBinaryPatch) applied(data []byte) bool {
-	return bytes.Contains(data, p.marker)
+	if len(p.markers) == 0 {
+		return false
+	}
+	for _, marker := range p.markers {
+		if !bytes.Contains(data, marker) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p claudeBinaryPatch) disabled() bool {
+	return p.disableEnv != "" && strings.TrimSpace(os.Getenv(p.disableEnv)) != ""
 }
 
 // --- live-thinking patch ------------------------------------------------
@@ -182,48 +207,58 @@ func findLaunchVersionEdits(data []byte) ([]claudePatchEdit, bool, error) {
 
 // --- patch application ------------------------------------------------
 
-// prepareClaudeLiveThinkingPatch returns a patched copy of Claude Code whose
-// interactive renderer consumes live thinking_delta text. When the current
-// bundle still exposes the cosmetic launch-version target, the copy also gets
-// a trailing "p" in its launch card. It never mutates the user's installed
-// claude binary.
-func prepareClaudeLiveThinkingPatch(claudePath string) (path string, patched bool, err error) {
+type claudePatchResult struct {
+	Path       string
+	Patched    bool
+	Throughput bool
+	Warnings   []string
+}
+
+// prepareClaudePatch returns a patched copy of Claude Code with every
+// compatible feature enabled. Required features fail the operation; optional
+// functional features report a warning and do not prevent the other patches
+// from being used. The user's installed claude binary is never mutated.
+func prepareClaudePatch(claudePath string) (claudePatchResult, error) {
+	result := claudePatchResult{Path: claudePath}
 	if strings.TrimSpace(os.Getenv("SIMPLEROUTER_DISABLE_CLAUDE_PATCH")) != "" {
-		return claudePath, false, nil
+		return result, nil
 	}
 	data, err := os.ReadFile(claudePath)
 	if err != nil {
-		return claudePath, false, err
-	}
-	if requiredClaudePatchesApplied(data) {
-		return claudePath, true, nil
-	}
-
-	sum := sha256.Sum256(data)
-	target, err := claudePatchPath(claudePath, sum[:])
-	if err != nil {
-		return claudePath, false, err
-	}
-	if existing, err := os.ReadFile(target); err == nil && requiredClaudePatchesApplied(existing) {
-		return target, true, nil
+		return result, err
 	}
 
 	patchedData := append([]byte(nil), data...)
 	for _, patch := range claudeBinaryPatches {
+		if patch.disabled() {
+			continue
+		}
 		if patch.applied(patchedData) {
 			continue
 		}
 		edits, ok, err := patch.find(patchedData)
 		if err != nil {
-			return claudePath, false, err
+			if patch.required {
+				return result, err
+			}
+			if patch.warnIfUnsupported {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("Claude %s patch failed; live token rate is unavailable: %v", patch.name, err))
+			}
+			continue
 		}
 		if !ok {
 			if patch.required {
-				return claudePath, false, fmt.Errorf("required Claude %s patch found no target; this Claude Code build is not yet supported", patch.name)
+				return result, fmt.Errorf("required Claude %s patch found no target; this Claude Code build is not yet supported", patch.name)
+			}
+			if patch.warnIfUnsupported {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("Claude %s patch found no target; live token rate is unavailable for this Claude Code build", patch.name))
 			}
 			continue
 		}
 		for _, edit := range edits {
+			if edit.offset < 0 || edit.length < len(edit.replacement) || edit.offset+edit.length > len(patchedData) {
+				return result, fmt.Errorf("invalid Claude %s patch edit at offset %d", patch.name, edit.offset)
+			}
 			copy(patchedData[edit.offset:], edit.replacement)
 			for i := edit.offset + len(edit.replacement); i < edit.offset+edit.length; i++ {
 				patchedData[i] = ' '
@@ -231,40 +266,86 @@ func prepareClaudeLiveThinkingPatch(claudePath string) (path string, patched boo
 		}
 	}
 	if !requiredClaudePatchesApplied(patchedData) {
-		return claudePath, false, fmt.Errorf("required Claude patch verification failed")
+		return result, fmt.Errorf("required Claude patch verification failed")
+	}
+	result.Patched = true
+	result.Throughput = claudePatchApplied("throughput-meter", patchedData)
+	if bytes.Equal(patchedData, data) {
+		return result, nil
+	}
+
+	sum := sha256.Sum256(data)
+	target, err := claudePatchPath(claudePath, sum[:])
+	if err != nil {
+		return result, err
+	}
+	if existing, err := os.ReadFile(target); err == nil && cachedClaudePatchMatches(existing, patchedData) {
+		result.Path = target
+		result.Throughput = claudePatchApplied("throughput-meter", existing)
+		return result, nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-		return claudePath, false, err
+		return result, err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(target), "claude-live-thinking-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(target), "claude-patched-*.tmp")
 	if err != nil {
-		return claudePath, false, err
+		return result, err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 	if _, err := tmp.Write(patchedData); err != nil {
 		tmp.Close()
-		return claudePath, false, err
+		return result, err
 	}
 	if runtime.GOOS != "windows" {
 		if err := tmp.Chmod(0o755); err != nil {
 			tmp.Close()
-			return claudePath, false, err
+			return result, err
 		}
 	}
 	if err := tmp.Close(); err != nil {
-		return claudePath, false, err
+		return result, err
 	}
 	if _, err := os.Stat(target); err == nil {
 		if err := os.Remove(target); err != nil {
-			return claudePath, false, err
+			return result, err
 		}
 	}
 	if err := os.Rename(tmpName, target); err != nil {
-		return claudePath, false, err
+		return result, err
 	}
-	return target, true, nil
+	result.Path = target
+	return result, nil
+}
+
+// prepareClaudeLiveThinkingPatch preserves the original internal call shape
+// for focused tests and downstream packages that have not adopted the richer
+// feature result yet.
+func prepareClaudeLiveThinkingPatch(claudePath string) (path string, patched bool, err error) {
+	result, err := prepareClaudePatch(claudePath)
+	return result.Path, result.Patched, err
+}
+
+func claudePatchApplied(name string, data []byte) bool {
+	for _, patch := range claudeBinaryPatches {
+		if patch.name == name {
+			return patch.applied(data)
+		}
+	}
+	return false
+}
+
+func cachedClaudePatchMatches(existing, desired []byte) bool {
+	if !requiredClaudePatchesApplied(existing) {
+		return false
+	}
+	for _, patch := range claudeBinaryPatches {
+		if patch.warnIfUnsupported && patch.applied(existing) != patch.applied(desired) {
+			return false
+		}
+	}
+	return true
 }
 
 func requiredClaudePatchesApplied(data []byte) bool {

@@ -3,6 +3,7 @@ package simplerouter
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -237,6 +238,34 @@ func TestClaudePatchesMatchInstalledClaude(t *testing.T) {
 				t.Fatalf("%s replacement (%d bytes) exceeds target (%d bytes)", patch.name, len(edit.replacement), edit.length)
 			}
 		}
+	}
+}
+
+// TestPreparedInstalledClaudeRuns is opt-in because it copies the full Bun
+// executable. It verifies that the same-length structural rewrites still form
+// a loadable Claude binary, beyond merely matching their source targets.
+func TestPreparedInstalledClaudeRuns(t *testing.T) {
+	if os.Getenv("SIMPLEROUTER_TEST_PATCHED_CLAUDE") != "1" {
+		t.Skip("set SIMPLEROUTER_TEST_PATCHED_CLAUDE=1 to run the patched-binary smoke test")
+	}
+	claudePath, err := findClaude()
+	if err != nil {
+		t.Skip("claude binary not installed")
+	}
+	withTestHome(t)
+	result, err := prepareClaudePatch(claudePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Patched || !result.Throughput {
+		t.Fatalf("patch result = %+v, want live-thinking and throughput", result)
+	}
+	output, err := exec.Command(result.Path, "--version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("patched Claude failed to run: %v\n%s", err, output)
+	}
+	if !bytes.Contains(output, []byte("Claude Code")) {
+		t.Fatalf("patched Claude returned unexpected version output: %s", output)
 	}
 }
 

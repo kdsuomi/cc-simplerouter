@@ -183,6 +183,14 @@ simplerouter prints a compatibility warning and uses periodic thinking blocks
 instead. The cosmetic patched-version marker is best-effort and cannot disable
 the functional patch.
 
+The patched session also replaces the spinner's estimated output-token count
+with live generation throughput once enough output has arrived. The live rate
+uses Claude Code's in-memory first-token timing and excludes TTFT and tool
+execution. When the turn ends, an informational line reports the exact total
+output tokens and aggregate generation rate using the provider's final
+`output_tokens` values. This feature fails independently of live thinking and
+can be disabled with `SIMPLEROUTER_DISABLE_TOKEN_RATE=1`.
+
 By default it preserves Claude Code's normal thinking behavior. If a provider
 chokes on Claude Code's thinking/beta request fields, retry with
 `--disable-thinking`:
