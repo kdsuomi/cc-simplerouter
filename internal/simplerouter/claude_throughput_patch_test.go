@@ -14,7 +14,7 @@ const fakeAPIMetricsFunction = `function Nxp({entries:e,responseLength:t,event:r
 
 const fakeThroughputSpinner = `function XSpinner(){let R=Date.now(),dummy=0;let ve=t?P:ae.current,he=ra(D),De=Ft(he),Ae=de,Ce=_d(Ae),$e=` + "`${je.arrowDown} ${Ce} tokens`" + `,ge=Ft($e),Oe=N.kind==="thinking"?Otb(N.thinkingMs):"thinking",Be;switch(N.kind){case"tool-running":Be=` + "`running tool for ${ra(N.toolMs)}`" + `;break;case"tool-done":Be=` + "`ran tool for ${ra(N.toolMs)}`" + `;break;case"thinking":Be=` + "`${Oe}${g}`" + `;break;case"thought-for":Be=` + "`thought for ${Math.max(1,Math.round(N.thoughtMs/1000))}s`" + `;break;case"none":Be=null;break}let Le=Be?Ft(Be):0,ze=0,_r=[...!I&&gr?[Np.jsxs(H,{children:[Np.jsx(bxp,{}),Np.jsxs(h,{dimColor:!0,children:[Ce," tokens"]})]})]:[]];return _r}`
 
-const fakeThroughputController = `VF=Hr.useCallback((_t)=>{if(_t.type==="start"&&_t.messageId!=null)Rne.current=_t.messageId;let dr=_t.type==="thinking_signature"&&$x()?EO.current.findLast(($r)=>$r.id==null)?.thinkingTokenEstimate??0:void 0;if(GF.current=Nxp({entries:EO.current,responseLength:GF.current,event:_t}),_t.type==="thinking_progress"&&$x()){let $r=EO.current.findLast((Wn)=>Wn.id==null);if($r?.thinkingTokenEstimate!=null)lA({type:"system",subtype:"thinking_tokens",estimated_tokens:$r.thinkingTokenEstimate,estimated_tokens_delta:_t.estimatedTokensDelta})}else if(dr!==void 0){let $r=EO.current.findLast((Wn)=>Wn.id==null)?.thinkingTokenEstimate;if($r!=null&&$r>dr)lA({type:"system",subtype:"thinking_tokens",estimated_tokens:$r,estimated_tokens_delta:$r-dr})}},[]),Mx=Hr.useMemo(cYp,[]),Lx=Hr.useMemo(()=>aYp({scheduleTimeout:W.setTimeout,onFlush:Mx.setRaw}),[W,Mx]);Hr.useEffect(()=>()=>Lx.dispose(),[Lx]);let Bge=!(qe((_t)=>_t.settings.prefersReducedMotion)??!1)&&!y2u(),_K=Hr.useCallback((_t)=>{if(!Bge){if(_t(Lx.peek())===null)Lx.clear();return}Lx.apply(_t)},[Bge,Lx]),uM=Hr.useCallback(()=>{GF.current=0,EO.current=[],Rne.current=null},[]),Dne=_9f({setMessages:wd,onTurnEnd:uM}),wd((e)=>e.concat(ml("later","info")))`
+const fakeThroughputController = `tq=Hr.useCallback((_t)=>{if(_t.op==="reset")OLe();else vO(_t.delta)},[vO,OLe]),VF=Hr.useCallback((_t)=>{if(_t.type==="start"&&_t.messageId!=null)Rne.current=_t.messageId;let dr=_t.type==="thinking_signature"&&$x()?EO.current.findLast(($r)=>$r.id==null)?.thinkingTokenEstimate??0:void 0;if(GF.current=Nxp({entries:EO.current,responseLength:GF.current,event:_t}),_t.type==="thinking_progress"&&$x()){let $r=EO.current.findLast((Wn)=>Wn.id==null);if($r?.thinkingTokenEstimate!=null)lA({type:"system",subtype:"thinking_tokens",estimated_tokens:$r.thinkingTokenEstimate,estimated_tokens_delta:_t.estimatedTokensDelta})}else if(dr!==void 0){let $r=EO.current.findLast((Wn)=>Wn.id==null)?.thinkingTokenEstimate;if($r!=null&&$r>dr)lA({type:"system",subtype:"thinking_tokens",estimated_tokens:$r,estimated_tokens_delta:$r-dr})}},[]),Mx=Hr.useMemo(cYp,[]),Lx=Hr.useMemo(()=>aYp({scheduleTimeout:W.setTimeout,onFlush:Mx.setRaw}),[W,Mx]);Hr.useEffect(()=>()=>Lx.dispose(),[Lx]);let Bge=!(qe((_t)=>_t.settings.prefersReducedMotion)??!1)&&!y2u(),_K=Hr.useCallback((_t)=>{if(!Bge){if(_t(Lx.peek())===null)Lx.clear();return}Lx.apply(_t)},[Bge,Lx]),uM=Hr.useCallback(()=>{GF.current=0,EO.current=[],Rne.current=null},[]),Dne=_9f({setMessages:wd,recordApiMetricsEvent:VF,onTurnEnd:uM}),wd((e)=>e.concat(ml("later","info")))`
 
 func fakeThroughputBundle() []byte {
 	return []byte(`function ml(e,t,r,n){return{type:"system",subtype:"informational",content:e,isMeta:!1,timestamp:new Date().toISOString(),uuid:Jz.randomUUID(),toolUseID:r,level:t,...n&&{preventContinuation:n}}}` + fakeThroughputSpinner + fakeAPIMetricsFunction + fakeThroughputController)
@@ -65,6 +65,12 @@ func TestFindThroughputEditsRewritesAllInMemoryHooks(t *testing.T) {
 	}
 	if !strings.Contains(text, `s&&!s.d&&`) {
 		t.Fatal("turn-end aggregate is not guarded against duplicate emission")
+	}
+	if !strings.Contains(text, `tq=Hr.useCallback((_t)=>{if(_t.op==="reset")OLe();else vO(_t.delta)},[vO,OLe]),VF=Hr.useCallback(`) {
+		t.Fatal("controller rewrite removed or renamed an adjacent callback binding")
+	}
+	if !strings.Contains(text, `recordApiMetricsEvent:VF`) {
+		t.Fatal("controller rewrite broke the metrics callback reference")
 	}
 }
 
@@ -173,6 +179,49 @@ func TestPrepareClaudePatchRefreshesCachedFeatureSet(t *testing.T) {
 	}
 	if !claudePatchApplied("throughput-meter", patched) {
 		t.Fatal("refreshed cached binary is missing throughput markers")
+	}
+}
+
+func TestPrepareClaudePatchRefreshesStaleImplementation(t *testing.T) {
+	t.Setenv("SIMPLEROUTER_DISABLE_CLAUDE_PATCH", "")
+	t.Setenv("SIMPLEROUTER_DISABLE_TOKEN_RATE", "")
+	home := withTestHome(t)
+	src := filepath.Join(home, ".local", "bin", "claude.exe")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, append(fakePatchableClaudeBundle(), fakeThroughputBundle()...), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := prepareClaudePatch(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := os.ReadFile(first.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := append([]byte(nil), desired...)
+	marker := bytes.Index(stale, []byte(throughputFinalPatchMarker))
+	if marker < 1 {
+		t.Fatal("prepared patch is missing throughput marker")
+	}
+	stale[marker-1] ^= 1
+	if err := os.WriteFile(first.Path, stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshed, err := prepareClaudePatch(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(refreshed.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(actual, desired) {
+		t.Fatal("stale cached patch was not replaced with the current implementation")
 	}
 }
 

@@ -337,15 +337,10 @@ func claudePatchApplied(name string, data []byte) bool {
 }
 
 func cachedClaudePatchMatches(existing, desired []byte) bool {
-	if !requiredClaudePatchesApplied(existing) {
-		return false
-	}
-	for _, patch := range claudeBinaryPatches {
-		if patch.warnIfUnsupported && patch.applied(existing) != patch.applied(desired) {
-			return false
-		}
-	}
-	return true
+	// Markers identify the enabled feature set, but not the implementation
+	// revision. Requiring exact bytes ensures a SimpleRouter upgrade refreshes
+	// a stale cached rewrite even when all of its old markers are still present.
+	return bytes.Equal(existing, desired)
 }
 
 func requiredClaudePatchesApplied(data []byte) bool {

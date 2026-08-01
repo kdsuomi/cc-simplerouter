@@ -40,8 +40,8 @@ var (
 			`case"none":(?P<detail6>` + claudeIdent + `)=null;break\}` +
 			`let (?P<detailWidth>` + claudeIdent + `)=(?P<detail7>` + claudeIdent + `)\?(?P<measure3>` + claudeIdent + `)\((?P<detail8>` + claudeIdent + `)\):0,`)
 
-	controllerCallbackRe = regexp.MustCompile(
-		`(` + claudeIdent + `)=(` + claudeIdent + `)\.useCallback\(\((` + claudeIdent + `)\)=>\{(?s:(.*?))\},\[\]\),`)
+	controllerCallbackHeaderRe = regexp.MustCompile(
+		`(` + claudeIdent + `)=(` + claudeIdent + `)\.useCallback\(\((` + claudeIdent + `)\)=>\{`)
 	controllerTailRe = regexp.MustCompile(
 		`let (?P<motion>` + claudeIdent + `)=!\((?P<select>` + claudeIdent + `)\(\((?P<pref1>` + claudeIdent + `)\)=>(?P<pref2>` + claudeIdent + `)\.settings\.prefersReducedMotion\)\?\?!1\)&&!(?P<disableMotion>` + claudeIdent + `)\(\),` +
 			`(?P<streamCallback>` + claudeIdent + `)=(?P<react>` + claudeIdent + `)\.useCallback\(\((?P<update1>` + claudeIdent + `)\)=>\{if\(!(?P<motion2>` + claudeIdent + `)\)\{if\((?P<update2>` + claudeIdent + `)\((?P<buffer1>` + claudeIdent + `)\.peek\(\)\)===null\)(?P<buffer2>` + claudeIdent + `)\.clear\(\);return\}(?P<buffer3>` + claudeIdent + `)\.apply\((?P<update3>` + claudeIdent + `)\)\},\[(?P<motion3>` + claudeIdent + `),(?P<buffer4>` + claudeIdent + `)\]\),` +
@@ -238,18 +238,33 @@ func spinnerGroupsConsistent(g map[string]string) bool {
 }
 
 func findThroughputControllerEdit(data []byte, metricsFn string) (claudePatchEdit, bool, error) {
-	callbackMatches := controllerCallbackRe.FindAllSubmatchIndex(data, -1)
+	callbackMatches := controllerCallbackHeaderRe.FindAllSubmatchIndex(data, -1)
 	var edits []claudePatchEdit
 	for _, callbackMatch := range callbackMatches {
-		body := submatchBytes(data, callbackMatch, 4)
-		if !bytes.Contains(body, []byte(metricsFn+"({entries:")) || !bytes.Contains(body, []byte(`subtype:"thinking_tokens"`)) {
-			continue
-		}
-		callback, ok := compactMetricsCallback(data, callbackMatch, metricsFn)
+		openBrace := callbackMatch[1] - 1
+		blockEnd, ok := findJSBlockEnd(data, openBrace)
 		if !ok {
 			continue
 		}
-		callbackEnd := callbackMatch[1]
+		const callbackSuffix = `,[]),`
+		callbackEnd := blockEnd + len(callbackSuffix)
+		if callbackEnd > len(data) || string(data[blockEnd:callbackEnd]) != callbackSuffix {
+			continue
+		}
+		body := data[openBrace+1 : blockEnd-1]
+		if !bytes.Contains(body, []byte(metricsFn+"({entries:")) || !bytes.Contains(body, []byte(`subtype:"thinking_tokens"`)) {
+			continue
+		}
+		callback, ok := compactMetricsCallback(
+			submatchString(data, callbackMatch, 1),
+			submatchString(data, callbackMatch, 2),
+			submatchString(data, callbackMatch, 3),
+			body,
+			metricsFn,
+		)
+		if !ok {
+			continue
+		}
 		tailMatches := controllerTailRe.FindAllSubmatchIndex(data[callbackEnd:callbackEnd+minInt(4096, len(data)-callbackEnd)], -1)
 		if len(tailMatches) != 1 {
 			continue
@@ -300,11 +315,7 @@ func findThroughputControllerEdit(data []byte, metricsFn string) (claudePatchEdi
 	return edits[0], true, nil
 }
 
-func compactMetricsCallback(data []byte, match []int, metricsFn string) ([]byte, bool) {
-	callbackName := submatchString(data, match, 1)
-	react := submatchString(data, match, 2)
-	event := submatchString(data, match, 3)
-	body := submatchBytes(data, match, 4)
+func compactMetricsCallback(callbackName, react, event string, body []byte, metricsFn string) ([]byte, bool) {
 	messageRe := regexp.MustCompile(`if\(` + regexp.QuoteMeta(event) + `\.type==="start"&&` + regexp.QuoteMeta(event) + `\.messageId!=null\)(` + claudeIdent + `)\.current=` + regexp.QuoteMeta(event) + `\.messageId;`)
 	messageMatch := messageRe.FindSubmatch(body)
 	callRe := regexp.MustCompile(`(` + claudeIdent + `)\.current=` + regexp.QuoteMeta(metricsFn) + `\(\{entries:(` + claudeIdent + `)\.current,responseLength:(` + claudeIdent + `)\.current,event:(` + claudeIdent + `)\}\)`)
