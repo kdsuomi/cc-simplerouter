@@ -17,7 +17,7 @@ import (
 	"golang.org/x/term"
 )
 
-// Backend providers Claude Code can be launched against.
+// Backend providers Codex CLI can be launched against.
 const (
 	providerOpenRouter = "openrouter"
 	providerGemini     = "gemini"
@@ -42,12 +42,14 @@ type app struct {
 	runCommand      func(spec launchSpec) error
 }
 
-// startGeminiProxyFn is a seam so tests can stub the translating proxy.
-var startGeminiProxyFn = startGeminiProxy
-var startOpenAIProxyFn = startOpenAIProxy
-var startZAIProxyFn = startZAIProxy
-var startMetaProxyFn = startMetaProxy
-var startOpenRouterProxyFn = startOpenRouterProxy
+// Launch seams keep provider routing and process construction testable without
+// changing the user's Codex installation or opening real local listeners.
+var findCodexFn = findCodex
+var prepareCodexModelCatalogFn = prepareCodexModelCatalog
+var startGeminiResponsesProxyFn = startGeminiResponsesProxy
+var startDeepSeekResponsesProxyFn = startDeepSeekResponsesProxy
+var startZAIResponsesProxyFn = startZAIResponsesProxy
+var startResponsesPassthroughProxyFn = startResponsesPassthroughProxy
 
 func Main(args []string) int {
 	a := &app{
@@ -78,9 +80,9 @@ func (a *app) run(ctx context.Context, args []string) error {
 	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "deepseek", "zai", or "meta"`)
 	fs.BoolVar(&selectModel, "select-model", false, "Select a provider and model interactively")
 	fs.BoolVar(&resetKey, "reset-key", false, "Forget the saved API keys before launching")
-	fs.BoolVar(&disableThinking, "disable-thinking", false, "Disable Claude Code thinking/beta request features for provider compatibility")
+	fs.BoolVar(&disableThinking, "disable-thinking", false, "Disable model reasoning for provider compatibility")
 	fs.Usage = func() {
-		fmt.Fprintln(a.stderr, "Usage: simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key] [--disable-thinking] [path-or-prompt] [-- CLAUDE_ARGS...]")
+		fmt.Fprintln(a.stderr, "Usage: simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key] [--disable-thinking] [path-or-prompt] [-- CODEX_ARGS...]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -88,7 +90,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	}
 
 	positionals, passthrough := splitPassthrough(fs.Args())
-	dir, claudePositionals := resolveWorkingDir(positionals)
+	dir, codexPositionals := resolveWorkingDir(positionals)
 	bareCommand := modelFlag == "" && providerFlag == "" && !selectModel && len(positionals) == 0 && len(passthrough) == 0
 
 	if resetKey {
@@ -107,7 +109,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 		printSetupBanner(a.stderr, style)
 		fmt.Fprintln(a.stderr)
 		fmt.Fprintln(a.stderr, style.header("simplerouter setup"))
-		fmt.Fprintln(a.stderr, style.paint(clrDim, "Choose a provider, validate key, choose a model, then launch Claude Code."))
+		fmt.Fprintln(a.stderr, style.paint(clrDim, "Choose a provider, validate key, choose a model, then launch Codex CLI."))
 	}
 
 	provider, err := a.determineProvider(cfg, modelFlag, providerFlag, selectModel, firstRun, bareCommand)
@@ -176,102 +178,72 @@ func (a *app) run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	claudePath, err := findClaude()
+	codexPath, err := findCodexFn()
 	if err != nil {
 		return err
 	}
 
-	// The required patch enables per-token thinking rendering; optional
-	// renderer features fail independently so a Claude update cannot disable a
-	// still-compatible patch.
-	patchResult, perr := prepareClaudePatch(claudePath)
-	if perr != nil {
-		fmt.Fprintln(a.stderr, style.warning("Claude live-thinking patch failed; thinking will render in periodic blocks: "+perr.Error()))
-	} else {
-		if patchResult.Patched {
-			claudePath = patchResult.Path
-		}
-		for _, warning := range patchResult.Warnings {
-			fmt.Fprintln(a.stderr, style.warning(warning))
-		}
-	}
-
-	baseURL := defaultAnthropicBaseURL
-	effortLevel := ""
+	baseURL := ""
 	switch {
 	case provider == providerGemini:
-		// Gemini has no Anthropic-compatible endpoint, so Claude Code talks to
-		// a local proxy that translates Anthropic Messages <-> generateContent.
-		// The key rides on ANTHROPIC_AUTH_TOKEN and comes back to the proxy as
-		// the Authorization header.
-		proxyURL, stop, perr := startGeminiProxyFn(a.geminiBase(), modelID, a.httpClient)
+		proxyURL, stop, perr := startGeminiResponsesProxyFn(a.geminiBase(), modelID, a.httpClient, disableThinking)
 		if perr != nil {
-			return fmt.Errorf("start gemini proxy: %w", perr)
+			return fmt.Errorf("start Gemini Responses proxy: %w", perr)
 		}
 		defer stop()
 		baseURL = proxyURL
 	case provider == providerOpenAI:
-		proxyURL, stop, perr := startOpenAIProxyFn(a.openAIBase(), modelID, a.httpClient)
+		// OpenAI already speaks the Responses protocol Codex uses.
+		baseURL = a.openAIBase()
+	case provider == providerDeepSeek:
+		proxyURL, stop, perr := startDeepSeekResponsesProxyFn(a.deepSeekBase(), modelID, a.httpClient, disableThinking)
 		if perr != nil {
-			return fmt.Errorf("start OpenAI proxy: %w", perr)
+			return fmt.Errorf("start DeepSeek Responses proxy: %w", perr)
 		}
 		defer stop()
 		baseURL = proxyURL
-	case provider == providerDeepSeek:
-		baseURL = a.deepSeekAnthropicBase()
-		effortLevel = "max"
 	case provider == providerZAI:
-		proxyURL, stop, perr := startZAIProxyFn(a.zaiBase(), modelID, a.httpClient, disableThinking)
+		proxyURL, stop, perr := startZAIResponsesProxyFn(a.zaiBase(), modelID, a.httpClient, disableThinking)
 		if perr != nil {
-			return fmt.Errorf("start Z.AI proxy: %w", perr)
+			return fmt.Errorf("start Z.AI Responses proxy: %w", perr)
 		}
 		defer stop()
 		baseURL = proxyURL
 	case provider == providerMeta:
-		// Meta's /v1/messages is Anthropic-native; the proxy only strips the
-		// request fields Meta rejects (stop_sequences, top_k) and relays the
-		// rest byte for byte.
-		proxyURL, stop, perr := startMetaProxyFn(a.metaBase(), modelID, a.httpClient, disableThinking)
-		if perr != nil {
-			return fmt.Errorf("start Meta proxy: %w", perr)
-		}
-		defer stop()
-		baseURL = proxyURL
+		// Meta's current Model API has a native Responses endpoint, including
+		// reasoning replay and the web_search server tool.
+		baseURL = a.metaBase()
 	default:
-		// OpenRouter goes through a local proxy that translates Anthropic
-		// Messages <-> chat completions. Unlike OpenRouter's own Anthropic
-		// endpoint this streams reasoning live (thought streaming), carries
-		// reasoning_details across turns, and can pin a provider endpoint by
-		// injecting provider.only (Claude Code controls the request body, so
-		// pinning is impossible without a body rewrite).
-		proxyURL, stop, perr := startOpenRouterProxyFn(a.apiBase, modelID, a.httpClient, openRouterProxyOptions{
-			ProviderTag:       res.ProviderTag,
-			DisableThinking:   disableThinking,
-			SupportsReasoning: modelSupportsReasoning(selected),
+		baseURL = a.openRouterBase()
+		proxyURL, stop, perr := startResponsesPassthroughProxyFn(baseURL, modelID, a.httpClient, responsesPassthroughOptions{
+			Label:       "OpenRouter",
+			ProviderTag: res.ProviderTag,
 		})
 		if perr != nil {
-			return fmt.Errorf("start OpenRouter proxy: %w", perr)
+			return fmt.Errorf("start OpenRouter Responses proxy: %w", perr)
 		}
 		defer stop()
 		baseURL = proxyURL
 	}
 
-	claudeModel := claudeCodeModel(modelID, selected.ContextLength)
-	if !disableThinking && provider == providerOpenRouter {
-		passthrough = ensureClaudeArg(passthrough, "--thinking-display", "summarized")
+	catalogPath, cleanupCatalog, err := prepareCodexModelCatalogFn(codexPath, selected, modelSupportsReasoning(selected) && !disableThinking)
+	if err != nil {
+		return err
 	}
+	defer cleanupCatalog()
+
 	thinkingMode := launchThinkingMode(provider, disableThinking)
-	a.printLaunchSummary(modelID, claudeModel, selected.ContextLength, thinkingMode, dir, launchProviderLabel(provider, res))
+	a.printLaunchSummary(modelID, selected.ContextLength, thinkingMode, dir, launchProviderLabel(provider, res))
 	spec := launchSpec{
-		Path: claudePath,
+		Path: codexPath,
 		Dir:  dir,
-		Args: claudeArgs(claudeModel, claudePositionals, passthrough),
-		Env:  buildClaudeEnvForModel(os.Environ(), baseURL, key, selected, disableThinking, effortLevel),
+		Args: codexArgs(modelID, baseURL, catalogPath, disableThinking, codexPositionals, passthrough),
+		Env:  buildCodexEnv(os.Environ(), key),
 	}
 	if a.runCommand != nil {
 		return a.runCommand(spec)
 	}
-	return runClaudeCommand(spec)
+	return runCodexCommand(spec)
 }
 
 // determineProvider resolves which backend to use, in precedence order:
@@ -354,6 +326,13 @@ func providerNames() []string {
 	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta}
 }
 
+func (a *app) openRouterBase() string {
+	if strings.TrimSpace(a.apiBase) != "" {
+		return a.apiBase
+	}
+	return defaultOpenRouterAPIBase
+}
+
 // geminiBase returns the Gemini API base, honoring the test override.
 func (a *app) geminiBase() string {
 	if strings.TrimSpace(a.geminiAPIBase) != "" {
@@ -374,10 +353,6 @@ func (a *app) deepSeekBase() string {
 		return a.deepSeekAPIBase
 	}
 	return defaultDeepSeekAPIBase
-}
-
-func (a *app) deepSeekAnthropicBase() string {
-	return strings.TrimRight(a.deepSeekBase(), "/") + "/anthropic"
 }
 
 func (a *app) zaiBase() string {
@@ -414,10 +389,7 @@ func launchThinkingMode(provider string, disableThinking bool) string {
 	if disableThinking {
 		return "disabled"
 	}
-	if provider == providerOpenRouter {
-		return "summarized"
-	}
-	return "default"
+	return "provider default"
 }
 
 // modelSupportsReasoning reports whether an OpenRouter model advertises the
@@ -428,25 +400,6 @@ func modelSupportsReasoning(m Model) bool {
 		return true
 	}
 	return slices.Contains(m.SupportedParameters, "reasoning")
-}
-
-func ensureClaudeArg(args []string, name, value string) []string {
-	if hasClaudeArg(args, name) {
-		return args
-	}
-	out := make([]string, 0, len(args)+2)
-	out = append(out, name, value)
-	out = append(out, args...)
-	return out
-}
-
-func hasClaudeArg(args []string, name string) bool {
-	for _, arg := range args {
-		if arg == name || strings.HasPrefix(arg, name+"=") {
-			return true
-		}
-	}
-	return false
 }
 
 // selectOpenRouter acquires the OpenRouter key and resolves the model to
@@ -879,7 +832,7 @@ func (a *app) readLine() (string, error) {
 	return strings.TrimSpace(line), err
 }
 
-func (a *app) printLaunchSummary(modelID, claudeModel string, contextLength int, thinkingMode, dir, providerName string) {
+func (a *app) printLaunchSummary(modelID string, contextLength int, thinkingMode, dir, providerName string) {
 	launchDir := dir
 	if launchDir == "" {
 		if wd, err := os.Getwd(); err == nil {
@@ -893,11 +846,9 @@ func (a *app) printLaunchSummary(modelID, claudeModel string, contextLength int,
 	}
 	style := newTerminalStyle(a.stderr)
 	sep := style.paint(clrFaint, "|")
-	fmt.Fprintf(a.stderr, "%s model %s %s claude %s %s context %s %s thinking %s %s dir %s",
-		style.paint(clrAccentBold, "Launching Claude Code:"),
+	fmt.Fprintf(a.stderr, "%s model %s %s context %s %s reasoning %s %s dir %s",
+		style.paint(clrAccentBold, "Launching Codex CLI:"),
 		style.paint(clrModelHi, modelID),
-		sep,
-		style.paint(clrModel, claudeModel),
 		sep,
 		style.paint(ctxColor(contextLength), formatContextLength(contextLength)),
 		sep,

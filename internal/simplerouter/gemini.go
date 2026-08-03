@@ -53,7 +53,7 @@ func (c *geminiClient) validateKey(ctx context.Context, key string) error {
 }
 
 // models lists the Gemini catalog, following nextPageToken pagination, and
-// filters it to models Claude Code can drive.
+// filters it to text/tool models the Codex compatibility proxy can drive.
 func (c *geminiClient) models(ctx context.Context, key string) ([]Model, error) {
 	var out []Model
 	pageToken := ""
@@ -107,9 +107,8 @@ func (c *geminiClient) models(ctx context.Context, key string) ([]Model, error) 
 }
 
 // geminiExcludedSubstrings drops models that report generateContent support
-// but cannot drive Claude Code: media generation (image/tts/audio/video/
-// music), embeddings, and special-purpose endpoints (robotics, computer use,
-// deep research, live/realtime, Gemma models without function calling).
+// but cannot drive the OpenAI-compatible Codex session: media generation,
+// embeddings, and special-purpose endpoints that require another API.
 var geminiExcludedSubstrings = []string{
 	"embedding", "aqa", "tts", "image", "veo", "audio", "gemma", "learnlm",
 	"vision", "lyria", "robotics", "computer-use", "deep-research",

@@ -17,8 +17,23 @@ func withTestHome(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	old := userHomeDir
+	oldFindCodex := findCodexFn
+	oldPrepareCatalog := prepareCodexModelCatalogFn
+	oldStartResponsesPassthroughProxy := startResponsesPassthroughProxyFn
 	userHomeDir = func() (string, error) { return dir, nil }
-	t.Cleanup(func() { userHomeDir = old })
+	findCodexFn = func() (string, error) { return filepath.Join(dir, "codex-test"), nil }
+	prepareCodexModelCatalogFn = func(_ string, _ Model, _ bool) (string, func(), error) {
+		return filepath.Join(dir, "models.json"), func() {}, nil
+	}
+	startResponsesPassthroughProxyFn = func(upstreamBase, _ string, _ *http.Client, _ responsesPassthroughOptions) (string, func(), error) {
+		return upstreamBase, func() {}, nil
+	}
+	t.Cleanup(func() {
+		userHomeDir = old
+		findCodexFn = oldFindCodex
+		prepareCodexModelCatalogFn = oldPrepareCatalog
+		startResponsesPassthroughProxyFn = oldStartResponsesPassthroughProxy
+	})
 	return dir
 }
 
@@ -145,14 +160,6 @@ func TestCurrentOpenAIModelsAndAlias(t *testing.T) {
 
 func TestArgParsingAndLaunchSpec(t *testing.T) {
 	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	claude := filepath.Join(binDir, "claude.exe")
-	if err := os.WriteFile(claude, []byte(""), 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	work := filepath.Join(home, "work")
 	if err := os.MkdirAll(work, 0o755); err != nil {
@@ -184,36 +191,28 @@ func TestArgParsingAndLaunchSpec(t *testing.T) {
 	if spec.Dir != work {
 		t.Fatalf("Dir = %q, want %q", spec.Dir, work)
 	}
-	wantArgs := []string{"--model", "z-ai/glm-5.2", "--thinking-display", "summarized", "--debug"}
+	wantArgs := codexArgs(
+		"z-ai/glm-5.2",
+		srv.URL,
+		filepath.Join(home, "models.json"),
+		false,
+		nil,
+		[]string{"--debug"},
+	)
 	if !slices.Equal(spec.Args, wantArgs) {
 		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
 	}
 	env := envMap(spec.Env)
-	if env["ANTHROPIC_API_KEY"] != "" {
-		t.Fatalf("ANTHROPIC_API_KEY = %q, want empty", env["ANTHROPIC_API_KEY"])
+	if env[codexAPIKeyEnv] != "sk-or-test" {
+		t.Fatalf("%s not set from config", codexAPIKeyEnv)
 	}
-	if env["ANTHROPIC_AUTH_TOKEN"] != "sk-or-test" {
-		t.Fatalf("ANTHROPIC_AUTH_TOKEN not set from config")
-	}
-	if env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] != "202752" {
-		t.Fatalf("compact window = %q", env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"])
-	}
-	if !strings.Contains(stderr.String(), "Launching Claude Code: model z-ai/glm-5.2 | claude z-ai/glm-5.2 | context 202,752 | thinking summarized | dir "+work) {
+	if !strings.Contains(stderr.String(), "Launching Codex CLI: model z-ai/glm-5.2 | context 202,752 | reasoning provider default | dir "+work) {
 		t.Fatalf("launch summary missing or wrong: %q", stderr.String())
 	}
 }
 
-func TestOpenRouterLaunchUsesPatchedClaudeByDefault(t *testing.T) {
-	t.Setenv("SIMPLEROUTER_DISABLE_CLAUDE_PATCH", "")
+func TestOpenRouterLaunchUsesResponsesPassthrough(t *testing.T) {
 	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	claude := filepath.Join(binDir, "claude.exe")
-	if err := os.WriteFile(claude, fakePatchableClaudeBundle(), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := saveConfig(Config{OpenRouterAPIKey: "sk-or-test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +221,14 @@ func TestOpenRouterLaunchUsesPatchedClaudeByDefault(t *testing.T) {
 	defer srv.Close()
 
 	var spec launchSpec
+	var gotUpstreamBase, gotModel string
+	var gotOptions responsesPassthroughOptions
+	startResponsesPassthroughProxyFn = func(upstreamBase, model string, _ *http.Client, options responsesPassthroughOptions) (string, func(), error) {
+		gotUpstreamBase = upstreamBase
+		gotModel = model
+		gotOptions = options
+		return "http://127.0.0.1:43210/v1", func() {}, nil
+	}
 	a := &app{
 		stdin:      strings.NewReader(""),
 		stdout:     &strings.Builder{},
@@ -236,24 +243,23 @@ func TestOpenRouterLaunchUsesPatchedClaudeByDefault(t *testing.T) {
 	if err := a.run(context.Background(), []string{"--model", "z-ai/glm-5.2"}); err != nil {
 		t.Fatal(err)
 	}
-	if spec.Path == claude {
-		t.Fatalf("claude path was not patched: %q", spec.Path)
+	if spec.Path != filepath.Join(home, "codex-test") {
+		t.Fatalf("Codex path = %q", spec.Path)
 	}
-	if !stringsHasPathPrefix(spec.Path, filepath.Join(home, configDirName, "claude-patches")) {
-		t.Fatalf("patched claude path = %q", spec.Path)
+	if gotUpstreamBase != srv.URL || gotModel != "z-ai/glm-5.2" {
+		t.Fatalf("passthrough route = %q model %q", gotUpstreamBase, gotModel)
+	}
+	if gotOptions.Label != "OpenRouter" || gotOptions.ProviderTag != "" {
+		t.Fatalf("passthrough options = %#v", gotOptions)
+	}
+	wantArgs := codexArgs("z-ai/glm-5.2", "http://127.0.0.1:43210/v1", filepath.Join(home, "models.json"), false, nil, nil)
+	if !slices.Equal(spec.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
 	}
 }
 
-func TestOneMillionContextUsesClaudeSuffix(t *testing.T) {
+func TestOneMillionContextStaysInCodexCatalog(t *testing.T) {
 	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	claude := filepath.Join(binDir, "claude.exe")
-	if err := os.WriteFile(claude, []byte(""), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := saveConfig(Config{OpenRouterAPIKey: "sk-or-test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -276,16 +282,9 @@ func TestOneMillionContextUsesClaudeSuffix(t *testing.T) {
 	if err := a.run(context.Background(), []string{"--model", "z-ai/glm-5.2"}); err != nil {
 		t.Fatal(err)
 	}
-	wantArgs := []string{"--model", "z-ai/glm-5.2[1m]", "--thinking-display", "summarized"}
+	wantArgs := codexArgs("z-ai/glm-5.2", srv.URL, filepath.Join(home, "models.json"), false, nil, nil)
 	if !slices.Equal(spec.Args, wantArgs) {
 		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
-	}
-	env := envMap(spec.Env)
-	if env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "z-ai/glm-5.2[1m]" {
-		t.Fatalf("SONNET_MODEL = %q, want z-ai/glm-5.2[1m]", env["ANTHROPIC_DEFAULT_SONNET_MODEL"])
-	}
-	if env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] != "1048576" {
-		t.Fatalf("compact window = %q, want 1048576", env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"])
 	}
 }
 
@@ -356,128 +355,15 @@ func TestInvalidSavedKeyPromptsForReplacement(t *testing.T) {
 	}
 }
 
-func TestBuildClaudeEnvRemovesExistingValues(t *testing.T) {
-	env := buildClaudeEnv([]string{
-		"PATH=x",
-		"ANTHROPIC_API_KEY=old",
-		"ANTHROPIC_AUTH_TOKEN=old",
-		"CLAUDE_CODE_DISABLE_THINKING=old",
-		"CLAUDE_CODE_EFFORT_LEVEL=old",
-		"CLAUDE_CODE_DISABLE_FAST_MODE=old",
-		"CLAUDE_CODE_EXTRA_BODY={\"service_tier\":\"auto\"}",
-		"ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES=old",
-		"ENABLE_CLAUDEAI_MCP_SERVERS=true",
-	}, "", "new-key", "z-ai/glm-5.2", 123, false)
-	m := envMap(env)
-	if m["PATH"] != "x" {
-		t.Fatal("PATH was not preserved")
-	}
-	if m["ANTHROPIC_BASE_URL"] != defaultAnthropicBaseURL {
-		t.Fatalf("ANTHROPIC_BASE_URL = %q, want default", m["ANTHROPIC_BASE_URL"])
-	}
-	if m["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"] != "false" {
-		t.Fatalf("prompt suggestion not disabled: %q", m["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"])
-	}
-	if m["ENABLE_CLAUDEAI_MCP_SERVERS"] != "false" {
-		t.Fatalf("claude.ai connectors not disabled: %q", m["ENABLE_CLAUDEAI_MCP_SERVERS"])
-	}
-	if m["ANTHROPIC_API_KEY"] != "" {
-		t.Fatalf("ANTHROPIC_API_KEY = %q, want empty", m["ANTHROPIC_API_KEY"])
-	}
-	if m["ANTHROPIC_AUTH_TOKEN"] != "new-key" {
-		t.Fatalf("ANTHROPIC_AUTH_TOKEN = %q", m["ANTHROPIC_AUTH_TOKEN"])
-	}
-	if m["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "z-ai/glm-5.2" {
-		t.Fatalf("model env not set")
-	}
-	if m["ANTHROPIC_CUSTOM_MODEL_OPTION"] != "z-ai/glm-5.2" {
-		t.Fatalf("custom model option not set: %+v", m)
-	}
-	if m["CLAUDE_CODE_DISABLE_FAST_MODE"] != "1" {
-		t.Fatalf("Fast Mode not disabled: %+v", m)
-	}
-	wantCapabilities := "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
-	for _, key := range []string{
-		"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES",
-		"ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES",
-		"ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES",
-		"ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
-	} {
-		if m[key] != wantCapabilities {
-			t.Fatalf("%s = %q, want %q", key, m[key], wantCapabilities)
-		}
-	}
-	if _, ok := m["CLAUDE_CODE_EXTRA_BODY"]; ok {
-		t.Fatalf("parent extra body should not leak: %+v", m)
-	}
-	if _, ok := m["CLAUDE_CODE_DISABLE_THINKING"]; ok {
-		t.Fatalf("thinking should not be disabled by default: %+v", m)
-	}
-	if _, ok := m["CLAUDE_CODE_EFFORT_LEVEL"]; ok {
-		t.Fatalf("effort level should not leak from parent env: %+v", m)
-	}
-}
-
-func TestBuildClaudeEnvCanDisableThinking(t *testing.T) {
-	env := buildClaudeEnv(nil, "http://127.0.0.1:5050", "new-key", "z-ai/glm-5.2", 123, true)
-	m := envMap(env)
-	if m["CLAUDE_CODE_DISABLE_THINKING"] != "1" || m["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] != "1" || m["MAX_THINKING_TOKENS"] != "0" {
-		t.Fatalf("disable-thinking env not set: %+v", m)
-	}
-	if m["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:5050" {
-		t.Fatalf("ANTHROPIC_BASE_URL = %q, want proxy override", m["ANTHROPIC_BASE_URL"])
-	}
-}
-
-func TestEnsureClaudeArgInjectsMissingValue(t *testing.T) {
-	got := ensureClaudeArg([]string{"-p", "hello"}, "--thinking-display", "summarized")
-	want := []string{"--thinking-display", "summarized", "-p", "hello"}
-	if !slices.Equal(got, want) {
-		t.Fatalf("args = %v, want %v", got, want)
-	}
-}
-
-func TestEnsureClaudeArgPreservesExistingValue(t *testing.T) {
-	for _, args := range [][]string{
-		{"--thinking-display", "omitted", "-p"},
-		{"--thinking-display=omitted", "-p"},
-	} {
-		got := ensureClaudeArg(args, "--thinking-display", "summarized")
-		if !slices.Equal(got, args) {
-			t.Fatalf("args = %v, want unchanged %v", got, args)
-		}
-	}
-}
-
 func TestLaunchThinkingMode(t *testing.T) {
-	if got := launchThinkingMode(providerOpenRouter, false); got != "summarized" {
-		t.Fatalf("OpenRouter thinking mode = %q", got)
+	if got := launchThinkingMode(providerOpenRouter, false); got != "provider default" {
+		t.Fatalf("OpenRouter reasoning mode = %q", got)
 	}
-	if got := launchThinkingMode(providerZAI, false); got != "default" {
-		t.Fatalf("Z.AI thinking mode = %q", got)
+	if got := launchThinkingMode(providerZAI, false); got != "provider default" {
+		t.Fatalf("Z.AI reasoning mode = %q", got)
 	}
 	if got := launchThinkingMode(providerOpenRouter, true); got != "disabled" {
-		t.Fatalf("disabled thinking mode = %q", got)
-	}
-}
-
-func TestClaudeCodeModelAddsOneMillionSuffix(t *testing.T) {
-	tests := []struct {
-		name          string
-		model         string
-		contextLength int
-		want          string
-	}{
-		{name: "below threshold", model: "z-ai/glm-5.2", contextLength: 999_999, want: "z-ai/glm-5.2"},
-		{name: "one million", model: "z-ai/glm-5.2", contextLength: 1_000_000, want: "z-ai/glm-5.2[1m]"},
-		{name: "already suffixed", model: "z-ai/glm-5.2[1m]", contextLength: 1_048_576, want: "z-ai/glm-5.2[1m]"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := claudeCodeModel(tt.model, tt.contextLength); got != tt.want {
-				t.Fatalf("claudeCodeModel() = %q, want %q", got, tt.want)
-			}
-		})
+		t.Fatalf("disabled reasoning mode = %q", got)
 	}
 }
 
@@ -512,15 +398,6 @@ func TestModelsEndpointFiltersToUsableModels(t *testing.T) {
 
 func TestFirstRunWizardRecommendsAndSavesModel(t *testing.T) {
 	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"claude", "claude.exe"} {
-		if err := os.WriteFile(filepath.Join(binDir, name), []byte(""), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
 
 	srv := openRouterTestServer(t, http.StatusOK, []Model{
 		{ID: "vendor/other", Name: "Other", ContextLength: 8192},
@@ -545,7 +422,7 @@ func TestFirstRunWizardRecommendsAndSavesModel(t *testing.T) {
 	if err := a.run(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(spec.Args, []string{"--model", "z-ai/glm-5.2[1m]", "--thinking-display", "summarized"}) {
+	if !slices.Equal(spec.Args, codexArgs("z-ai/glm-5.2", srv.URL, filepath.Join(home, "models.json"), false, nil, nil)) {
 		t.Fatalf("Args = %v", spec.Args)
 	}
 	cfg, err := loadConfig()
@@ -559,7 +436,7 @@ func TestFirstRunWizardRecommendsAndSavesModel(t *testing.T) {
 		t.Fatalf("provider = %q", cfg.Provider)
 	}
 	out := stderr.String()
-	for _, want := range []string{"simplerouter setup", "Select a provider", "Fetching OpenRouter models", "Launching Claude Code"} {
+	for _, want := range []string{"simplerouter setup", "Select a provider", "Fetching OpenRouter models", "Launching Codex CLI"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stderr missing %q: %q", want, out)
 		}
@@ -733,13 +610,6 @@ func geminiTestServer(t *testing.T, keyStatus int) *httptest.Server {
 
 func TestGeminiModelFlagLaunchesThroughProxy(t *testing.T) {
 	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := saveConfig(Config{GeminiAPIKey: "gm-test", LastModel: "z-ai/glm-5.2"}); err != nil {
 		t.Fatal(err)
 	}
@@ -748,12 +618,14 @@ func TestGeminiModelFlagLaunchesThroughProxy(t *testing.T) {
 	defer srv.Close()
 
 	var proxyKeyBase, proxyModel string
-	oldProxy := startGeminiProxyFn
-	startGeminiProxyFn = func(upstreamBase, model string, _ *http.Client) (string, func(), error) {
+	var proxyDisableReasoning bool
+	oldProxy := startGeminiResponsesProxyFn
+	startGeminiResponsesProxyFn = func(upstreamBase, model string, _ *http.Client, disableReasoning bool) (string, func(), error) {
 		proxyKeyBase, proxyModel = upstreamBase, model
-		return "http://127.0.0.1:9999", func() {}, nil
+		proxyDisableReasoning = disableReasoning
+		return "http://127.0.0.1:9999/v1", func() {}, nil
 	}
-	t.Cleanup(func() { startGeminiProxyFn = oldProxy })
+	t.Cleanup(func() { startGeminiResponsesProxyFn = oldProxy })
 
 	var spec launchSpec
 	stderr := &strings.Builder{}
@@ -775,18 +647,22 @@ func TestGeminiModelFlagLaunchesThroughProxy(t *testing.T) {
 	if proxyModel != "gemini-2.5-flash" || proxyKeyBase != srv.URL {
 		t.Fatalf("proxy stub got (%q, %q)", proxyKeyBase, proxyModel)
 	}
-	if !slices.Equal(spec.Args, []string{"--model", "gemini-2.5-flash[1m]"}) {
+	if proxyDisableReasoning {
+		t.Fatal("Gemini reasoning unexpectedly disabled")
+	}
+	if !slices.Equal(spec.Args, codexArgs(
+		"gemini-2.5-flash",
+		"http://127.0.0.1:9999/v1",
+		filepath.Join(home, "models.json"),
+		false,
+		nil,
+		nil,
+	)) {
 		t.Fatalf("Args = %v", spec.Args)
 	}
 	env := envMap(spec.Env)
-	if env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:9999" {
-		t.Fatalf("base url = %q", env["ANTHROPIC_BASE_URL"])
-	}
-	if env["ANTHROPIC_AUTH_TOKEN"] != "gm-test" {
-		t.Fatalf("auth token = %q, want the real Gemini key", env["ANTHROPIC_AUTH_TOKEN"])
-	}
-	if env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] != "1048576" {
-		t.Fatalf("compact window = %q", env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"])
+	if env[codexAPIKeyEnv] != "gm-test" {
+		t.Fatalf("session key = %q, want the real Gemini key", env[codexAPIKeyEnv])
 	}
 	if !strings.Contains(stderr.String(), "provider Google AI Studio") {
 		t.Fatalf("launch summary missing provider label: %q", stderr.String())
@@ -804,15 +680,8 @@ func TestGeminiModelFlagLaunchesThroughProxy(t *testing.T) {
 	}
 }
 
-func TestDeepSeekLaunchUsesClaudeCodeEnv(t *testing.T) {
+func TestDeepSeekLaunchesThroughResponsesProxy(t *testing.T) {
 	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := saveConfig(Config{Provider: providerDeepSeek, DeepSeekAPIKey: "ds-test", LastDeepSeekModel: "deepseek-v4-flash"}); err != nil {
 		t.Fatal(err)
 	}
@@ -828,6 +697,15 @@ func TestDeepSeekLaunchUsesClaudeCodeEnv(t *testing.T) {
 		fmt.Fprint(w, `{"data":[]}`)
 	}))
 	defer srv.Close()
+
+	var proxyBase, proxyModel string
+	var proxyDisableReasoning bool
+	oldProxy := startDeepSeekResponsesProxyFn
+	startDeepSeekResponsesProxyFn = func(upstreamBase, model string, _ *http.Client, disableReasoning bool) (string, func(), error) {
+		proxyBase, proxyModel, proxyDisableReasoning = upstreamBase, model, disableReasoning
+		return "http://127.0.0.1:9090/v1", func() {}, nil
+	}
+	t.Cleanup(func() { startDeepSeekResponsesProxyFn = oldProxy })
 
 	var spec launchSpec
 	stderr := &strings.Builder{}
@@ -845,30 +723,30 @@ func TestDeepSeekLaunchUsesClaudeCodeEnv(t *testing.T) {
 	if err := a.run(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
+	if proxyBase != srv.URL || proxyModel != "deepseek-v4-flash" || proxyDisableReasoning {
+		t.Fatalf("proxy got (%q, %q, %v)", proxyBase, proxyModel, proxyDisableReasoning)
+	}
 	env := envMap(spec.Env)
-	if env["ANTHROPIC_BASE_URL"] != srv.URL+"/anthropic" {
-		t.Fatalf("base url = %q", env["ANTHROPIC_BASE_URL"])
+	if env[codexAPIKeyEnv] != "ds-test" {
+		t.Fatalf("session key = %q", env[codexAPIKeyEnv])
 	}
-	if env["ANTHROPIC_AUTH_TOKEN"] != "ds-test" || env["ANTHROPIC_API_KEY"] != "" {
-		t.Fatalf("auth env = %+v", env)
-	}
-	if env["CLAUDE_CODE_EFFORT_LEVEL"] != "max" {
-		t.Fatalf("effort env = %q, want max", env["CLAUDE_CODE_EFFORT_LEVEL"])
+	if !slices.Equal(spec.Args, codexArgs(
+		"deepseek-v4-flash",
+		"http://127.0.0.1:9090/v1",
+		filepath.Join(home, "models.json"),
+		false,
+		nil,
+		nil,
+	)) {
+		t.Fatalf("Args = %v", spec.Args)
 	}
 	if !strings.Contains(stderr.String(), "provider DeepSeek") {
 		t.Fatalf("launch summary missing provider label: %q", stderr.String())
 	}
 }
 
-func TestOpenAILaunchesThroughProxy(t *testing.T) {
+func TestOpenAILaunchesAgainstNativeResponses(t *testing.T) {
 	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := saveConfig(Config{Provider: providerOpenAI, OpenAIAPIKey: "oa-test", LastOpenAIModel: "gpt-5.5"}); err != nil {
 		t.Fatal(err)
 	}
@@ -881,14 +759,6 @@ func TestOpenAILaunchesThroughProxy(t *testing.T) {
 		fmt.Fprint(w, `{"data":[]}`)
 	}))
 	defer srv.Close()
-
-	var proxyBase, proxyModel string
-	oldProxy := startOpenAIProxyFn
-	startOpenAIProxyFn = func(upstreamBase, model string, _ *http.Client) (string, func(), error) {
-		proxyBase, proxyModel = upstreamBase, model
-		return "http://127.0.0.1:9191", func() {}, nil
-	}
-	t.Cleanup(func() { startOpenAIProxyFn = oldProxy })
 
 	var spec launchSpec
 	a := &app{
@@ -905,36 +775,29 @@ func TestOpenAILaunchesThroughProxy(t *testing.T) {
 	if err := a.run(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if proxyBase != srv.URL || proxyModel != "gpt-5.5" {
-		t.Fatalf("proxy got (%q, %q)", proxyBase, proxyModel)
-	}
 	env := envMap(spec.Env)
-	if env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:9191" || env["ANTHROPIC_AUTH_TOKEN"] != "oa-test" {
-		t.Fatalf("env = %+v", env)
+	if env[codexAPIKeyEnv] != "oa-test" {
+		t.Fatalf("session key = %q", env[codexAPIKeyEnv])
+	}
+	if !slices.Equal(spec.Args, codexArgs("gpt-5.5", srv.URL, filepath.Join(home, "models.json"), false, nil, nil)) {
+		t.Fatalf("Args = %v", spec.Args)
 	}
 }
 
 func TestZAILaunchesThroughProxy(t *testing.T) {
 	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := saveConfig(Config{Provider: providerZAI, ZAIAPIKey: "zai-test", LastZAIModel: "glm-5.2"}); err != nil {
 		t.Fatal(err)
 	}
 
 	var proxyBase, proxyModel string
 	var proxyDisableThinking bool
-	oldProxy := startZAIProxyFn
-	startZAIProxyFn = func(upstreamBase, model string, _ *http.Client, disableThinking bool) (string, func(), error) {
+	oldProxy := startZAIResponsesProxyFn
+	startZAIResponsesProxyFn = func(upstreamBase, model string, _ *http.Client, disableThinking bool) (string, func(), error) {
 		proxyBase, proxyModel, proxyDisableThinking = upstreamBase, model, disableThinking
-		return "http://127.0.0.1:9292", func() {}, nil
+		return "http://127.0.0.1:9292/v1", func() {}, nil
 	}
-	t.Cleanup(func() { startZAIProxyFn = oldProxy })
+	t.Cleanup(func() { startZAIResponsesProxyFn = oldProxy })
 
 	var spec launchSpec
 	a := &app{
@@ -953,31 +816,34 @@ func TestZAILaunchesThroughProxy(t *testing.T) {
 		t.Fatalf("proxy got (%q, %q, %v)", proxyBase, proxyModel, proxyDisableThinking)
 	}
 	env := envMap(spec.Env)
-	if env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:9292" || env["ANTHROPIC_AUTH_TOKEN"] != "zai-test" {
-		t.Fatalf("env = %+v", env)
+	if env[codexAPIKeyEnv] != "zai-test" {
+		t.Fatalf("session key = %q", env[codexAPIKeyEnv])
+	}
+	if !slices.Equal(spec.Args, codexArgs(
+		"glm-5.2",
+		"http://127.0.0.1:9292/v1",
+		filepath.Join(home, "models.json"),
+		true,
+		nil,
+		nil,
+	)) {
+		t.Fatalf("Args = %v", spec.Args)
 	}
 }
 
 func TestBareRelaunchShowsProviderPicker(t *testing.T) {
-	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	withTestHome(t)
 	if err := saveConfig(Config{Provider: providerGemini, GeminiAPIKey: "gm-test", LastGeminiModel: "gemini-2.5-flash"}); err != nil {
 		t.Fatal(err)
 	}
 
 	srv := geminiTestServer(t, http.StatusOK)
 	defer srv.Close()
-	oldProxy := startGeminiProxyFn
-	startGeminiProxyFn = func(string, string, *http.Client) (string, func(), error) {
-		return "http://127.0.0.1:9999", func() {}, nil
+	oldProxy := startGeminiResponsesProxyFn
+	startGeminiResponsesProxyFn = func(string, string, *http.Client, bool) (string, func(), error) {
+		return "http://127.0.0.1:9999/v1", func() {}, nil
 	}
-	t.Cleanup(func() { startGeminiProxyFn = oldProxy })
+	t.Cleanup(func() { startGeminiResponsesProxyFn = oldProxy })
 
 	stderr := &strings.Builder{}
 	a := &app{
@@ -1001,23 +867,16 @@ func TestBareRelaunchShowsProviderPicker(t *testing.T) {
 }
 
 func TestBareCommandWithLegacyLastModelShowsProviderPicker(t *testing.T) {
-	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	withTestHome(t)
 	if err := saveConfig(Config{LastModel: "z-ai/glm-5.2", ZAIAPIKey: "zai-test"}); err != nil {
 		t.Fatal(err)
 	}
 
-	oldProxy := startZAIProxyFn
-	startZAIProxyFn = func(string, string, *http.Client, bool) (string, func(), error) {
-		return "http://127.0.0.1:9292", func() {}, nil
+	oldProxy := startZAIResponsesProxyFn
+	startZAIResponsesProxyFn = func(string, string, *http.Client, bool) (string, func(), error) {
+		return "http://127.0.0.1:9292/v1", func() {}, nil
 	}
-	t.Cleanup(func() { startZAIProxyFn = oldProxy })
+	t.Cleanup(func() { startZAIResponsesProxyFn = oldProxy })
 
 	stderr := &strings.Builder{}
 	a := &app{
@@ -1079,14 +938,7 @@ func TestGeminiInvalidSavedKeyPromptsForReplacement(t *testing.T) {
 }
 
 func TestModelPickerBackReturnsToProviderPicker(t *testing.T) {
-	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	withTestHome(t)
 	// Both keys saved so no key prompts interrupt the picker flow.
 	if err := saveConfig(Config{OpenRouterAPIKey: "sk-or-test", GeminiAPIKey: "gm-test"}); err != nil {
 		t.Fatal(err)
@@ -1127,7 +979,7 @@ func TestModelPickerBackReturnsToProviderPicker(t *testing.T) {
 	if strings.Count(out, "Select a provider") < 2 {
 		t.Fatalf("provider picker not re-shown after back: %q", out)
 	}
-	if !slices.Equal(spec.Args, []string{"--model", "z-ai/glm-5.2", "--thinking-display", "summarized"}) {
+	if len(spec.Args) < 2 || spec.Args[0] != "--model" || spec.Args[1] != "z-ai/glm-5.2" {
 		t.Fatalf("Args = %v", spec.Args)
 	}
 	cfg, err := loadConfig()
@@ -1142,14 +994,7 @@ func TestModelPickerBackReturnsToProviderPicker(t *testing.T) {
 func TestRelaunchWithSavedProviderCanStillGoBack(t *testing.T) {
 	// Bare relaunch opens the provider picker first. The model picker must
 	// still offer "back" after accepting the saved provider.
-	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	withTestHome(t)
 	if err := saveConfig(Config{
 		Provider:         providerGemini,
 		OpenRouterAPIKey: "sk-or-test",
@@ -1190,7 +1035,7 @@ func TestRelaunchWithSavedProviderCanStillGoBack(t *testing.T) {
 			t.Fatalf("stderr missing %q: %q", want, out)
 		}
 	}
-	if !slices.Equal(spec.Args, []string{"--model", "z-ai/glm-5.2", "--thinking-display", "summarized"}) {
+	if len(spec.Args) < 2 || spec.Args[0] != "--model" || spec.Args[1] != "z-ai/glm-5.2" {
 		t.Fatalf("Args = %v", spec.Args)
 	}
 	cfg, err := loadConfig()
@@ -1205,14 +1050,7 @@ func TestRelaunchWithSavedProviderCanStillGoBack(t *testing.T) {
 func TestModelPickerBackFromExplicitProviderFlag(t *testing.T) {
 	// Back is available even when the provider was pinned by --provider: the
 	// user is at an interactive picker and may change their mind.
-	home := withTestHome(t)
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "claude.exe"), []byte(""), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	withTestHome(t)
 	if err := saveConfig(Config{OpenRouterAPIKey: "sk-or-test", GeminiAPIKey: "gm-test"}); err != nil {
 		t.Fatal(err)
 	}
