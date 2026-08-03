@@ -22,8 +22,14 @@ func fakeThroughputBundle() []byte {
 
 func TestFindThroughputEditsRewritesAllInMemoryHooks(t *testing.T) {
 	original := fakeThroughputBundle()
-	if _, metricsFn, ok, err := findThroughputStateEdit(original); err != nil || !ok {
+	stateEdit, metricsFn, ok, err := findThroughputStateEdit(original)
+	if err != nil || !ok {
 		t.Fatalf("findThroughputStateEdit = (%q, %v, %v)", metricsFn, ok, err)
+	}
+	mergedElseRe := regexp.MustCompile(`}else` + claudeIdent + `\.outputTokens`)
+	separatedElseRe := regexp.MustCompile(`}else ` + claudeIdent + `\.outputTokens`)
+	if mergedElseRe.Match(stateEdit.replacement) || !separatedElseRe.Match(stateEdit.replacement) {
+		t.Fatalf("throughput state replacement has an invalid else/identifier boundary: %s", stateEdit.replacement)
 	}
 	if _, ok, err := findThroughputSpinnerEdit(original); err != nil || !ok {
 		matches := spinnerMetricRe.FindAllSubmatchIndex(original, -1)
