@@ -19,15 +19,20 @@ func withTestHome(t *testing.T) string {
 	old := userHomeDir
 	oldFindCodex := findCodexFn
 	oldPrepareCatalog := prepareCodexModelCatalogFn
+	oldStartResponsesPassthroughProxy := startResponsesPassthroughProxyFn
 	userHomeDir = func() (string, error) { return dir, nil }
 	findCodexFn = func() (string, error) { return filepath.Join(dir, "codex-test"), nil }
 	prepareCodexModelCatalogFn = func(_ string, _ Model, _ bool) (string, func(), error) {
 		return filepath.Join(dir, "models.json"), func() {}, nil
 	}
+	startResponsesPassthroughProxyFn = func(upstreamBase, _ string, _ *http.Client, _ responsesPassthroughOptions) (string, func(), error) {
+		return upstreamBase, func() {}, nil
+	}
 	t.Cleanup(func() {
 		userHomeDir = old
 		findCodexFn = oldFindCodex
 		prepareCodexModelCatalogFn = oldPrepareCatalog
+		startResponsesPassthroughProxyFn = oldStartResponsesPassthroughProxy
 	})
 	return dir
 }
@@ -206,7 +211,7 @@ func TestArgParsingAndLaunchSpec(t *testing.T) {
 	}
 }
 
-func TestOpenRouterLaunchUsesCodexDirectly(t *testing.T) {
+func TestOpenRouterLaunchUsesResponsesPassthrough(t *testing.T) {
 	home := withTestHome(t)
 	if err := saveConfig(Config{OpenRouterAPIKey: "sk-or-test"}); err != nil {
 		t.Fatal(err)
@@ -216,6 +221,14 @@ func TestOpenRouterLaunchUsesCodexDirectly(t *testing.T) {
 	defer srv.Close()
 
 	var spec launchSpec
+	var gotUpstreamBase, gotModel string
+	var gotOptions responsesPassthroughOptions
+	startResponsesPassthroughProxyFn = func(upstreamBase, model string, _ *http.Client, options responsesPassthroughOptions) (string, func(), error) {
+		gotUpstreamBase = upstreamBase
+		gotModel = model
+		gotOptions = options
+		return "http://127.0.0.1:43210/v1", func() {}, nil
+	}
 	a := &app{
 		stdin:      strings.NewReader(""),
 		stdout:     &strings.Builder{},
@@ -232,6 +245,16 @@ func TestOpenRouterLaunchUsesCodexDirectly(t *testing.T) {
 	}
 	if spec.Path != filepath.Join(home, "codex-test") {
 		t.Fatalf("Codex path = %q", spec.Path)
+	}
+	if gotUpstreamBase != srv.URL || gotModel != "z-ai/glm-5.2" {
+		t.Fatalf("passthrough route = %q model %q", gotUpstreamBase, gotModel)
+	}
+	if gotOptions.Label != "OpenRouter" || gotOptions.ProviderTag != "" {
+		t.Fatalf("passthrough options = %#v", gotOptions)
+	}
+	wantArgs := codexArgs("z-ai/glm-5.2", "http://127.0.0.1:43210/v1", filepath.Join(home, "models.json"), false, nil, nil)
+	if !slices.Equal(spec.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
 	}
 }
 

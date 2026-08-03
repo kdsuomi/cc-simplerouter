@@ -17,6 +17,7 @@ const (
 	codexProviderName               = "simplerouter_session"
 	codexDefaultServiceTierOverride = "default"
 	codexSimpleRouterBinaryName     = "codex-simplerouter"
+	codexSimpleRouterBundleName     = "simplerouter-codex"
 )
 
 type codexModelCatalog struct {
@@ -24,15 +25,22 @@ type codexModelCatalog struct {
 }
 
 func findCodex() (string, error) {
+	home, homeErr := userHomeDir()
+	if homeErr == nil {
+		bundlePath := codexSimpleRouterBundlePath(home)
+		if info, statErr := os.Stat(bundlePath); statErr == nil && !info.IsDir() {
+			return bundlePath, nil
+		}
+	}
+
 	for _, name := range []string{codexSimpleRouterBinaryName, codexSimpleRouterBinaryName + ".exe"} {
 		if path, err := exec.LookPath(name); err == nil {
 			return path, nil
 		}
 	}
 
-	home, err := userHomeDir()
-	if err != nil {
-		return "", err
+	if homeErr != nil {
+		return "", homeErr
 	}
 	patchedName := codexSimpleRouterBinaryName
 	if runtime.GOOS == "windows" {
@@ -70,6 +78,14 @@ func findCodex() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("codex binary not found; install the OpenAI Codex CLI first")
+}
+
+func codexSimpleRouterBundlePath(home string) string {
+	name := codexSimpleRouterBinaryName
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(home, ".local", "share", "simplerouter", codexSimpleRouterBundleName, "bin", name)
 }
 
 // prepareCodexModelCatalog derives a one-model catalog from the installed

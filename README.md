@@ -59,6 +59,20 @@ sh ./scripts/build_install.sh
 Both scripts install the binary under `~/.local/bin` and explain any required
 `PATH` change.
 
+To build the patched Codex companion from the local `.research` worktree on
+Windows, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_install_codex_companion.ps1
+```
+
+This installs a version-isolated bundle under
+`~/.local/share/simplerouter/simplerouter-codex`, including the two helper
+executables required by Codex's Windows sandbox. Keeping the helpers with the
+patched binary avoids collisions with a separately installed official Codex
+release. Pass `-SkipBuild` to reinstall existing Cargo outputs without
+recompiling.
+
 For a published `simplerouter` release, the download installers are:
 
 ```powershell
@@ -103,6 +117,10 @@ Use `/thinking` to toggle the live reasoning block, or `/thinking on`,
 only the current launched process and continues to honor Codex's
 `hide_agent_reasoning` setting.
 
+The live block shows the last 20 rows of the current reasoning stream. When a
+reasoning block finishes, its last 20 rows stay in the scrollback; the full
+text is always available in the `Ctrl+T` transcript overlay.
+
 ### OpenRouter endpoint pinning
 
 OpenRouter routes providers through request-body fields. From the OpenRouter
@@ -118,8 +136,11 @@ model picker, press `Tab` to select a particular inference endpoint.
 }
 ```
 
-Without endpoint pinning, Codex connects straight to OpenRouter and OpenRouter
-chooses the endpoint.
+Without endpoint pinning, the passthrough leaves provider routing untouched so
+OpenRouter chooses the endpoint. It also handles structured
+output compatibility: if an endpoint rejects `json_schema` but supports
+`json_object`, the request is retried once and that capability is remembered
+for later automatic reviews in the same session.
 
 ### Protocol translation
 

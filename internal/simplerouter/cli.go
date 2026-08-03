@@ -215,17 +215,15 @@ func (a *app) run(ctx context.Context, args []string) error {
 		baseURL = a.metaBase()
 	default:
 		baseURL = a.openRouterBase()
-		if res.ProviderTag != "" {
-			proxyURL, stop, perr := startResponsesPassthroughProxyFn(baseURL, modelID, a.httpClient, responsesPassthroughOptions{
-				Label:       "OpenRouter",
-				ProviderTag: res.ProviderTag,
-			})
-			if perr != nil {
-				return fmt.Errorf("start OpenRouter Responses proxy: %w", perr)
-			}
-			defer stop()
-			baseURL = proxyURL
+		proxyURL, stop, perr := startResponsesPassthroughProxyFn(baseURL, modelID, a.httpClient, responsesPassthroughOptions{
+			Label:       "OpenRouter",
+			ProviderTag: res.ProviderTag,
+		})
+		if perr != nil {
+			return fmt.Errorf("start OpenRouter Responses proxy: %w", perr)
 		}
+		defer stop()
+		baseURL = proxyURL
 	}
 
 	catalogPath, cleanupCatalog, err := prepareCodexModelCatalogFn(codexPath, selected, modelSupportsReasoning(selected) && !disableThinking)

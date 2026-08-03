@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -148,11 +147,7 @@ func TestFindCodexPrefersSimpleRouterBinary(t *testing.T) {
 	userHomeDir = func() (string, error) { return home, nil }
 	t.Cleanup(func() { userHomeDir = oldUserHomeDir })
 
-	name := codexSimpleRouterBinaryName
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	patchedPath := filepath.Join(home, ".local", "bin", name)
+	patchedPath := codexSimpleRouterBundlePath(home)
 	if err := os.MkdirAll(filepath.Dir(patchedPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
