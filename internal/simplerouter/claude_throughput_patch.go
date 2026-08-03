@@ -40,8 +40,12 @@ var (
 			`case"none":(?P<detail6>` + claudeIdent + `)=null;break\}` +
 			`let (?P<detailWidth>` + claudeIdent + `)=(?P<detail7>` + claudeIdent + `)\?(?P<measure3>` + claudeIdent + `)\((?P<detail8>` + claudeIdent + `)\):0,`)
 
-	controllerCallbackHeaderRe = regexp.MustCompile(
-		`(` + claudeIdent + `)=(` + claudeIdent + `)\.useCallback\(\((` + claudeIdent + `)\)=>\{`)
+	// controllerCallbackAnchor is the literal heart of the callback header
+	// `IDENT=IDENT.useCallback((IDENT)=>{`. Scanning for it with bytes.Index
+	// and validating the surrounding identifiers by hand keeps the search at
+	// memcpy speed; an equivalent regexp has no literal prefix and would
+	// start a match attempt at every byte of the ~265MB bundle (~8s).
+	controllerCallbackAnchor = []byte(".useCallback((")
 	controllerTailRe = regexp.MustCompile(
 		`let (?P<motion>` + claudeIdent + `)=!\((?P<select>` + claudeIdent + `)\(\((?P<pref1>` + claudeIdent + `)\)=>(?P<pref2>` + claudeIdent + `)\.settings\.prefersReducedMotion\)\?\?!1\)&&!(?P<disableMotion>` + claudeIdent + `)\(\),` +
 			`(?P<streamCallback>` + claudeIdent + `)=(?P<react>` + claudeIdent + `)\.useCallback\(\((?P<update1>` + claudeIdent + `)\)=>\{if\(!(?P<motion2>` + claudeIdent + `)\)\{if\((?P<update2>` + claudeIdent + `)\((?P<buffer1>` + claudeIdent + `)\.peek\(\)\)===null\)(?P<buffer2>` + claudeIdent + `)\.clear\(\);return\}(?P<buffer3>` + claudeIdent + `)\.apply\((?P<update3>` + claudeIdent + `)\)\},\[(?P<motion3>` + claudeIdent + `),(?P<buffer4>` + claudeIdent + `)\]\),` +
@@ -237,8 +241,72 @@ func spinnerGroupsConsistent(g map[string]string) bool {
 	return true
 }
 
+// findControllerCallbackHeaders locates every `IDENT=IDENT.useCallback((IDENT)=>{`
+// header, returning submatch indexes in the same shape a regexp would: full
+// match plus the three identifier groups (callback name, React object, event
+// parameter).
+func findControllerCallbackHeaders(data []byte) [][]int {
+	var matches [][]int
+	for searchFrom := 0; ; {
+		at := bytes.Index(data[searchFrom:], controllerCallbackAnchor)
+		if at < 0 {
+			return matches
+		}
+		anchor := searchFrom + at
+		searchFrom = anchor + len(controllerCallbackAnchor)
+
+		// Event parameter and `)=>{` terminator after the anchor.
+		eventStart := anchor + len(controllerCallbackAnchor)
+		eventEnd := scanJSIdentForward(data, eventStart)
+		if eventEnd == eventStart || eventEnd+4 > len(data) ||
+			data[eventEnd] != ')' || data[eventEnd+1] != '=' || data[eventEnd+2] != '>' || data[eventEnd+3] != '{' {
+			continue
+		}
+		// React object identifier immediately before the anchor's dot.
+		reactEnd := anchor
+		reactStart := scanJSIdentBackward(data, reactEnd)
+		if reactStart == reactEnd {
+			continue
+		}
+		// `=` then the callback name.
+		eq := reactStart - 1
+		if eq < 0 || data[eq] != '=' {
+			continue
+		}
+		nameEnd := eq
+		nameStart := scanJSIdentBackward(data, nameEnd)
+		if nameStart == nameEnd {
+			continue
+		}
+		matches = append(matches, []int{
+			nameStart, eventEnd + 4,
+			nameStart, nameEnd,
+			reactStart, reactEnd,
+			eventStart, eventEnd,
+		})
+	}
+}
+
+func isJSIdentByte(ch byte) bool {
+	return ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_' || ch == '$'
+}
+
+func scanJSIdentForward(data []byte, from int) int {
+	for from < len(data) && isJSIdentByte(data[from]) {
+		from++
+	}
+	return from
+}
+
+func scanJSIdentBackward(data []byte, from int) int {
+	for from > 0 && isJSIdentByte(data[from-1]) {
+		from--
+	}
+	return from
+}
+
 func findThroughputControllerEdit(data []byte, metricsFn string) (claudePatchEdit, bool, error) {
-	callbackMatches := controllerCallbackHeaderRe.FindAllSubmatchIndex(data, -1)
+	callbackMatches := findControllerCallbackHeaders(data)
 	var edits []claudePatchEdit
 	for _, callbackMatch := range callbackMatches {
 		openBrace := callbackMatch[1] - 1
