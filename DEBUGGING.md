@@ -1,4 +1,45 @@
-# Debugging Claude Code Binary Patches
+# Debugging SimpleRouter CLI Patches
+
+## Codex companion: know the source of truth
+
+Current `main` launches Codex. Its patched companion is represented by the
+ordered mail patches under `codex/patches/0.145.0`, based on the exact upstream
+commit named in `scripts/prepare_codex_companion.ps1`. The checkout under
+`.build/codex-rust-v0.145.0` is generated and ignored; edits made only there are
+not part of the SimpleRouter repository.
+
+The preparation script verifies the patched Git tree, not merely whether every
+patch command returned success. This catches a wrong upstream tag, missing or
+reordered patches, and unnoticed patch drift. The Cargo target directory is
+separate at `.build/codex-target`, so use `-RefreshSource` when source is suspect
+without throwing away the expensive incremental build cache.
+
+For a companion change:
+
+1. Make and commit the change in the generated checkout.
+2. Regenerate the complete series from `rust-v0.145.0` with
+   `git format-patch --no-signature`; do not copy the upstream source tree into
+   this repository.
+3. Replace `codex/patches/0.145.0`, update the expected tree hash in the prepare
+   script, and prepare a fresh checkout.
+4. Run the focused Rust tests in that checkout, then build/install through the
+   root script so the tested and launched binaries use the same path.
+
+On Windows, an upstream checkout can show a very large `git status` after line
+ending conversion even when `git diff` has no content. Before treating that as
+real work, inspect `git diff --name-only HEAD`, the committed patch range, and
+the final tree hash. Export patches from commits, never from a noisy working
+tree.
+
+`findCodex` prefers the installed bundle at
+`~/.local/share/simplerouter/simplerouter-codex/bin/codex-simplerouter.exe`.
+Testing an executable elsewhere does not prove that `simplerouter` launched it;
+inspect that bundle or the resolved launch path.
+
+## Legacy Claude Code binary patching
+
+The notes below describe the Claude-focused history before the Codex variant
+became `main`. They remain useful when diagnosing or backporting that branch.
 
 ## Know which binary is running
 

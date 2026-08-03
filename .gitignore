@@ -2,7 +2,7 @@ bin/
 dist/
 .gocache/
 .cache/
-.research/
+.build/
 .private/
 .claude/
 .codex/

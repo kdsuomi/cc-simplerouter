@@ -59,19 +59,22 @@ sh ./scripts/build_install.sh
 Both scripts install the binary under `~/.local/bin` and explain any required
 `PATH` change.
 
-To build the patched Codex companion from the local `.research` worktree on
-Windows, run:
+To prepare, build, and install the patched Codex companion on Windows, run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build_install_codex_companion.ps1
 ```
 
-This installs a version-isolated bundle under
+The build script clones the pinned upstream Codex release into ignored
+`.build/`, applies the patch series committed under `codex/patches`, and
+verifies the exact resulting Git tree before compiling. Cargo outputs are kept
+separately in `.build/codex-target`, so source refreshes retain incremental
+build artifacts. It installs a version-isolated bundle under
 `~/.local/share/simplerouter/simplerouter-codex`, including the two helper
 executables required by Codex's Windows sandbox. Keeping the helpers with the
 patched binary avoids collisions with a separately installed official Codex
 release. Pass `-SkipBuild` to reinstall existing Cargo outputs without
-recompiling.
+recompiling, or `-RefreshSource` to recreate the generated checkout.
 
 For a published `simplerouter` release, the download installers are:
 

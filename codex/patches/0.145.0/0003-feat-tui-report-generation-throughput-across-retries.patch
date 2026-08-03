@@ -1,0 +1,3524 @@
+From 27980bab6f9ddd22e342d41623f75c6bf2d946fa Mon Sep 17 00:00:00 2001
+From: Kyle <kdsuomi@users.noreply.github.com>
+Date: Mon, 3 Aug 2026 13:54:57 -0400
+Subject: [PATCH 3/3] feat(tui): report generation throughput across retries
+
+---
+ codex-rs/.cargo/config.toml                   |   5 +
+ codex-rs/Cargo.lock                           | 260 +++++++--------
+ codex-rs/Cargo.toml                           |  22 +-
+ .../schema/json/ServerNotification.json       |  98 ++++++
+ .../codex_app_server_protocol.schemas.json    | 102 ++++++
+ .../codex_app_server_protocol.v2.schemas.json | 102 ++++++
+ .../v2/RawResponseStartedNotification.json    |  23 ++
+ .../v2/RawResponseStoppedNotification.json    |  37 +++
+ .../schema/typescript/ServerNotification.ts   |   4 +-
+ .../typescript/ServerNotificationEnvelope.ts  |   4 +-
+ .../v2/RawResponseStartedNotification.ts      |  10 +
+ .../v2/RawResponseStoppedNotification.ts      |  16 +
+ .../schema/typescript/v2/index.ts             |   2 +
+ .../src/protocol/common.rs                    |   4 +
+ .../src/protocol/v2/thread.rs                 |  41 +++
+ .../app-server/src/bespoke_event_handling.rs  |  24 ++
+ .../request_processors/thread_lifecycle.rs    |   5 +-
+ .../request_processors/thread_processor.rs    |   6 +-
+ .../thread_processor_tests.rs                 |   1 +
+ .../app-server/tests/suite/v2/turn_start.rs   |  38 ++-
+ codex-rs/core/src/session/turn.rs             | 101 +++++-
+ codex-rs/core/src/session/turn_tests.rs       |  53 +++
+ codex-rs/core/src/turn_timing.rs              |  16 +
+ codex-rs/core/src/turn_timing_tests.rs        |  28 ++
+ codex-rs/mcp-server/src/codex_tool_runner.rs  |   2 +
+ codex-rs/protocol/src/protocol.rs             |  29 ++
+ codex-rs/rollout-trace/src/protocol_event.rs  |   4 +
+ codex-rs/rollout/src/policy.rs                |   2 +
+ .../tui/src/app/app_server_event_targets.rs   |   6 +
+ codex-rs/tui/src/app_server_session.rs        |  65 ++++
+ codex-rs/tui/src/chatwidget.rs                |   6 +-
+ codex-rs/tui/src/chatwidget/constructor.rs    |   3 +
+ .../tui/src/chatwidget/generation_rate.rs     | 312 ++++++++++++++++++
+ .../src/chatwidget/generation_rate_tests.rs   | 161 +++++++++
+ codex-rs/tui/src/chatwidget/live_reasoning.rs |   4 +-
+ codex-rs/tui/src/chatwidget/protocol.rs       |  30 +-
+ ...completed_turn_generation_rate_suffix.snap |  10 +
+ .../tui/src/chatwidget/status_surfaces.rs     |  17 +-
+ codex-rs/tui/src/chatwidget/streaming.rs      |  12 +-
+ codex-rs/tui/src/chatwidget/tests.rs          |   1 +
+ .../src/chatwidget/tests/generation_rate.rs   |  75 +++++
+ .../src/chatwidget/tests/live_reasoning.rs    |  46 ++-
+ codex-rs/tui/src/chatwidget/turn_runtime.rs   |   2 +
+ codex-rs/tui/src/history_cell/messages.rs     |  23 ++
+ 44 files changed, 1647 insertions(+), 165 deletions(-)
+ create mode 100644 codex-rs/app-server-protocol/schema/json/v2/RawResponseStartedNotification.json
+ create mode 100644 codex-rs/app-server-protocol/schema/json/v2/RawResponseStoppedNotification.json
+ create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStartedNotification.ts
+ create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStoppedNotification.ts
+ create mode 100644 codex-rs/tui/src/chatwidget/generation_rate.rs
+ create mode 100644 codex-rs/tui/src/chatwidget/generation_rate_tests.rs
+ create mode 100644 codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap
+ create mode 100644 codex-rs/tui/src/chatwidget/tests/generation_rate.rs
+
+diff --git a/codex-rs/.cargo/config.toml b/codex-rs/.cargo/config.toml
+index 8a6f2c1..a903549 100644
+--- a/codex-rs/.cargo/config.toml
++++ b/codex-rs/.cargo/config.toml
+@@ -1,6 +1,11 @@
+ [target.'cfg(all(windows, target_env = "msvc"))']
+ rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "target-feature=+crt-static"]
+ 
++# Link with the toolchain-bundled LLD instead of MSVC link.exe; linking the
++# large codex binaries dominates incremental build time.
++[target.x86_64-pc-windows-msvc]
++linker = "rust-lld"
++
+ # MSVC emits a warning about code that may trip "Cortex-A53 MPCore processor bug #843419" (see
+ # https://developer.arm.com/documentation/epm048406/latest) which is sometimes emitted by LLVM.
+ # Since Arm64 Windows 10+ isn't supported on that processor, it's safe to disable the warning.
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index 3db2c3d..12ec7a8 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -394,7 +394,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+ 
+ [[package]]
+ name = "app_test_support"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1837,7 +1837,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-extension"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -1849,7 +1849,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-graph-store"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-state",
+@@ -1863,7 +1863,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-agent-identity"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1882,7 +1882,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-analytics"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-app-server-protocol",
+  "codex-git-utils",
+@@ -1903,7 +1903,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ansi-escape"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "ansi-to-tui",
+  "ratatui",
+@@ -1912,7 +1912,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-api"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "assert_matches",
+@@ -1948,7 +1948,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2043,7 +2043,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-client"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-app-server",
+  "codex-app-server-protocol",
+@@ -2070,7 +2070,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-daemon"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol",
+@@ -2091,7 +2091,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-protocol"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2120,7 +2120,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-test-client"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2142,7 +2142,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-app-server-transport"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2184,7 +2184,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-apply-patch"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2204,7 +2204,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-arg0"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-apply-patch",
+@@ -2224,7 +2224,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-async-utils"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "pretty_assertions",
+  "tokio",
+@@ -2233,7 +2233,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-aws-auth"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "aws-config",
+  "aws-credential-types",
+@@ -2248,7 +2248,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-client"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-api",
+@@ -2265,7 +2265,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-backend-openapi-models"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "serde",
+  "serde_json",
+@@ -2274,7 +2274,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-bwrap"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "cc",
+  "libc",
+@@ -2283,7 +2283,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-chatgpt"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2304,7 +2304,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cli"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2382,7 +2382,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-client"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-http-client",
+  "eventsource-stream",
+@@ -2394,7 +2394,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-config"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -2418,7 +2418,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2449,7 +2449,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-client"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2463,7 +2463,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-cloud-tasks-mock-client"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "chrono",
+  "codex-cloud-tasks-client",
+@@ -2472,7 +2472,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-code-mode-protocol",
+  "codex-protocol",
+@@ -2488,7 +2488,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-host"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-code-mode",
+@@ -2504,7 +2504,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-code-mode-protocol"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-protocol",
+  "pretty_assertions",
+@@ -2516,11 +2516,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-collaboration-mode-templates"
+-version = "0.0.0"
++version = "0.145.0"
+ 
+ [[package]]
+ name = "codex-config"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2568,7 +2568,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2590,7 +2590,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-connectors-extension"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-connectors",
+  "codex-core-plugins",
+@@ -2603,7 +2603,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-context-fragments"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -2611,7 +2611,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2739,7 +2739,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-api"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-analytics",
+  "codex-app-server-protocol",
+@@ -2760,7 +2760,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-plugins"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2810,7 +2810,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-core-skills"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-analytics",
+@@ -2844,7 +2844,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2890,7 +2890,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2942,7 +2942,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-exec-server-protocol"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-file-system",
+@@ -2957,7 +2957,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-execpolicy"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2975,7 +2975,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-experimental-api-macros"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -2984,7 +2984,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-api"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-config",
+  "codex-context-fragments",
+@@ -2999,7 +2999,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-extension-items"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "pretty_assertions",
+@@ -3011,7 +3011,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-external-agent-migration"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "chrono",
+  "codex-analytics",
+@@ -3039,7 +3039,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-features"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-otel",
+  "codex-protocol",
+@@ -3052,7 +3052,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-feedback"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-login",
+@@ -3066,7 +3066,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-search"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3082,7 +3082,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-system"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "bytes",
+  "codex-protocol",
+@@ -3094,7 +3094,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-file-watcher"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "notify",
+  "pretty_assertions",
+@@ -3105,7 +3105,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-git-utils"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3130,7 +3130,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-goal-extension"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3152,7 +3152,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-guardian"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-core",
+  "codex-extension-api",
+@@ -3161,7 +3161,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-home"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-extension-api",
+  "codex-utils-absolute-path",
+@@ -3172,7 +3172,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-hooks"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3195,7 +3195,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-http-client"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "bytes",
+  "codex-utils-cargo-bin",
+@@ -3226,7 +3226,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-image-generation-extension"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3253,7 +3253,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-install-context"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "codex-utils-home-dir",
+@@ -3263,7 +3263,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-keyring-store"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "keyring",
+  "tracing",
+@@ -3271,7 +3271,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-linux-sandbox"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "clap",
+  "codex-core",
+@@ -3296,7 +3296,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-lmstudio"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-core",
+  "codex-model-provider-info",
+@@ -3310,7 +3310,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-login"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3353,7 +3353,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3389,7 +3389,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp-extension"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-config",
+  "codex-connectors",
+@@ -3415,7 +3415,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-mcp-server"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-arg0",
+@@ -3449,7 +3449,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-extension"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-core",
+  "codex-extension-api",
+@@ -3470,7 +3470,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-read"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -3480,7 +3480,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-memories-write"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3517,7 +3517,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-message-history"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-config",
+  "memchr",
+@@ -3531,7 +3531,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-agent-identity",
+  "codex-api",
+@@ -3554,7 +3554,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-model-provider-info"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-api",
+  "codex-protocol",
+@@ -3570,7 +3570,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-models-manager"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "chrono",
+  "codex-collaboration-mode-templates",
+@@ -3590,7 +3590,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-network-proxy"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3626,7 +3626,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-ollama"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "assert_matches",
+  "async-stream",
+@@ -3646,7 +3646,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-otel"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "chrono",
+  "codex-api",
+@@ -3677,7 +3677,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-plugin"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-config",
+  "codex-protocol",
+@@ -3690,7 +3690,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-process-hardening"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -3698,7 +3698,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-prompts"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-context-fragments",
+@@ -3712,7 +3712,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-protocol"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "chardetng",
+@@ -3754,7 +3754,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-response-debug-context"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3765,7 +3765,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-responses-api-proxy"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3782,7 +3782,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rmcp-client"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -3823,7 +3823,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3848,7 +3848,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-rollout-trace"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-code-mode",
+@@ -3864,7 +3864,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-sandboxing"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-network-proxy",
+@@ -3888,7 +3888,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-secrets"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "age",
+  "anyhow",
+@@ -3909,7 +3909,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-shell-command"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3930,7 +3930,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-shell-escalation"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3950,7 +3950,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-absolute-path",
+@@ -3961,7 +3961,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-skills-extension"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-core-skills",
+  "codex-exec-server",
+@@ -3985,7 +3985,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-state"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4011,7 +4011,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-stdio-to-uds"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-uds",
+@@ -4023,7 +4023,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-terminal-detection"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "pretty_assertions",
+  "tracing",
+@@ -4031,7 +4031,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-test-binary-support"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-arg0",
+  "tempfile",
+@@ -4039,7 +4039,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-manager-sample"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4050,7 +4050,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-thread-store"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "chrono",
+  "codex-app-server-protocol",
+@@ -4076,7 +4076,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tools"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-code-mode",
+  "codex-connectors",
+@@ -4101,7 +4101,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-tui"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -4212,7 +4212,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-uds"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "async-io",
+  "pretty_assertions",
+@@ -4224,7 +4224,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-absolute-path"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "dirs",
+  "dunce",
+@@ -4238,14 +4238,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-approval-presets"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-protocol",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-cache"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "lru 0.16.3",
+  "sha1 0.10.6",
+@@ -4254,7 +4254,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cargo-bin"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "assert_cmd",
+  "runfiles",
+@@ -4263,7 +4263,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-cli"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "clap",
+  "codex-protocol",
+@@ -4275,15 +4275,15 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-elapsed"
+-version = "0.0.0"
++version = "0.145.0"
+ 
+ [[package]]
+ name = "codex-utils-fuzzy-match"
+-version = "0.0.0"
++version = "0.145.0"
+ 
+ [[package]]
+ name = "codex-utils-home-dir"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dirs",
+@@ -4293,7 +4293,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-image"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-cache",
+@@ -4306,7 +4306,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-json-to-toml"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "pretty_assertions",
+  "serde_json",
+@@ -4315,7 +4315,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-oss"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-core",
+  "codex-lmstudio",
+@@ -4325,7 +4325,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-output-truncation"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -4334,7 +4334,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dunce",
+@@ -4344,7 +4344,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-path-uri"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-absolute-path",
+@@ -4360,7 +4360,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-plugins"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-exec-server",
+  "codex-exec-server-protocol",
+@@ -4374,7 +4374,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-pty"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "filedescriptor",
+@@ -4390,7 +4390,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-readiness"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "assert_matches",
+  "thiserror 2.0.18",
+@@ -4400,14 +4400,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-rustls-provider"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "rustls",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-sandbox-summary"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-absolute-path",
+@@ -4416,7 +4416,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-sleep-inhibitor"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "core-foundation 0.9.4",
+  "libc",
+@@ -4426,14 +4426,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-stream-parser"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-utils-string"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "pretty_assertions",
+  "regex-lite",
+@@ -4443,14 +4443,14 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-utils-template"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "pretty_assertions",
+ ]
+ 
+ [[package]]
+ name = "codex-v8-poc"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "pretty_assertions",
+  "v8",
+@@ -4458,7 +4458,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-web-search-extension"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-api",
+  "codex-core",
+@@ -4479,7 +4479,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-websocket-client"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "codex-http-client",
+  "codex-utils-rustls-provider",
+@@ -4495,7 +4495,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "codex-windows-sandbox"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4746,7 +4746,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "core_test_support"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -8908,7 +8908,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "mcp_test_support"
+-version = "0.0.0"
++version = "0.145.0"
+ dependencies = [
+  "anyhow",
+  "codex-login",
+diff --git a/codex-rs/Cargo.toml b/codex-rs/Cargo.toml
+index 17edbbf..6641a06 100644
+--- a/codex-rs/Cargo.toml
++++ b/codex-rs/Cargo.toml
+@@ -522,9 +522,12 @@ ignored = [
+ ]
+ 
+ [profile.dev]
+-# Keep line tables/backtraces while avoiding expensive full variable debug info
+-# across local dev builds.
+-debug = "limited"
++# Optimize for the shortest local edit/build cycle.
++debug = "none"
++
++[profile.test]
++# Tests dominate local iteration in this worktree, so omit debug info entirely.
++debug = "none"
+ 
+ [profile.dev-small]
+ inherits = "dev"
+@@ -533,15 +536,14 @@ debug = "none"
+ strip = "symbols"
+ 
+ [profile.release]
+-lto = "thin"
+-debug = "line-tables-only"
++lto = false
++debug = "none"
+ split-debuginfo = "off"
+-# Keep release binaries symbolicateable until packaging has archived the
+-# sidecar symbols and stripped the binaries.
+-strip = false
++incremental = true
++strip = "symbols"
+ 
+-# Balance parallel release code generation against binary size.
+-codegen-units = 4
++# Favor compile-time parallelism over maximum runtime optimization.
++codegen-units = 16
+ 
+ [profile.profiling]
+ inherits = "release"
+diff --git a/codex-rs/app-server-protocol/schema/json/ServerNotification.json b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
+index 3fbb2df..0b74a7c 100644
+--- a/codex-rs/app-server-protocol/schema/json/ServerNotification.json
++++ b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
+@@ -3138,6 +3138,62 @@
+       ],
+       "type": "object"
+     },
++    "RawResponseStartedNotification": {
++      "description": "Internal-only notification emitted immediately before a model sampling request. The duration contains completed active API time from earlier requests in the same turn.",
++      "properties": {
++        "activeApiDurationMs": {
++          "format": "int64",
++          "type": "integer"
++        },
++        "threadId": {
++          "type": "string"
++        },
++        "turnId": {
++          "type": "string"
++        }
++      },
++      "required": [
++        "activeApiDurationMs",
++        "threadId",
++        "turnId"
++      ],
++      "type": "object"
++    },
++    "RawResponseStoppedNotification": {
++      "description": "Internal-only notification emitted after a model sampling request stops.",
++      "properties": {
++        "activeApiDurationMs": {
++          "format": "int64",
++          "type": "integer"
++        },
++        "generationDurationMs": {
++          "description": "Time from the first output-bearing event to the last for this response.",
++          "format": "int64",
++          "type": [
++            "integer",
++            "null"
++          ]
++        },
++        "streamedOutputChars": {
++          "default": 0,
++          "description": "Output characters observed at the raw response layer.",
++          "format": "int64",
++          "type": "integer"
++        },
++        "threadId": {
++          "type": "string"
++        },
++        "turnId": {
++          "type": "string"
++        }
++      },
++      "required": [
++        "activeApiDurationMs",
++        "threadId",
++        "turnId"
++      ],
++      "type": "object"
++    },
+     "RealtimeConversationVersion": {
+       "enum": [
+         "v1",
+@@ -6348,6 +6404,48 @@
+       "title": "Item/completedNotification",
+       "type": "object"
+     },
++    {
++      "description": "This event is internal-only. Used by clients that need active model sampling time.",
++      "properties": {
++        "method": {
++          "enum": [
++            "rawResponse/started"
++          ],
++          "title": "RawResponse/startedNotificationMethod",
++          "type": "string"
++        },
++        "params": {
++          "$ref": "#/definitions/RawResponseStartedNotification"
++        }
++      },
++      "required": [
++        "method",
++        "params"
++      ],
++      "title": "RawResponse/startedNotification",
++      "type": "object"
++    },
++    {
++      "description": "This event is internal-only. Used by clients that need active model sampling time.",
++      "properties": {
++        "method": {
++          "enum": [
++            "rawResponse/stopped"
++          ],
++          "title": "RawResponse/stoppedNotificationMethod",
++          "type": "string"
++        },
++        "params": {
++          "$ref": "#/definitions/RawResponseStoppedNotification"
++        }
++      },
++      "required": [
++        "method",
++        "params"
++      ],
++      "title": "RawResponse/stoppedNotification",
++      "type": "object"
++    },
+     {
+       "properties": {
+         "method": {
+diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
+index 78348e6..8459f9e 100644
+--- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
++++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
+@@ -4671,6 +4671,48 @@
+           "title": "Item/completedNotification",
+           "type": "object"
+         },
++        {
++          "description": "This event is internal-only. Used by clients that need active model sampling time.",
++          "properties": {
++            "method": {
++              "enum": [
++                "rawResponse/started"
++              ],
++              "title": "RawResponse/startedNotificationMethod",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/definitions/v2/RawResponseStartedNotification"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "title": "RawResponse/startedNotification",
++          "type": "object"
++        },
++        {
++          "description": "This event is internal-only. Used by clients that need active model sampling time.",
++          "properties": {
++            "method": {
++              "enum": [
++                "rawResponse/stopped"
++              ],
++              "title": "RawResponse/stoppedNotificationMethod",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/definitions/v2/RawResponseStoppedNotification"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "title": "RawResponse/stoppedNotification",
++          "type": "object"
++        },
+         {
+           "properties": {
+             "method": {
+@@ -15375,6 +15417,66 @@
+         "title": "RawResponseItemCompletedNotification",
+         "type": "object"
+       },
++      "RawResponseStartedNotification": {
++        "$schema": "http://json-schema.org/draft-07/schema#",
++        "description": "Internal-only notification emitted immediately before a model sampling request. The duration contains completed active API time from earlier requests in the same turn.",
++        "properties": {
++          "activeApiDurationMs": {
++            "format": "int64",
++            "type": "integer"
++          },
++          "threadId": {
++            "type": "string"
++          },
++          "turnId": {
++            "type": "string"
++          }
++        },
++        "required": [
++          "activeApiDurationMs",
++          "threadId",
++          "turnId"
++        ],
++        "title": "RawResponseStartedNotification",
++        "type": "object"
++      },
++      "RawResponseStoppedNotification": {
++        "$schema": "http://json-schema.org/draft-07/schema#",
++        "description": "Internal-only notification emitted after a model sampling request stops.",
++        "properties": {
++          "activeApiDurationMs": {
++            "format": "int64",
++            "type": "integer"
++          },
++          "generationDurationMs": {
++            "description": "Time from the first output-bearing event to the last for this response.",
++            "format": "int64",
++            "type": [
++              "integer",
++              "null"
++            ]
++          },
++          "streamedOutputChars": {
++            "default": 0,
++            "description": "Output characters observed at the raw response layer.",
++            "format": "int64",
++            "type": "integer"
++          },
++          "threadId": {
++            "type": "string"
++          },
++          "turnId": {
++            "type": "string"
++          }
++        },
++        "required": [
++          "activeApiDurationMs",
++          "threadId",
++          "turnId"
++        ],
++        "title": "RawResponseStoppedNotification",
++        "type": "object"
++      },
+       "RealtimeConversationVersion": {
+         "enum": [
+           "v1",
+diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
+index e0cfbc1..174d180 100644
+--- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
++++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
+@@ -11717,6 +11717,66 @@
+       "title": "RawResponseItemCompletedNotification",
+       "type": "object"
+     },
++    "RawResponseStartedNotification": {
++      "$schema": "http://json-schema.org/draft-07/schema#",
++      "description": "Internal-only notification emitted immediately before a model sampling request. The duration contains completed active API time from earlier requests in the same turn.",
++      "properties": {
++        "activeApiDurationMs": {
++          "format": "int64",
++          "type": "integer"
++        },
++        "threadId": {
++          "type": "string"
++        },
++        "turnId": {
++          "type": "string"
++        }
++      },
++      "required": [
++        "activeApiDurationMs",
++        "threadId",
++        "turnId"
++      ],
++      "title": "RawResponseStartedNotification",
++      "type": "object"
++    },
++    "RawResponseStoppedNotification": {
++      "$schema": "http://json-schema.org/draft-07/schema#",
++      "description": "Internal-only notification emitted after a model sampling request stops.",
++      "properties": {
++        "activeApiDurationMs": {
++          "format": "int64",
++          "type": "integer"
++        },
++        "generationDurationMs": {
++          "description": "Time from the first output-bearing event to the last for this response.",
++          "format": "int64",
++          "type": [
++            "integer",
++            "null"
++          ]
++        },
++        "streamedOutputChars": {
++          "default": 0,
++          "description": "Output characters observed at the raw response layer.",
++          "format": "int64",
++          "type": "integer"
++        },
++        "threadId": {
++          "type": "string"
++        },
++        "turnId": {
++          "type": "string"
++        }
++      },
++      "required": [
++        "activeApiDurationMs",
++        "threadId",
++        "turnId"
++      ],
++      "title": "RawResponseStoppedNotification",
++      "type": "object"
++    },
+     "RealtimeConversationVersion": {
+       "enum": [
+         "v1",
+@@ -13978,6 +14038,48 @@
+           "title": "Item/completedNotification",
+           "type": "object"
+         },
++        {
++          "description": "This event is internal-only. Used by clients that need active model sampling time.",
++          "properties": {
++            "method": {
++              "enum": [
++                "rawResponse/started"
++              ],
++              "title": "RawResponse/startedNotificationMethod",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/definitions/RawResponseStartedNotification"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "title": "RawResponse/startedNotification",
++          "type": "object"
++        },
++        {
++          "description": "This event is internal-only. Used by clients that need active model sampling time.",
++          "properties": {
++            "method": {
++              "enum": [
++                "rawResponse/stopped"
++              ],
++              "title": "RawResponse/stoppedNotificationMethod",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/definitions/RawResponseStoppedNotification"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "title": "RawResponse/stoppedNotification",
++          "type": "object"
++        },
+         {
+           "properties": {
+             "method": {
+diff --git a/codex-rs/app-server-protocol/schema/json/v2/RawResponseStartedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/RawResponseStartedNotification.json
+new file mode 100644
+index 0000000..cde5fe0
+--- /dev/null
++++ b/codex-rs/app-server-protocol/schema/json/v2/RawResponseStartedNotification.json
+@@ -0,0 +1,23 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "description": "Internal-only notification emitted immediately before a model sampling request. The duration contains completed active API time from earlier requests in the same turn.",
++  "properties": {
++    "activeApiDurationMs": {
++      "format": "int64",
++      "type": "integer"
++    },
++    "threadId": {
++      "type": "string"
++    },
++    "turnId": {
++      "type": "string"
++    }
++  },
++  "required": [
++    "activeApiDurationMs",
++    "threadId",
++    "turnId"
++  ],
++  "title": "RawResponseStartedNotification",
++  "type": "object"
++}
+\ No newline at end of file
+diff --git a/codex-rs/app-server-protocol/schema/json/v2/RawResponseStoppedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/RawResponseStoppedNotification.json
+new file mode 100644
+index 0000000..3af4516
+--- /dev/null
++++ b/codex-rs/app-server-protocol/schema/json/v2/RawResponseStoppedNotification.json
+@@ -0,0 +1,37 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "description": "Internal-only notification emitted after a model sampling request stops.",
++  "properties": {
++    "activeApiDurationMs": {
++      "format": "int64",
++      "type": "integer"
++    },
++    "generationDurationMs": {
++      "description": "Time from the first output-bearing event to the last for this response.",
++      "format": "int64",
++      "type": [
++        "integer",
++        "null"
++      ]
++    },
++    "streamedOutputChars": {
++      "default": 0,
++      "description": "Output characters observed at the raw response layer.",
++      "format": "int64",
++      "type": "integer"
++    },
++    "threadId": {
++      "type": "string"
++    },
++    "turnId": {
++      "type": "string"
++    }
++  },
++  "required": [
++    "activeApiDurationMs",
++    "threadId",
++    "turnId"
++  ],
++  "title": "RawResponseStoppedNotification",
++  "type": "object"
++}
+\ No newline at end of file
+diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
+index 271bfd4..35dccf6 100644
+--- a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
++++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
+@@ -38,6 +38,8 @@ import type { ProcessExitedNotification } from "./v2/ProcessExitedNotification";
+ import type { ProcessOutputDeltaNotification } from "./v2/ProcessOutputDeltaNotification";
+ import type { RawResponseCompletedNotification } from "./v2/RawResponseCompletedNotification";
+ import type { RawResponseItemCompletedNotification } from "./v2/RawResponseItemCompletedNotification";
++import type { RawResponseStartedNotification } from "./v2/RawResponseStartedNotification";
++import type { RawResponseStoppedNotification } from "./v2/RawResponseStoppedNotification";
+ import type { ReasoningSummaryPartAddedNotification } from "./v2/ReasoningSummaryPartAddedNotification";
+ import type { ReasoningSummaryTextDeltaNotification } from "./v2/ReasoningSummaryTextDeltaNotification";
+ import type { ReasoningTextDeltaNotification } from "./v2/ReasoningTextDeltaNotification";
+@@ -76,4 +78,4 @@ import type { WindowsWorldWritableWarningNotification } from "./v2/WindowsWorldW
+ /**
+  * Notification sent from the server to the client.
+  */
+-export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
++export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/started", "params": RawResponseStartedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "rawResponse/stopped", "params": RawResponseStoppedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
+diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
+index 46c4fb0..c16bc85 100644
+--- a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
++++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
+@@ -38,6 +38,8 @@ import type { ProcessExitedNotification } from "./v2/ProcessExitedNotification";
+ import type { ProcessOutputDeltaNotification } from "./v2/ProcessOutputDeltaNotification";
+ import type { RawResponseCompletedNotification } from "./v2/RawResponseCompletedNotification";
+ import type { RawResponseItemCompletedNotification } from "./v2/RawResponseItemCompletedNotification";
++import type { RawResponseStartedNotification } from "./v2/RawResponseStartedNotification";
++import type { RawResponseStoppedNotification } from "./v2/RawResponseStoppedNotification";
+ import type { ReasoningSummaryPartAddedNotification } from "./v2/ReasoningSummaryPartAddedNotification";
+ import type { ReasoningSummaryTextDeltaNotification } from "./v2/ReasoningSummaryTextDeltaNotification";
+ import type { ReasoningTextDeltaNotification } from "./v2/ReasoningTextDeltaNotification";
+@@ -86,4 +88,4 @@ export type ServerNotificationEnvelope = {
+  * Optional so clients can decode notifications from older app-server
+  * versions. Current app-server versions always populate it.
+  */
+-emittedAtMs?: number, } & ({ "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification });
++emittedAtMs?: number, } & ({ "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/started", "params": RawResponseStartedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "rawResponse/stopped", "params": RawResponseStoppedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification });
+diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStartedNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStartedNotification.ts
+new file mode 100644
+index 0000000..60cd9d4
+--- /dev/null
++++ b/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStartedNotification.ts
+@@ -0,0 +1,10 @@
++// GENERATED CODE! DO NOT MODIFY BY HAND!
++
++// This file was generated by [ts-rs](https://github.com/Aleph-Alpha/ts-rs). Do not edit this file manually.
++
++/**
++ * Internal-only notification emitted immediately before a model sampling
++ * request. The duration contains completed active API time from earlier
++ * requests in the same turn.
++ */
++export type RawResponseStartedNotification = { threadId: string, turnId: string, activeApiDurationMs: number, };
+diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStoppedNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStoppedNotification.ts
+new file mode 100644
+index 0000000..f34c5ee
+--- /dev/null
++++ b/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStoppedNotification.ts
+@@ -0,0 +1,16 @@
++// GENERATED CODE! DO NOT MODIFY BY HAND!
++
++// This file was generated by [ts-rs](https://github.com/Aleph-Alpha/ts-rs). Do not edit this file manually.
++
++/**
++ * Internal-only notification emitted after a model sampling request stops.
++ */
++export type RawResponseStoppedNotification = { threadId: string, turnId: string, activeApiDurationMs: number,
++/**
++ * Time from the first output-bearing event to the last for this response.
++ */
++generationDurationMs: number | null,
++/**
++ * Output characters observed at the raw response layer.
++ */
++streamedOutputChars: number, };
+diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
+index f818e31..7a2b3ba 100644
+--- a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
++++ b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
+@@ -355,6 +355,8 @@ export type { RateLimitSnapshot } from "./RateLimitSnapshot";
+ export type { RateLimitWindow } from "./RateLimitWindow";
+ export type { RawResponseCompletedNotification } from "./RawResponseCompletedNotification";
+ export type { RawResponseItemCompletedNotification } from "./RawResponseItemCompletedNotification";
++export type { RawResponseStartedNotification } from "./RawResponseStartedNotification";
++export type { RawResponseStoppedNotification } from "./RawResponseStoppedNotification";
+ export type { ReasoningEffortOption } from "./ReasoningEffortOption";
+ export type { ReasoningSummaryPartAddedNotification } from "./ReasoningSummaryPartAddedNotification";
+ export type { ReasoningSummaryTextDeltaNotification } from "./ReasoningSummaryTextDeltaNotification";
+diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
+index a4d87e2..1e6506e 100644
+--- a/codex-rs/app-server-protocol/src/protocol/common.rs
++++ b/codex-rs/app-server-protocol/src/protocol/common.rs
+@@ -1666,8 +1666,12 @@ server_notification_definitions! {
+     ItemCompleted => "item/completed" (v2::ItemCompletedNotification),
+     /// This event is internal-only. Used by Codex Cloud.
+     RawResponseItemCompleted => "rawResponseItem/completed" (v2::RawResponseItemCompletedNotification),
++    /// This event is internal-only. Used by clients that need active model sampling time.
++    RawResponseStarted => "rawResponse/started" (v2::RawResponseStartedNotification),
+     /// This event is internal-only. Used by clients that need exact upstream usage.
+     RawResponseCompleted => "rawResponse/completed" (v2::RawResponseCompletedNotification),
++    /// This event is internal-only. Used by clients that need active model sampling time.
++    RawResponseStopped => "rawResponse/stopped" (v2::RawResponseStoppedNotification),
+     AgentMessageDelta => "item/agentMessage/delta" (v2::AgentMessageDeltaNotification),
+     /// EXPERIMENTAL - proposed plan streaming deltas for plan items.
+     PlanDelta => "item/plan/delta" (v2::PlanDeltaNotification),
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
+index acebeb5..c4c883c 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
+@@ -395,6 +395,11 @@ pub struct ThreadResumeParams {
+     #[experimental("thread/resume.initialTurnsPage")]
+     #[ts(optional = nullable)]
+     pub initial_turns_page: Option<ThreadResumeInitialTurnsPageParams>,
++    /// If true, opt into emitting raw Responses API lifecycle events.
++    /// This is for internal use only.
++    #[experimental("thread/resume.experimentalRawEvents")]
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub experimental_raw_events: bool,
+ }
+ 
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+@@ -587,6 +592,11 @@ pub struct ThreadForkParams {
+     #[experimental("thread/fork.deferGoalContinuation")]
+     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+     pub defer_goal_continuation: bool,
++    /// If true, opt into emitting raw Responses API lifecycle events.
++    /// This is for internal use only.
++    #[experimental("thread/fork.experimentalRawEvents")]
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub experimental_raw_events: bool,
+ }
+ 
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
+@@ -1462,6 +1472,19 @@ pub struct ThreadTokenUsageUpdatedNotification {
+     pub token_usage: ThreadTokenUsage,
+ }
+ 
++/// Internal-only notification emitted immediately before a model sampling
++/// request. The duration contains completed active API time from earlier
++/// requests in the same turn.
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++pub struct RawResponseStartedNotification {
++    pub thread_id: String,
++    pub turn_id: String,
++    #[ts(type = "number")]
++    pub active_api_duration_ms: i64,
++}
++
+ /// Internal-only notification containing the exact usage from one upstream
+ /// Responses API completion.
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+@@ -1474,6 +1497,24 @@ pub struct RawResponseCompletedNotification {
+     pub usage: Option<TokenUsageBreakdown>,
+ }
+ 
++/// Internal-only notification emitted after a model sampling request stops.
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++pub struct RawResponseStoppedNotification {
++    pub thread_id: String,
++    pub turn_id: String,
++    #[ts(type = "number")]
++    pub active_api_duration_ms: i64,
++    /// Time from the first output-bearing event to the last for this response.
++    #[ts(type = "number | null")]
++    pub generation_duration_ms: Option<i64>,
++    /// Output characters observed at the raw response layer.
++    #[serde(default)]
++    #[ts(type = "number")]
++    pub streamed_output_chars: i64,
++}
++
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+ #[serde(rename_all = "camelCase")]
+ #[ts(export_to = "v2/")]
+diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
+index c51fd7f..99b1a7c 100644
+--- a/codex-rs/app-server/src/bespoke_event_handling.rs
++++ b/codex-rs/app-server/src/bespoke_event_handling.rs
+@@ -49,6 +49,8 @@ use codex_app_server_protocol::PermissionsRequestApprovalParams;
+ use codex_app_server_protocol::PermissionsRequestApprovalResponse;
+ use codex_app_server_protocol::RawResponseCompletedNotification;
+ use codex_app_server_protocol::RawResponseItemCompletedNotification;
++use codex_app_server_protocol::RawResponseStartedNotification;
++use codex_app_server_protocol::RawResponseStoppedNotification;
+ use codex_app_server_protocol::RequestId;
+ use codex_app_server_protocol::ServerNotification;
+ use codex_app_server_protocol::ServerRequestPayload;
+@@ -1051,6 +1053,16 @@ pub(crate) async fn apply_bespoke_event_handling(
+             )
+             .await;
+         }
++        EventMsg::RawResponseStarted(raw_response_started_event) => {
++            let notification = RawResponseStartedNotification {
++                thread_id: conversation_id.to_string(),
++                turn_id: event_turn_id,
++                active_api_duration_ms: raw_response_started_event.active_api_duration_ms,
++            };
++            outgoing
++                .send_server_notification(ServerNotification::RawResponseStarted(notification))
++                .await;
++        }
+         EventMsg::RawResponseCompleted(raw_response_completed_event) => {
+             let notification = RawResponseCompletedNotification {
+                 thread_id: conversation_id.to_string(),
+@@ -1062,6 +1074,18 @@ pub(crate) async fn apply_bespoke_event_handling(
+                 .send_server_notification(ServerNotification::RawResponseCompleted(notification))
+                 .await;
+         }
++        EventMsg::RawResponseStopped(raw_response_stopped_event) => {
++            let notification = RawResponseStoppedNotification {
++                thread_id: conversation_id.to_string(),
++                turn_id: event_turn_id,
++                active_api_duration_ms: raw_response_stopped_event.active_api_duration_ms,
++                generation_duration_ms: raw_response_stopped_event.generation_duration_ms,
++                streamed_output_chars: raw_response_stopped_event.streamed_output_chars,
++            };
++            outgoing
++                .send_server_notification(ServerNotification::RawResponseStopped(notification))
++                .await;
++        }
+         EventMsg::PatchApplyBegin(_) | EventMsg::PatchApplyEnd(_) => {
+             // Core still fans out these deprecated events for raw-event and rollout compatibility
+             // consumers;
+diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
+index d83cf7e..7043bb1 100644
+--- a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
++++ b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
+@@ -318,7 +318,10 @@ pub(super) async fn ensure_listener_task_running(
+                     };
+                     if matches!(
+                         &event.msg,
+-                        EventMsg::RawResponseItem(_) | EventMsg::RawResponseCompleted(_)
++                        EventMsg::RawResponseItem(_)
++                            | EventMsg::RawResponseStarted(_)
++                            | EventMsg::RawResponseCompleted(_)
++                            | EventMsg::RawResponseStopped(_)
+                     ) && !raw_events_enabled
+                     {
+                         continue;
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 7f1a30a..f197c4c 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -3092,6 +3092,7 @@ impl ThreadRequestProcessor {
+             personality,
+             exclude_turns,
+             initial_turns_page,
++            experimental_raw_events,
+         } = params;
+         let include_turns = !exclude_turns;
+ 
+@@ -3246,7 +3247,7 @@ impl ThreadRequestProcessor {
+                     self.ensure_conversation_listener(
+                         thread_id,
+                         request_id.connection_id,
+-                        /*raw_events_enabled*/ false,
++                        experimental_raw_events,
+                     )
+                     .await,
+                     thread_id,
+@@ -3987,6 +3988,7 @@ impl ThreadRequestProcessor {
+             thread_source,
+             exclude_turns,
+             defer_goal_continuation,
++            experimental_raw_events,
+         } = params;
+         let include_turns = !exclude_turns;
+         if sandbox.is_some() && permissions.is_some() {
+@@ -4177,7 +4179,7 @@ impl ThreadRequestProcessor {
+             self.ensure_conversation_listener(
+                 thread_id,
+                 request_id.connection_id,
+-                /*raw_events_enabled*/ false,
++                experimental_raw_events,
+             )
+             .await,
+             thread_id,
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+index 38a94ab..27db5cd 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+@@ -753,6 +753,7 @@ mod thread_processor_behavior_tests {
+             personality: None,
+             exclude_turns: false,
+             initial_turns_page: None,
++            experimental_raw_events: false,
+         };
+         let config_snapshot = ThreadConfigSnapshot {
+             model: "gpt-5".to_string(),
+diff --git a/codex-rs/app-server/tests/suite/v2/turn_start.rs b/codex-rs/app-server/tests/suite/v2/turn_start.rs
+index e508ae6..79fabbc 100644
+--- a/codex-rs/app-server/tests/suite/v2/turn_start.rs
++++ b/codex-rs/app-server/tests/suite/v2/turn_start.rs
+@@ -37,6 +37,7 @@ use codex_app_server_protocol::JSONRPCResponse;
+ use codex_app_server_protocol::PatchApplyStatus;
+ use codex_app_server_protocol::PatchChangeKind;
+ use codex_app_server_protocol::RawResponseCompletedNotification;
++use codex_app_server_protocol::RawResponseStartedNotification;
+ use codex_app_server_protocol::RequestId;
+ use codex_app_server_protocol::ServerRequest;
+ use codex_app_server_protocol::ServerRequestResolvedNotification;
+@@ -768,7 +769,7 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
+ }
+ 
+ #[tokio::test]
+-async fn turn_start_emits_raw_response_completed_with_upstream_usage() -> Result<()> {
++async fn turn_start_emits_raw_response_lifecycle_with_upstream_usage() -> Result<()> {
+     let server = responses::start_mock_server().await;
+     let body = responses::sse(vec![
+         responses::ev_response_created("resp-1"),
+@@ -834,6 +835,24 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage() -> Result
+     .await??;
+     let TurnStartResponse { turn } = to_response::<TurnStartResponse>(turn_resp)?;
+ 
++    let started = timeout(
++        DEFAULT_READ_TIMEOUT,
++        mcp.read_stream_until_notification_message("rawResponse/started"),
++    )
++    .await??;
++    let started: codex_app_server_protocol::ServerNotification = started.try_into()?;
++    let codex_app_server_protocol::ServerNotification::RawResponseStarted(started) = started else {
++        anyhow::bail!("expected rawResponse/started notification");
++    };
++    assert_eq!(
++        started,
++        RawResponseStartedNotification {
++            thread_id: thread.id.clone(),
++            turn_id: turn.id.clone(),
++            active_api_duration_ms: 0,
++        }
++    );
++
+     let notification = timeout(
+         DEFAULT_READ_TIMEOUT,
+         mcp.read_stream_until_notification_message("rawResponse/completed"),
+@@ -849,8 +868,8 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage() -> Result
+     assert_eq!(
+         notification,
+         RawResponseCompletedNotification {
+-            thread_id: thread.id,
+-            turn_id: turn.id,
++            thread_id: thread.id.clone(),
++            turn_id: turn.id.clone(),
+             response_id: "resp-1".to_string(),
+             usage: Some(TokenUsageBreakdown {
+                 total_tokens: 37,
+@@ -863,6 +882,19 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage() -> Result
+         }
+     );
+ 
++    let stopped = timeout(
++        DEFAULT_READ_TIMEOUT,
++        mcp.read_stream_until_notification_message("rawResponse/stopped"),
++    )
++    .await??;
++    let stopped: codex_app_server_protocol::ServerNotification = stopped.try_into()?;
++    let codex_app_server_protocol::ServerNotification::RawResponseStopped(stopped) = stopped else {
++        anyhow::bail!("expected rawResponse/stopped notification");
++    };
++    assert_eq!(stopped.thread_id, thread.id);
++    assert_eq!(stopped.turn_id, turn.id);
++    assert!(stopped.active_api_duration_ms >= started.active_api_duration_ms);
++
+     Ok(())
+ }
+ 
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 3275131..9aa43dd 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -3,6 +3,7 @@ use std::collections::HashSet;
+ use std::path::PathBuf;
+ use std::sync::Arc;
+ use std::sync::atomic::Ordering;
++use std::time::Instant;
+ 
+ use crate::SkillInjections;
+ use crate::build_skill_injections;
+@@ -101,6 +102,8 @@ use codex_protocol::protocol::ErrorEvent;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::PlanDeltaEvent;
+ use codex_protocol::protocol::RawResponseCompletedEvent;
++use codex_protocol::protocol::RawResponseStartedEvent;
++use codex_protocol::protocol::RawResponseStoppedEvent;
+ use codex_protocol::protocol::ReasoningContentDeltaEvent;
+ use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
+ use codex_protocol::protocol::SafetyBufferingEvent;
+@@ -1158,6 +1161,14 @@ async fn run_sampling_request(
+             turn_context.as_ref(),
+             base_instructions.clone(),
+         );
++        let active_api_duration_ms = turn_context.turn_timing_state.sampling_duration_ms();
++        sess.send_event(
++            &turn_context,
++            EventMsg::RawResponseStarted(RawResponseStartedEvent {
++                active_api_duration_ms,
++            }),
++        )
++        .await;
+         let err = match try_run_sampling_request(
+             tool_runtime.clone(),
+             Arc::clone(&sess),
+@@ -1591,7 +1602,9 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
+         | EventMsg::EnteredReviewMode(_)
+         | EventMsg::ExitedReviewMode(_)
+         | EventMsg::RawResponseItem(_)
++        | EventMsg::RawResponseStarted(_)
+         | EventMsg::RawResponseCompleted(_)
++        | EventMsg::RawResponseStopped(_)
+         | EventMsg::ItemStarted(_)
+         | EventMsg::HookStarted(_)
+         | EventMsg::HookCompleted(_)
+@@ -1930,6 +1943,57 @@ fn assign_missing_streamed_response_item_id(
+     Session::assign_missing_response_item_id(item);
+ }
+ 
++#[derive(Debug, Default)]
++struct ResponseGenerationMetrics {
++    first_output_at: Option<Instant>,
++    last_output_at: Option<Instant>,
++    streamed_output_chars: u64,
++}
++
++impl ResponseGenerationMetrics {
++    fn observe(&mut self, event: &ResponseEvent, uses_sequential_reasoning_summaries: bool) {
++        let output_chars = match event {
++            ResponseEvent::OutputTextDelta(delta)
++            | ResponseEvent::ToolCallInputDelta { delta, .. }
++            | ResponseEvent::ReasoningContentDelta { delta, .. } => delta.chars().count(),
++            ResponseEvent::ReasoningSummaryDelta { delta, .. }
++                if !uses_sequential_reasoning_summaries =>
++            {
++                delta.chars().count()
++            }
++            ResponseEvent::ReasoningSummaryDone { text, .. }
++                if uses_sequential_reasoning_summaries =>
++            {
++                text.chars().count()
++            }
++            _ => 0,
++        };
++        if output_chars == 0 {
++            return;
++        }
++        let now = Instant::now();
++        self.first_output_at.get_or_insert(now);
++        self.last_output_at = Some(now);
++        self.streamed_output_chars = self
++            .streamed_output_chars
++            .saturating_add(output_chars as u64);
++    }
++
++    fn generation_duration_ms(&self) -> Option<i64> {
++        let duration = self
++            .last_output_at?
++            .saturating_duration_since(self.first_output_at?);
++        if duration.is_zero() {
++            return None;
++        }
++        Some(i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
++    }
++
++    fn streamed_output_chars(&self) -> i64 {
++        i64::try_from(self.streamed_output_chars).unwrap_or(i64::MAX)
++    }
++}
++
+ #[allow(clippy::too_many_arguments)]
+ #[instrument(level = "trace",
+     skip_all,
+@@ -1968,7 +2032,8 @@ async fn try_run_sampling_request(
+         .features
+         .enabled(Feature::ConcurrentReasoningSummaries)
+         && turn_context.provider.info().is_openai();
+-    let mut stream = client_session
++    let mut generation_metrics = ResponseGenerationMetrics::default();
++    let stream_result = match client_session
+         .stream(
+             prompt,
+             &turn_context.model_info,
+@@ -1981,7 +2046,19 @@ async fn try_run_sampling_request(
+         )
+         .instrument(trace_span!("stream_request"))
+         .or_cancel(&cancellation_token)
+-        .await??;
++        .await
++    {
++        Ok(result) => result,
++        Err(codex_async_utils::CancelErr::Cancelled) => Err(CodexErr::TurnAborted),
++    };
++    let mut stream = match stream_result {
++        Ok(stream) => stream,
++        Err(err) => {
++            drop(sampling_timing_guard);
++            emit_raw_response_stopped(&sess, &turn_context, &generation_metrics).await;
++            return Err(err);
++        }
++    };
+     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
+         FuturesOrdered::new();
+     let mut needs_follow_up = false;
+@@ -2038,6 +2115,8 @@ async fn try_run_sampling_request(
+             }
+         };
+ 
++        generation_metrics.observe(&event, uses_sequential_cutoff_reasoning_summaries);
++
+         sess.services
+             .session_telemetry
+             .record_responses(&handle_responses, &event);
+@@ -2463,6 +2542,7 @@ async fn try_run_sampling_request(
+         }
+     };
+     drop(sampling_timing_guard);
++    emit_raw_response_stopped(&sess, &turn_context, &generation_metrics).await;
+ 
+     flush_assistant_text_segments_all(
+         &sess,
+@@ -2506,6 +2586,23 @@ async fn try_run_sampling_request(
+     outcome
+ }
+ 
++async fn emit_raw_response_stopped(
++    sess: &Session,
++    turn_context: &TurnContext,
++    generation_metrics: &ResponseGenerationMetrics,
++) {
++    let active_api_duration_ms = turn_context.turn_timing_state.sampling_duration_ms();
++    sess.send_event(
++        turn_context,
++        EventMsg::RawResponseStopped(RawResponseStoppedEvent {
++            active_api_duration_ms,
++            generation_duration_ms: generation_metrics.generation_duration_ms(),
++            streamed_output_chars: generation_metrics.streamed_output_chars(),
++        }),
++    )
++    .await;
++}
++
+ pub(crate) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {
+     for item in responses.iter().rev() {
+         if let Some(message) = last_assistant_message_from_item(item, /*plan_mode*/ false) {
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index 7ef829f..3b065d5 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -38,6 +38,59 @@ fn assistant_output_text(text: &str) -> ResponseItem {
+     }
+ }
+ 
++#[test]
++fn generation_metrics_count_text_reasoning_and_tool_arguments() {
++    let mut metrics = ResponseGenerationMetrics::default();
++    metrics.observe(&ResponseEvent::OutputTextDelta("ab".to_string()), false);
++    metrics.observe(
++        &ResponseEvent::ToolCallInputDelta {
++            item_id: "item".to_string(),
++            call_id: Some("call".to_string()),
++            delta: "é".to_string(),
++        },
++        false,
++    );
++    metrics.observe(
++        &ResponseEvent::ReasoningSummaryDelta {
++            delta: "xyz".to_string(),
++            summary_index: 0,
++        },
++        false,
++    );
++    metrics.observe(
++        &ResponseEvent::ReasoningSummaryDone {
++            item_id: "reasoning".to_string(),
++            text: "not counted twice".to_string(),
++            summary_index: 0,
++        },
++        false,
++    );
++
++    assert_eq!(metrics.streamed_output_chars(), 6);
++}
++
++#[test]
++fn sequential_reasoning_metrics_count_done_instead_of_deltas() {
++    let mut metrics = ResponseGenerationMetrics::default();
++    metrics.observe(
++        &ResponseEvent::ReasoningSummaryDelta {
++            delta: "not counted".to_string(),
++            summary_index: 0,
++        },
++        true,
++    );
++    metrics.observe(
++        &ResponseEvent::ReasoningSummaryDone {
++            item_id: "reasoning".to_string(),
++            text: "counted".to_string(),
++            summary_index: 0,
++        },
++        true,
++    );
++
++    assert_eq!(metrics.streamed_output_chars(), 7);
++}
++
+ #[tokio::test]
+ async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
+     let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index d0f4f46..6e19b1a 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -131,6 +131,11 @@ impl TurnTimingState {
+         self.profile_state().record_sampling_retry();
+     }
+ 
++    pub(crate) fn sampling_duration_ms(&self) -> i64 {
++        let duration = self.profile_state().sampling_duration(Instant::now());
++        i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
++    }
++
+     pub(crate) fn begin_tool_blocking(self: &Arc<Self>) -> TurnProfileTimingGuard {
+         let active = self.profile_state().begin_tool_blocking(Instant::now());
+         TurnProfileTimingGuard {
+@@ -223,6 +228,17 @@ impl TurnProfileState {
+         }
+     }
+ 
++    fn sampling_duration(&self, now: Instant) -> Duration {
++        let active_sampling = if self.active_phase == Some(TurnProfilePhase::Sampling) {
++            self.last_transition_at
++                .map(|started_at| now.saturating_duration_since(started_at))
++                .unwrap_or_default()
++        } else {
++            Duration::ZERO
++        };
++        self.sampling.saturating_add(active_sampling)
++    }
++
+     fn begin_tool_blocking(&mut self, now: Instant) -> bool {
+         if self.completed_profile.is_some()
+             || self.started_at.is_none()
+diff --git a/codex-rs/core/src/turn_timing_tests.rs b/codex-rs/core/src/turn_timing_tests.rs
+index fcb34b4..0856a2a 100644
+--- a/codex-rs/core/src/turn_timing_tests.rs
++++ b/codex-rs/core/src/turn_timing_tests.rs
+@@ -194,3 +194,31 @@ fn turn_profile_breaks_down_sampling_blocking_and_retry_overhead() {
+         }
+     );
+ }
++
++#[test]
++fn turn_profile_sampling_duration_excludes_tools_and_between_request_time() {
++    let started_at = Instant::now();
++    let mut state = TurnProfileState::default();
++    state.start(started_at);
++
++    let _ = state.begin_sampling(started_at + Duration::from_millis(100));
++    assert_eq!(
++        state.sampling_duration(started_at + Duration::from_millis(600)),
++        Duration::from_millis(500)
++    );
++    state.end_phase(
++        started_at + Duration::from_millis(600),
++        TurnProfilePhase::Sampling,
++    );
++    let _ = state.begin_tool_blocking(started_at + Duration::from_millis(600));
++    state.end_phase(
++        started_at + Duration::from_millis(1_600),
++        TurnProfilePhase::ToolBlocking,
++    );
++    let _ = state.begin_sampling(started_at + Duration::from_millis(2_000));
++
++    assert_eq!(
++        state.sampling_duration(started_at + Duration::from_millis(2_250)),
++        Duration::from_millis(750)
++    );
++}
+diff --git a/codex-rs/mcp-server/src/codex_tool_runner.rs b/codex-rs/mcp-server/src/codex_tool_runner.rs
+index 64acffd..4af4cd1 100644
+--- a/codex-rs/mcp-server/src/codex_tool_runner.rs
++++ b/codex-rs/mcp-server/src/codex_tool_runner.rs
+@@ -360,7 +360,9 @@ async fn run_codex_tool_session_inner(
+                     | EventMsg::ImageGenerationEnd(_)
+                     | EventMsg::ViewImageToolCall(_)
+                     | EventMsg::RawResponseItem(_)
++                    | EventMsg::RawResponseStarted(_)
+                     | EventMsg::RawResponseCompleted(_)
++                    | EventMsg::RawResponseStopped(_)
+                     | EventMsg::EnteredReviewMode(_)
+                     | EventMsg::ItemStarted(_)
+                     | EventMsg::ItemCompleted(_)
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 0c16bf6..06d57b8 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1454,7 +1454,9 @@ pub enum EventMsg {
+     ExitedReviewMode(ExitedReviewModeEvent),
+ 
+     RawResponseItem(RawResponseItemEvent),
++    RawResponseStarted(RawResponseStartedEvent),
+     RawResponseCompleted(RawResponseCompletedEvent),
++    RawResponseStopped(RawResponseStoppedEvent),
+ 
+     ItemStarted(ItemStartedEvent),
+     ItemCompleted(ItemCompletedEvent),
+@@ -1823,6 +1825,15 @@ pub struct RawResponseItemEvent {
+     pub item: ResponseItem,
+ }
+ 
++/// A model sampling request became active.
++///
++/// `active_api_duration_ms` is the cumulative sampling time for the turn before
++/// this request. It excludes local tools and between-request orchestration.
++#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
++pub struct RawResponseStartedEvent {
++    pub active_api_duration_ms: i64,
++}
++
+ /// Exact usage reported by one upstream Responses API completion.
+ ///
+ /// Unlike TokenCountEvent, this is not accumulated, estimated, or replayed.
+@@ -1832,6 +1843,24 @@ pub struct RawResponseCompletedEvent {
+     pub token_usage: Option<TokenUsage>,
+ }
+ 
++/// A model sampling request stopped, whether it completed or failed.
++///
++/// `active_api_duration_ms` is the authoritative cumulative sampling time for
++/// the turn, including this request and excluding local tools.
++#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
++pub struct RawResponseStoppedEvent {
++    pub active_api_duration_ms: i64,
++    /// Time from the first output-bearing stream event to the last for this
++    /// response. Request latency and any post-output disconnect stall are not
++    /// included.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub generation_duration_ms: Option<i64>,
++    /// Unicode scalar values carried by output deltas for this response. This
++    /// is used only when native terminal usage is unavailable.
++    #[serde(default)]
++    pub streamed_output_chars: i64,
++}
++
+ #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+ pub struct ItemStartedEvent {
+     pub thread_id: ThreadId,
+diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
+index 2d6ed4e..0af9214 100644
+--- a/codex-rs/rollout-trace/src/protocol_event.rs
++++ b/codex-rs/rollout-trace/src/protocol_event.rs
+@@ -397,7 +397,9 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
+         | EventMsg::EnteredReviewMode(_)
+         | EventMsg::ExitedReviewMode(_)
+         | EventMsg::RawResponseItem(_)
++        | EventMsg::RawResponseStarted(_)
+         | EventMsg::RawResponseCompleted(_)
++        | EventMsg::RawResponseStopped(_)
+         | EventMsg::ItemStarted(_)
+         | EventMsg::ItemCompleted(_)
+         | EventMsg::HookStarted(_)
+@@ -473,7 +475,9 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
+         | EventMsg::EnteredReviewMode(_)
+         | EventMsg::ExitedReviewMode(_)
+         | EventMsg::RawResponseItem(_)
++        | EventMsg::RawResponseStarted(_)
+         | EventMsg::RawResponseCompleted(_)
++        | EventMsg::RawResponseStopped(_)
+         | EventMsg::ItemStarted(_)
+         | EventMsg::ItemCompleted(_)
+         | EventMsg::HookStarted(_)
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index 65a8213..de70627 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -142,7 +142,9 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode)
+         | EventMsg::TurnModerationMetadata(_)
+         | EventMsg::AgentReasoningSectionBreak(_)
+         | EventMsg::RawResponseItem(_)
++        | EventMsg::RawResponseStarted(_)
+         | EventMsg::RawResponseCompleted(_)
++        | EventMsg::RawResponseStopped(_)
+         | EventMsg::SessionConfigured(_)
+         | EventMsg::EnvironmentConnected(_)
+         | EventMsg::EnvironmentDisconnected(_)
+diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
+index 5935e46..74b9e66 100644
+--- a/codex-rs/tui/src/app/app_server_event_targets.rs
++++ b/codex-rs/tui/src/app/app_server_event_targets.rs
+@@ -87,9 +87,15 @@ pub(super) fn server_notification_thread_target(
+         ServerNotification::RawResponseItemCompleted(notification) => {
+             Some(notification.thread_id.as_str())
+         }
++        ServerNotification::RawResponseStarted(notification) => {
++            Some(notification.thread_id.as_str())
++        }
+         ServerNotification::RawResponseCompleted(notification) => {
+             Some(notification.thread_id.as_str())
+         }
++        ServerNotification::RawResponseStopped(notification) => {
++            Some(notification.thread_id.as_str())
++        }
+         ServerNotification::AgentMessageDelta(notification) => {
+             Some(notification.thread_id.as_str())
+         }
+diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
+index 825103c..becdbc4 100644
+--- a/codex-rs/tui/src/app_server_session.rs
++++ b/codex-rs/tui/src/app_server_session.rs
+@@ -6,6 +6,7 @@
+ mod fs;
+ 
+ use crate::bottom_pane::FeedbackAudience;
++use crate::chatwidget::live_reasoning::is_simplerouter_provider_id;
+ use crate::legacy_core::config::Config;
+ use crate::permission_compat::legacy_compatible_permission_profile;
+ use crate::service_tier_resolution;
+@@ -1532,6 +1533,7 @@ fn thread_start_params_from_config(
+         developer_instructions: with_terminal_visualization_instructions(
+             config, /*control_instructions*/ None,
+         ),
++        experimental_raw_events: simplerouter_raw_events_enabled(config, thread_params_mode),
+         ..ThreadStartParams::default()
+     }
+ }
+@@ -1584,6 +1586,7 @@ fn thread_resume_params_from_config(
+         developer_instructions: with_terminal_visualization_instructions(
+             &config, /*control_instructions*/ None,
+         ),
++        experimental_raw_events: simplerouter_raw_events_enabled(&config, thread_params_mode),
+         ..ThreadResumeParams::default()
+     }
+ }
+@@ -1623,10 +1626,16 @@ fn thread_fork_params_from_config(
+         ),
+         ephemeral: config.ephemeral,
+         thread_source: Some(ThreadSource::User),
++        experimental_raw_events: simplerouter_raw_events_enabled(&config, thread_params_mode),
+         ..ThreadForkParams::default()
+     }
+ }
+ 
++fn simplerouter_raw_events_enabled(config: &Config, thread_params_mode: ThreadParamsMode) -> bool {
++    thread_params_mode == ThreadParamsMode::Embedded
++        && is_simplerouter_provider_id(&config.model_provider_id)
++}
++
+ fn thread_cwd_from_config(
+     config: &Config,
+     thread_params_mode: ThreadParamsMode,
+@@ -2036,6 +2045,62 @@ mod tests {
+         assert_eq!(params.thread_source, Some(ThreadSource::User));
+     }
+ 
++    #[tokio::test]
++    async fn simplerouter_thread_lifecycle_opts_into_raw_events_only_when_embedded() {
++        let temp_dir = tempfile::tempdir().expect("tempdir");
++        let mut config = build_config(&temp_dir).await;
++        config.model_provider_id = "simplerouter_session".to_string();
++        let thread_id = ThreadId::new();
++
++        let embedded_start = thread_start_params_from_config(
++            &config,
++            ThreadParamsMode::Embedded,
++            /*remote_cwd_override*/ None,
++            /*session_start_source*/ None,
++        );
++        let embedded_resume = thread_resume_params_from_config(
++            config.clone(),
++            thread_id,
++            ThreadParamsMode::Embedded,
++            /*remote_cwd_override*/ None,
++            ResumeModelSettings::OverrideFromCurrentConfig,
++        );
++        let embedded_fork = thread_fork_params_from_config(
++            config.clone(),
++            thread_id,
++            ThreadParamsMode::Embedded,
++            /*remote_cwd_override*/ None,
++        );
++
++        assert!(embedded_start.experimental_raw_events);
++        assert!(embedded_resume.experimental_raw_events);
++        assert!(embedded_fork.experimental_raw_events);
++
++        let remote_start = thread_start_params_from_config(
++            &config,
++            ThreadParamsMode::Remote,
++            /*remote_cwd_override*/ None,
++            /*session_start_source*/ None,
++        );
++        let remote_resume = thread_resume_params_from_config(
++            config.clone(),
++            thread_id,
++            ThreadParamsMode::Remote,
++            /*remote_cwd_override*/ None,
++            ResumeModelSettings::OverrideFromCurrentConfig,
++        );
++        let remote_fork = thread_fork_params_from_config(
++            config,
++            thread_id,
++            ThreadParamsMode::Remote,
++            /*remote_cwd_override*/ None,
++        );
++
++        assert!(!remote_start.experimental_raw_events);
++        assert!(!remote_resume.experimental_raw_events);
++        assert!(!remote_fork.experimental_raw_events);
++    }
++
+     #[tokio::test]
+     async fn thread_start_params_can_mark_clear_source() {
+         let temp_dir = tempfile::tempdir().expect("tempdir");
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 859da68..5ce57d5 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -338,6 +338,8 @@ use self::exec_state::UnifiedExecWaitStreak;
+ use self::exec_state::command_execution_command_and_parsed;
+ use self::exec_state::is_standard_tool_call;
+ use self::exec_state::is_unified_exec_source;
++mod generation_rate;
++use self::generation_rate::GenerationRateTracker;
+ mod goal_status;
+ use self::goal_status::GoalStatusState;
+ #[cfg(test)]
+@@ -353,7 +355,7 @@ mod input_submission;
+ mod interrupts;
+ use self::interrupts::InterruptManager;
+ mod keymap_picker;
+-mod live_reasoning;
++pub(crate) mod live_reasoning;
+ mod mcp_startup;
+ use self::mcp_startup::McpStartupStatus;
+ mod pets;
+@@ -636,6 +638,8 @@ pub(crate) struct ChatWidget {
+     reasoning_summary_parts: Vec<String>,
+     // Controls SimpleRouter's live reasoning preview for the current TUI session.
+     live_reasoning_enabled: bool,
++    // Tracks SimpleRouter output throughput across active API sampling time.
++    generation_rate: GenerationRateTracker,
+     // Tracks whether the active transcript cell is an ephemeral reasoning preview.
+     live_reasoning_active: bool,
+     // Throttles redraws while reasoning deltas arrive quickly.
+diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
+index 90fdba4..c6e4049 100644
+--- a/codex-rs/tui/src/chatwidget/constructor.rs
++++ b/codex-rs/tui/src/chatwidget/constructor.rs
+@@ -37,6 +37,8 @@ impl ChatWidget {
+         config.model = model.clone();
+         let live_reasoning_enabled =
+             live_reasoning::is_simplerouter_provider_id(&config.model_provider_id);
++        let generation_rate_enabled =
++            generation_rate::enabled_for_provider(&config.model_provider_id);
+         let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
+         let mut rng = rand::rng();
+         let placeholder = PLACEHOLDERS[rng.random_range(0..PLACEHOLDERS.len())].to_string();
+@@ -184,6 +186,7 @@ impl ChatWidget {
+             reasoning_header: None,
+             reasoning_summary_parts: Vec::new(),
+             live_reasoning_enabled,
++            generation_rate: GenerationRateTracker::new(generation_rate_enabled),
+             live_reasoning_active: false,
+             reasoning_redraw_deadline: None,
+             status_state: StatusState::default(),
+diff --git a/codex-rs/tui/src/chatwidget/generation_rate.rs b/codex-rs/tui/src/chatwidget/generation_rate.rs
+new file mode 100644
+index 0000000..915df43
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/generation_rate.rs
+@@ -0,0 +1,312 @@
++//! SimpleRouter generation-rate tracking for the status-line suffix.
++//!
++//! Each upstream response is measured independently from its first output
++//! delta to its last. Exact native output usage replaces the streaming
++//! estimate when a response completes; interrupted responses remain visibly
++//! approximate. Summing those per-response generation spans excludes request
++//! latency, retry delays, local tools, and post-disconnect stalls.
++
++use std::time::Duration;
++use std::time::Instant;
++
++use super::ChatWidget;
++use super::live_reasoning::is_simplerouter_provider_id;
++
++const DISABLE_TOKEN_RATE_ENV: &str = "SIMPLEROUTER_DISABLE_TOKEN_RATE";
++const DEFAULT_ESTIMATED_CHARS_PER_TOKEN: f64 = 4.0;
++const MIN_LIVE_ESTIMATED_TOKENS: f64 = 8.0;
++const MIN_LIVE_DURATION: Duration = Duration::from_millis(250);
++
++#[derive(Clone, Copy, Debug)]
++struct DisplayRate {
++    tokens_per_second: f64,
++    estimated: bool,
++}
++
++#[derive(Debug)]
++struct ActiveSampling {
++    first_output_at: Option<Instant>,
++    last_output_at: Option<Instant>,
++    observed_output_chars: u64,
++    exact_output_tokens: Option<f64>,
++}
++
++impl ActiveSampling {
++    fn new() -> Self {
++        Self {
++            first_output_at: None,
++            last_output_at: None,
++            observed_output_chars: 0,
++            exact_output_tokens: None,
++        }
++    }
++
++    fn observe_delta(&mut self, delta: &str, now: Instant) {
++        let output_chars = delta.chars().count() as u64;
++        if output_chars == 0 {
++            return;
++        }
++        self.first_output_at.get_or_insert(now);
++        self.last_output_at = Some(now);
++        self.observed_output_chars = self.observed_output_chars.saturating_add(output_chars);
++    }
++
++    fn live_generation_duration(&self, now: Instant) -> Option<Duration> {
++        self.first_output_at
++            .map(|started_at| now.saturating_duration_since(started_at))
++    }
++
++    fn final_generation_duration(&self) -> Option<Duration> {
++        Some(
++            self.last_output_at?
++                .saturating_duration_since(self.first_output_at?),
++        )
++        .filter(|duration| !duration.is_zero())
++    }
++}
++
++#[derive(Debug)]
++pub(super) struct GenerationRateTracker {
++    enabled: bool,
++    turn_running: bool,
++    turn_exact_output_tokens: f64,
++    turn_estimated_output_chars: f64,
++    turn_generation_duration: Duration,
++    active_sampling: Option<ActiveSampling>,
++    calibration_output_chars: f64,
++    calibration_output_tokens: f64,
++    retained_rate: Option<DisplayRate>,
++}
++
++impl GenerationRateTracker {
++    pub(super) fn new(enabled: bool) -> Self {
++        Self {
++            enabled,
++            turn_running: false,
++            turn_exact_output_tokens: 0.0,
++            turn_estimated_output_chars: 0.0,
++            turn_generation_duration: Duration::ZERO,
++            active_sampling: None,
++            calibration_output_chars: 0.0,
++            calibration_output_tokens: 0.0,
++            retained_rate: None,
++        }
++    }
++
++    pub(super) fn begin_turn(&mut self) {
++        if !self.enabled {
++            return;
++        }
++        self.turn_running = true;
++        self.turn_exact_output_tokens = 0.0;
++        self.turn_estimated_output_chars = 0.0;
++        self.turn_generation_duration = Duration::ZERO;
++        self.active_sampling = None;
++        self.retained_rate = None;
++    }
++
++    pub(super) fn finish_turn(&mut self, now: Instant) {
++        if !self.enabled {
++            return;
++        }
++        self.finalize_active_sampling(
++            /*generation_duration*/ None, /*output_chars*/ None,
++        );
++        self.retained_rate = self.turn_rate(now);
++        self.turn_running = false;
++    }
++
++    pub(super) fn sampling_started(&mut self, _active_api_duration_ms: i64, _now: Instant) {
++        if !self.enabled || !self.turn_running {
++            return;
++        }
++        if self.active_sampling.is_some() {
++            self.finalize_active_sampling(
++                /*generation_duration*/ None, /*output_chars*/ None,
++            );
++        }
++        self.active_sampling = Some(ActiveSampling::new());
++    }
++
++    pub(super) fn observe_delta(&mut self, delta: &str, now: Instant) {
++        let Some(active) = self.active_sampling.as_mut() else {
++            return;
++        };
++        active.observe_delta(delta, now);
++    }
++
++    pub(super) fn response_completed(&mut self, output_tokens: Option<i64>) {
++        let Some(active) = self.active_sampling.as_mut() else {
++            return;
++        };
++        if let Some(output_tokens) = output_tokens {
++            active.exact_output_tokens = Some(output_tokens.max(0) as f64);
++        }
++    }
++
++    pub(super) fn sampling_stopped(
++        &mut self,
++        _active_api_duration_ms: i64,
++        generation_duration_ms: Option<i64>,
++        streamed_output_chars: i64,
++        now: Instant,
++    ) {
++        if !self.enabled || !self.turn_running {
++            return;
++        }
++        let generation_duration = generation_duration_ms
++            .and_then(|duration_ms| u64::try_from(duration_ms).ok())
++            .map(Duration::from_millis)
++            .filter(|duration| !duration.is_zero());
++        let output_chars = u64::try_from(streamed_output_chars).ok();
++        self.finalize_active_sampling(generation_duration, output_chars);
++        self.retained_rate = self.turn_rate(now);
++    }
++
++    pub(super) fn status_suffix(&self, now: Instant) -> Option<String> {
++        let rate = if self.turn_running {
++            self.turn_rate(now).or(self.retained_rate)
++        } else {
++            self.retained_rate
++        }?;
++        if !rate.tokens_per_second.is_finite() || rate.tokens_per_second <= 0.0 {
++            return None;
++        }
++        let approximation = if rate.estimated { "~" } else { "" };
++        Some(format!(
++            "{approximation}{:.1} tok/s",
++            rate.tokens_per_second
++        ))
++    }
++
++    fn finalize_active_sampling(
++        &mut self,
++        generation_duration: Option<Duration>,
++        streamed_output_chars: Option<u64>,
++    ) {
++        let Some(active) = self.active_sampling.take() else {
++            return;
++        };
++        let generation_duration =
++            generation_duration.or_else(|| active.final_generation_duration());
++        let output_chars = streamed_output_chars
++            .unwrap_or_default()
++            .max(active.observed_output_chars) as f64;
++        let Some(generation_duration) = generation_duration else {
++            return;
++        };
++
++        match active.exact_output_tokens {
++            Some(output_tokens) if output_tokens > 0.0 => {
++                self.turn_exact_output_tokens += output_tokens;
++                if output_chars > 0.0 {
++                    self.calibration_output_chars += output_chars;
++                    self.calibration_output_tokens += output_tokens;
++                }
++            }
++            _ if output_chars > 0.0 => {
++                self.turn_estimated_output_chars += output_chars;
++            }
++            _ => return,
++        }
++        self.turn_generation_duration = self
++            .turn_generation_duration
++            .saturating_add(generation_duration);
++    }
++
++    fn turn_rate(&self, now: Instant) -> Option<DisplayRate> {
++        let mut output_tokens =
++            self.turn_exact_output_tokens + self.estimated_tokens(self.turn_estimated_output_chars);
++        let mut generation_duration = self.turn_generation_duration;
++        let mut estimated = self.turn_estimated_output_chars > 0.0;
++
++        if let Some(active) = self.active_sampling.as_ref() {
++            let active_tokens = active
++                .exact_output_tokens
++                .unwrap_or_else(|| self.estimated_tokens(active.observed_output_chars as f64));
++            if active.exact_output_tokens.is_none() && active.observed_output_chars > 0 {
++                estimated = true;
++            }
++            if let Some(active_duration) = active.live_generation_duration(now) {
++                output_tokens += active_tokens;
++                generation_duration = generation_duration.saturating_add(active_duration);
++            }
++
++            if self.turn_generation_duration.is_zero()
++                && active.exact_output_tokens.is_none()
++                && active_tokens < MIN_LIVE_ESTIMATED_TOKENS
++            {
++                return None;
++            }
++            if self.turn_generation_duration.is_zero() && generation_duration < MIN_LIVE_DURATION {
++                return None;
++            }
++        }
++
++        rate(output_tokens, generation_duration).map(|tokens_per_second| DisplayRate {
++            tokens_per_second,
++            estimated,
++        })
++    }
++
++    fn estimated_tokens(&self, output_chars: f64) -> f64 {
++        output_chars / self.estimated_chars_per_token()
++    }
++
++    fn estimated_chars_per_token(&self) -> f64 {
++        if self.calibration_output_chars > 0.0 && self.calibration_output_tokens > 0.0 {
++            self.calibration_output_chars / self.calibration_output_tokens
++        } else {
++            DEFAULT_ESTIMATED_CHARS_PER_TOKEN
++        }
++    }
++}
++
++pub(super) fn enabled_for_provider(provider_id: &str) -> bool {
++    is_simplerouter_provider_id(provider_id)
++        && std::env::var(DISABLE_TOKEN_RATE_ENV)
++            .map(|value| value.trim().is_empty())
++            .unwrap_or(true)
++}
++
++fn rate(output_tokens: f64, duration: Duration) -> Option<f64> {
++    let seconds = duration.as_secs_f64();
++    (output_tokens > 0.0 && seconds > 0.0).then_some(output_tokens / seconds)
++}
++
++impl ChatWidget {
++    pub(super) fn on_generation_rate_sampling_started(&mut self, active_api_duration_ms: i64) {
++        self.generation_rate
++            .sampling_started(active_api_duration_ms, Instant::now());
++        self.refresh_status_line();
++    }
++
++    pub(super) fn on_generation_rate_delta(&mut self, delta: &str) {
++        self.generation_rate.observe_delta(delta, Instant::now());
++        self.refresh_status_line();
++    }
++
++    pub(super) fn on_generation_rate_response_completed(&mut self, output_tokens: Option<i64>) {
++        self.generation_rate.response_completed(output_tokens);
++        self.refresh_status_line();
++    }
++
++    pub(super) fn on_generation_rate_sampling_stopped(
++        &mut self,
++        active_api_duration_ms: i64,
++        generation_duration_ms: Option<i64>,
++        streamed_output_chars: i64,
++    ) {
++        self.generation_rate.sampling_stopped(
++            active_api_duration_ms,
++            generation_duration_ms,
++            streamed_output_chars,
++            Instant::now(),
++        );
++        self.refresh_status_line();
++    }
++}
++
++#[cfg(test)]
++#[path = "generation_rate_tests.rs"]
++mod tests;
+diff --git a/codex-rs/tui/src/chatwidget/generation_rate_tests.rs b/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
+new file mode 100644
+index 0000000..bcc0b9f
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
+@@ -0,0 +1,161 @@
++use std::time::Duration;
++use std::time::Instant;
++
++use pretty_assertions::assert_eq;
++
++use super::GenerationRateTracker;
++
++#[test]
++fn turn_average_uses_only_generation_time_and_persists_until_the_next_turn() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(true);
++    tracker.begin_turn();
++
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++    tracker.observe_delta(&"a".repeat(40), started_at + Duration::from_secs(1));
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(2)),
++        Some("~10.0 tok/s".to_string())
++    );
++    tracker.response_completed(Some(100));
++    tracker.sampling_stopped(
++        /*active_api_duration_ms*/ 20_000,
++        /*generation_duration_ms*/ Some(2_000),
++        /*streamed_output_chars*/ 40,
++        started_at + Duration::from_secs(20),
++    );
++
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(100)),
++        Some("50.0 tok/s".to_string())
++    );
++
++    tracker.sampling_started(
++        /*active_api_duration_ms*/ 20_000,
++        started_at + Duration::from_secs(100),
++    );
++    tracker.observe_delta(
++        &"b".repeat(400),
++        started_at + Duration::from_millis(100_500),
++    );
++    tracker.response_completed(Some(300));
++    tracker.sampling_stopped(
++        /*active_api_duration_ms*/ 80_000,
++        /*generation_duration_ms*/ Some(4_000),
++        /*streamed_output_chars*/ 400,
++        started_at + Duration::from_secs(180),
++    );
++    tracker.finish_turn(started_at + Duration::from_secs(180));
++
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(1_000)),
++        Some("66.7 tok/s".to_string())
++    );
++
++    tracker.begin_turn();
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(2_000)),
++        None
++    );
++}
++
++#[test]
++fn exact_completion_usage_replaces_the_streaming_estimate() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(true);
++    tracker.begin_turn();
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++    tracker.observe_delta(&"x".repeat(400), started_at + Duration::from_secs(1));
++    tracker.response_completed(Some(40));
++    tracker.sampling_stopped(
++        /*active_api_duration_ms*/ 10_000,
++        /*generation_duration_ms*/ Some(2_000),
++        /*streamed_output_chars*/ 400,
++        started_at + Duration::from_secs(10),
++    );
++
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(20)),
++        Some("20.0 tok/s".to_string())
++    );
++}
++
++#[test]
++fn disconnect_stall_is_not_counted_as_generation_time() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(true);
++    tracker.begin_turn();
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++    tracker.observe_delta(&"x".repeat(400), started_at + Duration::from_secs(1));
++    tracker.observe_delta(&"y".repeat(400), started_at + Duration::from_secs(3));
++    tracker.sampling_stopped(
++        /*active_api_duration_ms*/ 100_000,
++        /*generation_duration_ms*/ Some(2_000),
++        /*streamed_output_chars*/ 800,
++        started_at + Duration::from_secs(100),
++    );
++
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(200)),
++        Some("~100.0 tok/s".to_string())
++    );
++}
++
++#[test]
++fn successful_retry_recalibrates_an_incomplete_attempt() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(true);
++    tracker.begin_turn();
++
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++    tracker.observe_delta(&"x".repeat(200), started_at + Duration::from_secs(1));
++    tracker.sampling_stopped(
++        /*active_api_duration_ms*/ 10_000,
++        /*generation_duration_ms*/ Some(2_000),
++        /*streamed_output_chars*/ 200,
++        started_at + Duration::from_secs(10),
++    );
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(20)),
++        Some("~25.0 tok/s".to_string())
++    );
++
++    tracker.sampling_started(
++        /*active_api_duration_ms*/ 10_000,
++        started_at + Duration::from_secs(100),
++    );
++    tracker.observe_delta(
++        &"y".repeat(100),
++        started_at + Duration::from_millis(100_500),
++    );
++    tracker.response_completed(Some(50));
++    tracker.sampling_stopped(
++        /*active_api_duration_ms*/ 20_000,
++        /*generation_duration_ms*/ Some(1_000),
++        /*streamed_output_chars*/ 100,
++        started_at + Duration::from_secs(110),
++    );
++
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(200)),
++        Some("~50.0 tok/s".to_string())
++    );
++}
++
++#[test]
++fn disabled_tracker_never_exposes_a_suffix() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(false);
++    tracker.begin_turn();
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++    tracker.observe_delta(&"x".repeat(400), started_at + Duration::from_secs(1));
++    tracker.response_completed(Some(100));
++    tracker.sampling_stopped(
++        /*active_api_duration_ms*/ 1_000,
++        /*generation_duration_ms*/ Some(1_000),
++        /*streamed_output_chars*/ 400,
++        started_at + Duration::from_secs(2),
++    );
++
++    assert_eq!(tracker.status_suffix(started_at), None);
++}
+diff --git a/codex-rs/tui/src/chatwidget/live_reasoning.rs b/codex-rs/tui/src/chatwidget/live_reasoning.rs
+index 6e602cf..4071b9a 100644
+--- a/codex-rs/tui/src/chatwidget/live_reasoning.rs
++++ b/codex-rs/tui/src/chatwidget/live_reasoning.rs
+@@ -4,9 +4,9 @@ use super::*;
+ 
+ const SIMPLEROUTER_MODEL_PROVIDER_ID: &str = "simplerouter_session";
+ const REASONING_STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(60);
+-const LIVE_REASONING_PREVIEW_ROWS: usize = 12;
++pub(super) const LIVE_REASONING_PREVIEW_ROWS: usize = 20;
+ 
+-pub(super) fn is_simplerouter_provider_id(provider_id: &str) -> bool {
++pub(crate) fn is_simplerouter_provider_id(provider_id: &str) -> bool {
+     provider_id == SIMPLEROUTER_MODEL_PROVIDER_ID
+ }
+ 
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index 9586f5f..b7ce62b 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -74,13 +74,19 @@ impl ChatWidget {
+                 self.handle_item_completed_notification(notification, replay_kind);
+             }
+             ServerNotification::AgentMessageDelta(notification) => {
++                self.on_generation_rate_delta(&notification.delta);
+                 self.on_agent_message_delta(notification.delta);
+             }
+-            ServerNotification::PlanDelta(notification) => self.on_plan_delta(notification.delta),
++            ServerNotification::PlanDelta(notification) => {
++                self.on_generation_rate_delta(&notification.delta);
++                self.on_plan_delta(notification.delta);
++            }
+             ServerNotification::ReasoningSummaryTextDelta(notification) => {
++                self.on_generation_rate_delta(&notification.delta);
+                 self.on_agent_reasoning_delta(notification.delta);
+             }
+             ServerNotification::ReasoningTextDelta(notification) => {
++                self.on_generation_rate_delta(&notification.delta);
+                 if self.config.show_raw_agent_reasoning {
+                     self.on_agent_reasoning_delta(notification.delta);
+                 }
+@@ -191,6 +197,27 @@ impl ChatWidget {
+                     self.on_shutdown_complete();
+                 }
+             }
++            ServerNotification::RawResponseStarted(notification) => {
++                if !is_resume_initial_replay {
++                    self.on_generation_rate_sampling_started(notification.active_api_duration_ms);
++                }
++            }
++            ServerNotification::RawResponseCompleted(notification) => {
++                if !is_resume_initial_replay {
++                    self.on_generation_rate_response_completed(
++                        notification.usage.map(|usage| usage.output_tokens),
++                    );
++                }
++            }
++            ServerNotification::RawResponseStopped(notification) => {
++                if !is_resume_initial_replay {
++                    self.on_generation_rate_sampling_stopped(
++                        notification.active_api_duration_ms,
++                        notification.generation_duration_ms,
++                        notification.streamed_output_chars,
++                    );
++                }
++            }
+             ServerNotification::ServerRequestResolved(_)
+             | ServerNotification::AccountUpdated(_)
+             | ServerNotification::AccountRateLimitsUpdated(_)
+@@ -200,7 +227,6 @@ impl ChatWidget {
+             | ServerNotification::ThreadDeleted(_)
+             | ServerNotification::ThreadUnarchived(_)
+             | ServerNotification::RawResponseItemCompleted(_)
+-            | ServerNotification::RawResponseCompleted(_)
+             | ServerNotification::CommandExecOutputDelta(_)
+             | ServerNotification::ProcessOutputDelta(_)
+             | ServerNotification::ProcessExited(_)
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap
+new file mode 100644
+index 0000000..5606337
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap
+@@ -0,0 +1,10 @@
++---
++source: tui/src/chatwidget/tests/generation_rate.rs
++assertion_line: 69
++expression: "render_chatwidget(&mut chat, 80)"
++---
++"                                                                                "
++"                                                                                "
++"› Ask Codex to do anything                                                      "
++"                                                                                "
++"  60.0 tok/s                                                                    "
+diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+index 7120462..d726dbd 100644
+--- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
++++ b/codex-rs/tui/src/chatwidget/status_surfaces.rs
+@@ -175,7 +175,8 @@ impl ChatWidget {
+     }
+ 
+     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
+-        let enabled = !selections.status_line_items.is_empty();
++        let generation_rate_suffix = self.generation_rate.status_suffix(Instant::now());
++        let enabled = !selections.status_line_items.is_empty() || generation_rate_suffix.is_some();
+         self.bottom_pane.set_status_line_enabled(enabled);
+         if !enabled {
+             self.set_status_line(/*status_line*/ None);
+@@ -190,10 +191,16 @@ impl ChatWidget {
+             }
+         }
+ 
+-        self.set_status_line(status_line_from_segments(
+-            segments,
+-            self.config.tui_status_line_use_colors,
+-        ));
++        let mut status_line =
++            status_line_from_segments(segments, self.config.tui_status_line_use_colors);
++        if let Some(generation_rate_suffix) = generation_rate_suffix {
++            let line = status_line.get_or_insert_with(Line::default);
++            if !line.spans.is_empty() {
++                line.spans.push(" \u{b7} ".dim());
++            }
++            line.spans.push(generation_rate_suffix.dim());
++        }
++        self.set_status_line(status_line);
+         let hyperlink_url = selections
+             .status_line_items
+             .contains(&StatusLineItem::PullRequestNumber)
+diff --git a/codex-rs/tui/src/chatwidget/streaming.rs b/codex-rs/tui/src/chatwidget/streaming.rs
+index 97ef900..ecde4d4 100644
+--- a/codex-rs/tui/src/chatwidget/streaming.rs
++++ b/codex-rs/tui/src/chatwidget/streaming.rs
+@@ -266,7 +266,17 @@ impl ChatWidget {
+         self.clear_live_reasoning();
+         if !self.reasoning_summary_parts.is_empty() {
+             let reasoning_parts = std::mem::take(&mut self.reasoning_summary_parts);
+-            let cell = history_cell::new_reasoning_summary_block(reasoning_parts, &self.config.cwd);
++            // SimpleRouter live-thinking sessions keep the tail of each finished reasoning
++            // block visible in scrollback; other sessions keep the stock summary behavior.
++            let cell = if self.live_reasoning_enabled && !self.config.hide_agent_reasoning {
++                history_cell::new_reasoning_summary_tail_block(
++                    reasoning_parts,
++                    &self.config.cwd,
++                    live_reasoning::LIVE_REASONING_PREVIEW_ROWS,
++                )
++            } else {
++                history_cell::new_reasoning_summary_block(reasoning_parts, &self.config.cwd)
++            };
+             self.add_boxed_history(cell);
+         }
+         self.reasoning_buffer.clear();
+diff --git a/codex-rs/tui/src/chatwidget/tests.rs b/codex-rs/tui/src/chatwidget/tests.rs
+index 4d73db3..eaaea82 100644
+--- a/codex-rs/tui/src/chatwidget/tests.rs
++++ b/codex-rs/tui/src/chatwidget/tests.rs
+@@ -237,6 +237,7 @@ mod composer_submission;
+ #[path = "tests/config_errors_tests.rs"]
+ mod config_errors;
+ mod exec_flow;
++mod generation_rate;
+ mod goal_menu;
+ mod goal_validation;
+ mod guardian;
+diff --git a/codex-rs/tui/src/chatwidget/tests/generation_rate.rs b/codex-rs/tui/src/chatwidget/tests/generation_rate.rs
+new file mode 100644
+index 0000000..eb65f13
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/tests/generation_rate.rs
+@@ -0,0 +1,75 @@
++use super::*;
++use codex_app_server_protocol::RawResponseCompletedNotification;
++use codex_app_server_protocol::RawResponseStartedNotification;
++use codex_app_server_protocol::RawResponseStoppedNotification;
++use codex_app_server_protocol::TokenUsageBreakdown;
++
++const SIMPLEROUTER_PROVIDER: &str = "simplerouter_session";
++
++fn render_chatwidget(chat: &mut ChatWidget, width: u16) -> String {
++    let height = chat.desired_height(width);
++    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
++        .expect("create terminal");
++    terminal.set_viewport_area(Rect::new(/*x*/ 0, /*y*/ 0, width, height));
++    terminal
++        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
++        .expect("draw chat widget");
++    normalized_backend_snapshot(terminal.backend())
++}
++
++#[tokio::test]
++async fn completed_turn_keeps_generation_rate_status_suffix() {
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual_with_provider(SIMPLEROUTER_PROVIDER).await;
++    chat.config.tui_status_line = Some(Vec::new());
++    chat.generation_rate = GenerationRateTracker::new(true);
++    chat.on_task_started();
++
++    chat.handle_server_notification(
++        ServerNotification::RawResponseStarted(RawResponseStartedNotification {
++            thread_id: "thread-1".to_string(),
++            turn_id: "turn-1".to_string(),
++            active_api_duration_ms: 0,
++        }),
++        /*replay_kind*/ None,
++    );
++    chat.handle_server_notification(
++        ServerNotification::RawResponseCompleted(RawResponseCompletedNotification {
++            thread_id: "thread-1".to_string(),
++            turn_id: "turn-1".to_string(),
++            response_id: "response-1".to_string(),
++            usage: Some(TokenUsageBreakdown {
++                total_tokens: 150,
++                input_tokens: 30,
++                cached_input_tokens: 0,
++                cache_write_input_tokens: 0,
++                output_tokens: 120,
++                reasoning_output_tokens: 80,
++            }),
++        }),
++        /*replay_kind*/ None,
++    );
++    chat.handle_server_notification(
++        ServerNotification::RawResponseStopped(RawResponseStoppedNotification {
++            thread_id: "thread-1".to_string(),
++            turn_id: "turn-1".to_string(),
++            active_api_duration_ms: 20_000,
++            generation_duration_ms: Some(2_000),
++            streamed_output_chars: 240,
++        }),
++        /*replay_kind*/ None,
++    );
++    chat.on_task_complete(
++        /*last_agent_message*/ None,
++        /*duration_ms*/ Some(20_000),
++        /*from_replay*/ false,
++    );
++
++    assert_eq!(
++        chat.generation_rate.status_suffix(Instant::now()),
++        Some("60.0 tok/s".to_string())
++    );
++    assert_chatwidget_snapshot!(
++        "simplerouter_completed_turn_generation_rate_suffix",
++        render_chatwidget(&mut chat, /*width*/ 80)
++    );
++}
+diff --git a/codex-rs/tui/src/chatwidget/tests/live_reasoning.rs b/codex-rs/tui/src/chatwidget/tests/live_reasoning.rs
+index 823edc6..29a7ba9 100644
+--- a/codex-rs/tui/src/chatwidget/tests/live_reasoning.rs
++++ b/codex-rs/tui/src/chatwidget/tests/live_reasoning.rs
+@@ -85,7 +85,7 @@ async fn live_reasoning_preview_is_ephemeral_across_active_cell_flushes() {
+ #[tokio::test]
+ async fn live_reasoning_preview_is_bounded_but_transcript_keeps_every_line() {
+     let (mut chat, _rx, _op_rx) = make_chatwidget_manual_with_provider(SIMPLEROUTER_PROVIDER).await;
+-    let reasoning = (0..20)
++    let reasoning = (0..40)
+         .map(|i| format!("thought-{i}\n"))
+         .collect::<String>();
+ 
+@@ -101,12 +101,50 @@ async fn live_reasoning_preview_is_bounded_but_transcript_keeps_every_line() {
+     let display = lines_to_single_string(&display_lines);
+     let transcript = lines_to_single_string(&cell.transcript_lines(/*width*/ 80));
+ 
+-    assert!(display_lines.len() <= 12);
++    assert!(display_lines.len() <= 20);
+     assert!(display.contains("earlier thinking"));
+     assert!(!display.contains("thought-0"));
+-    assert!(display.contains("thought-19"));
++    assert!(display.contains("thought-39"));
+     assert!(transcript.contains("thought-0"));
+-    assert!(transcript.contains("thought-19"));
++    assert!(transcript.contains("thought-39"));
++}
++
++#[tokio::test]
++async fn final_reasoning_stays_visible_in_scrollback_with_tail_cap() {
++    let (mut chat, mut rx, _op_rx) =
++        make_chatwidget_manual_with_provider(SIMPLEROUTER_PROVIDER).await;
++    let reasoning = (0..40)
++        .map(|i| format!("thought-{i}\n"))
++        .collect::<String>();
++
++    handle_agent_reasoning_delta(&mut chat, &reasoning);
++    handle_agent_reasoning_final(&mut chat);
++    assert!(chat.transcript.active_cell.is_none());
++
++    let mut final_cell = None;
++    while let Ok(event) = rx.try_recv() {
++        if let AppEvent::InsertHistoryCell(cell) = event
++            && cell.as_any().is::<ReasoningSummaryCell>()
++        {
++            final_cell = Some(cell);
++        }
++    }
++    let final_cell = final_cell.expect("final reasoning history cell");
++    let reasoning_cell = final_cell
++        .as_any()
++        .downcast_ref::<ReasoningSummaryCell>()
++        .expect("reasoning summary cell");
++    let display_lines = reasoning_cell.display_lines(/*width*/ 80);
++    let display = lines_to_single_string(&display_lines);
++    let transcript = lines_to_single_string(&reasoning_cell.transcript_lines(/*width*/ 80));
++
++    assert!(!display_lines.is_empty());
++    assert!(display_lines.len() <= 20);
++    assert!(display.contains("earlier thinking"));
++    assert!(!display.contains("thought-0"));
++    assert!(display.contains("thought-39"));
++    assert!(transcript.contains("thought-0"));
++    assert!(transcript.contains("thought-39"));
+ }
+ 
+ #[tokio::test]
+diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+index 9807bce..5f72728 100644
+--- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
++++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+@@ -70,6 +70,7 @@ impl ChatWidget {
+         self.input_queue.user_turn_pending_start = false;
+         self.reset_safety_buffering_for_turn_start();
+         self.turn_lifecycle.start(Instant::now());
++        self.generation_rate.begin_turn();
+         self.transcript.reset_turn_flags();
+         self.adaptive_chunking.reset();
+         if self.plan_stream_controller.take().is_some() {
+@@ -192,6 +193,7 @@ impl ChatWidget {
+         self.clear_guardian_review_status();
+         self.turn_lifecycle.finish();
+         self.clear_safety_buffering();
++        self.generation_rate.finish_turn(Instant::now());
+         self.update_task_running_state();
+         self.running_commands.clear();
+         self.suppressed_exec_calls.clear();
+diff --git a/codex-rs/tui/src/history_cell/messages.rs b/codex-rs/tui/src/history_cell/messages.rs
+index 7cae90c..2eb1568 100644
+--- a/codex-rs/tui/src/history_cell/messages.rs
++++ b/codex-rs/tui/src/history_cell/messages.rs
+@@ -601,6 +601,29 @@ pub(crate) fn new_reasoning_summary_block(
+ }
+ 
+ /// Split structured reasoning-summary parts into the status header and renderable content.
++/// Create the reasoning history cell for sessions that keep thinking visible in the main
++/// viewport. The cell mirrors the live preview: scrollback renders the trailing `tail_rows`
++/// rows while the transcript keeps the full text. Falls back to the standard summary block
++/// when there is no renderable content.
++pub(crate) fn new_reasoning_summary_tail_block(
++    reasoning_parts: Vec<String>,
++    cwd: &Path,
++    tail_rows: usize,
++) -> Box<dyn HistoryCell> {
++    let mut cell =
++        ReasoningSummaryCell::new_live_preview(String::new(), String::new(), cwd, tail_rows);
++    for (index, part) in reasoning_parts.iter().enumerate() {
++        if index > 0 {
++            cell.push_content("\n\n");
++        }
++        cell.push_content(part);
++    }
++    if cell.is_empty() {
++        return new_reasoning_summary_block(reasoning_parts, cwd);
++    }
++    Box::new(cell)
++}
++
+ pub(crate) fn split_reasoning_summary_parts(reasoning_parts: &[String]) -> (String, String) {
+     let mut leading_empty_part_header = None;
+     let mut content_parts = Vec::with_capacity(reasoning_parts.len());

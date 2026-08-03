@@ -1,0 +1,495 @@
+From 7b61555a7636507618ce436b6804018c4e58f4ed Mon Sep 17 00:00:00 2001
+From: Kyle <kdsuomi@users.noreply.github.com>
+Date: Tue, 28 Jul 2026 00:03:04 -0400
+Subject: [PATCH 2/3] feat(tui): stabilize live reasoning transcript
+
+---
+ codex-rs/tui/src/chatwidget/live_reasoning.rs |   5 +-
+ .../src/chatwidget/tests/live_reasoning.rs    |  27 +++
+ codex-rs/tui/src/history_cell/messages.rs     |  39 +++-
+ codex-rs/tui/src/pager_overlay.rs             | 169 +++++++++++++++---
+ ...ript_overlay_apply_patch_scroll_vt100.snap |   2 +-
+ 5 files changed, 214 insertions(+), 28 deletions(-)
+
+diff --git a/codex-rs/tui/src/chatwidget/live_reasoning.rs b/codex-rs/tui/src/chatwidget/live_reasoning.rs
+index 698319e..6e602cf 100644
+--- a/codex-rs/tui/src/chatwidget/live_reasoning.rs
++++ b/codex-rs/tui/src/chatwidget/live_reasoning.rs
+@@ -4,6 +4,7 @@ use super::*;
+ 
+ const SIMPLEROUTER_MODEL_PROVIDER_ID: &str = "simplerouter_session";
+ const REASONING_STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(60);
++const LIVE_REASONING_PREVIEW_ROWS: usize = 12;
+ 
+ pub(super) fn is_simplerouter_provider_id(provider_id: &str) -> bool {
+     provider_id == SIMPLEROUTER_MODEL_PROVIDER_ID
+@@ -60,11 +61,11 @@ impl ChatWidget {
+         }
+ 
+         self.flush_active_cell();
+-        let mut cell = history_cell::ReasoningSummaryCell::new(
++        let mut cell = history_cell::ReasoningSummaryCell::new_live_preview(
+             String::new(),
+             String::new(),
+             &self.config.cwd,
+-            /*transcript_only*/ false,
++            LIVE_REASONING_PREVIEW_ROWS,
+         );
+         for (index, part) in self.reasoning_summary_parts.iter().enumerate() {
+             if index > 0 {
+diff --git a/codex-rs/tui/src/chatwidget/tests/live_reasoning.rs b/codex-rs/tui/src/chatwidget/tests/live_reasoning.rs
+index 6b3162b..823edc6 100644
+--- a/codex-rs/tui/src/chatwidget/tests/live_reasoning.rs
++++ b/codex-rs/tui/src/chatwidget/tests/live_reasoning.rs
+@@ -82,6 +82,33 @@ async fn live_reasoning_preview_is_ephemeral_across_active_cell_flushes() {
+     assert!(rebuilt.contains("After tool."));
+ }
+ 
++#[tokio::test]
++async fn live_reasoning_preview_is_bounded_but_transcript_keeps_every_line() {
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual_with_provider(SIMPLEROUTER_PROVIDER).await;
++    let reasoning = (0..20)
++        .map(|i| format!("thought-{i}\n"))
++        .collect::<String>();
++
++    handle_agent_reasoning_delta(&mut chat, &reasoning);
++
++    let cell = chat
++        .transcript
++        .active_cell
++        .as_ref()
++        .and_then(|cell| cell.as_any().downcast_ref::<ReasoningSummaryCell>())
++        .expect("live reasoning cell");
++    let display_lines = cell.display_lines(/*width*/ 80);
++    let display = lines_to_single_string(&display_lines);
++    let transcript = lines_to_single_string(&cell.transcript_lines(/*width*/ 80));
++
++    assert!(display_lines.len() <= 12);
++    assert!(display.contains("earlier thinking"));
++    assert!(!display.contains("thought-0"));
++    assert!(display.contains("thought-19"));
++    assert!(transcript.contains("thought-0"));
++    assert!(transcript.contains("thought-19"));
++}
++
+ #[tokio::test]
+ async fn thinking_command_toggles_and_restores_the_live_preview() {
+     let (mut chat, mut rx, _op_rx) =
+diff --git a/codex-rs/tui/src/history_cell/messages.rs b/codex-rs/tui/src/history_cell/messages.rs
+index 279d49d..7cae90c 100644
+--- a/codex-rs/tui/src/history_cell/messages.rs
++++ b/codex-rs/tui/src/history_cell/messages.rs
+@@ -222,6 +222,8 @@ pub(crate) struct ReasoningSummaryCell {
+     /// Session cwd used to render local file links inside the reasoning body.
+     cwd: PathBuf,
+     transcript_only: bool,
++    /// Optional row cap for the main viewport. The transcript always retains the full content.
++    display_tail_rows: Option<usize>,
+ }
+ 
+ impl ReasoningSummaryCell {
+@@ -233,6 +235,24 @@ impl ReasoningSummaryCell {
+             content,
+             cwd: cwd.to_path_buf(),
+             transcript_only,
++            display_tail_rows: None,
++        }
++    }
++
++    /// Create a live reasoning cell whose main-viewport representation stays compact while its
++    /// transcript representation retains every streamed line.
++    pub(crate) fn new_live_preview(
++        header: String,
++        content: String,
++        cwd: &Path,
++        display_tail_rows: usize,
++    ) -> Self {
++        Self {
++            _header: header,
++            content,
++            cwd: cwd.to_path_buf(),
++            transcript_only: false,
++            display_tail_rows: Some(display_tail_rows.max(2)),
+         }
+     }
+ 
+@@ -279,7 +299,24 @@ impl HistoryCell for ReasoningSummaryCell {
+         if self.transcript_only {
+             Vec::new()
+         } else {
+-            self.lines(width)
++            let lines = self.lines(width);
++            let Some(max_rows) = self.display_tail_rows else {
++                return lines;
++            };
++            if lines.len() <= max_rows {
++                return lines;
++            }
++
++            let tail_rows = max_rows.saturating_sub(1);
++            let tail_start = lines.len().saturating_sub(tail_rows);
++            let mut visible = Vec::with_capacity(max_rows);
++            visible.push(
++                Line::from("⋯ earlier thinking · Ctrl+T to view all")
++                    .dim()
++                    .italic(),
++            );
++            visible.extend(lines.into_iter().skip(tail_start));
++            visible
+         }
+     }
+ 
+diff --git a/codex-rs/tui/src/pager_overlay.rs b/codex-rs/tui/src/pager_overlay.rs
+index 23e470c..65daa71 100644
+--- a/codex-rs/tui/src/pager_overlay.rs
++++ b/codex-rs/tui/src/pager_overlay.rs
+@@ -95,6 +95,10 @@ fn first_or_empty(bindings: &[KeyBinding]) -> Vec<KeyBinding> {
+     bindings.first().copied().into_iter().collect()
+ }
+ 
++/// Terminals translate mouse-wheel input to up/down keys while alternate scroll is enabled.
++/// Moving several rows per key keeps the pager close to native terminal scroll speed.
++const PAGER_SCROLL_ROWS: usize = 4;
++
+ // Render a single line of key hints from (key(s), description) pairs.
+ fn render_key_hints(area: Rect, buf: &mut Buffer, pairs: &[(Vec<KeyBinding>, &str)]) {
+     let mut spans: Vec<Span<'static>> = vec![" ".into()];
+@@ -120,6 +124,9 @@ fn render_key_hints(area: Rect, buf: &mut Buffer, pairs: &[(Vec<KeyBinding>, &st
+ struct PagerView {
+     renderables: Vec<Box<dyn Renderable>>,
+     scroll_offset: usize,
++    /// Whether new output should keep the viewport pinned to the final row.
++    follow_tail: bool,
++    show_lines_below: bool,
+     title: String,
+     keymap: PagerKeymap,
+     last_content_height: Option<usize>,
+@@ -134,10 +141,14 @@ impl PagerView {
+         title: String,
+         scroll_offset: usize,
+         keymap: PagerKeymap,
++        show_lines_below: bool,
+     ) -> Self {
++        let follow_tail = scroll_offset == usize::MAX;
+         Self {
+             renderables,
+-            scroll_offset,
++            scroll_offset: if follow_tail { 0 } else { scroll_offset },
++            follow_tail,
++            show_lines_below,
+             title,
+             keymap,
+             last_content_height: None,
+@@ -165,9 +176,12 @@ impl PagerView {
+         if let Some(idx) = self.pending_scroll_chunk.take() {
+             self.ensure_chunk_visible(idx, content_area);
+         }
+-        self.scroll_offset = self
+-            .scroll_offset
+-            .min(content_height.saturating_sub(content_area.height as usize));
++        let max_scroll = content_height.saturating_sub(content_area.height as usize);
++        self.scroll_offset = if self.follow_tail {
++            max_scroll
++        } else {
++            self.scroll_offset.min(max_scroll)
++        };
+ 
+         self.render_content(content_area, buf);
+ 
+@@ -242,45 +256,60 @@ impl PagerView {
+                     as u8
+             }
+         };
+-        let pct_text = format!(" {percent}% ");
+-        let pct_w = pct_text.chars().count() as u16;
+-        let pct_x = sep_rect.x + sep_rect.width - pct_w - 1;
+-        Span::from(pct_text)
+-            .dim()
+-            .render_ref(Rect::new(pct_x, sep_rect.y, pct_w, 1), buf);
++        let rows_below = total_len
++            .saturating_sub(content_area.height as usize)
++            .saturating_sub(self.scroll_offset);
++        if self.show_lines_below && rows_below > 0 {
++            let status_text = format!(" ↓ {rows_below} lines below  {percent}% ");
++            let status_w = u16::try_from(status_text.chars().count())
++                .unwrap_or(u16::MAX)
++                .min(sep_rect.width);
++            let status_x = sep_rect.right().saturating_sub(status_w);
++            Span::from(status_text)
++                .dim()
++                .render_ref(Rect::new(status_x, sep_rect.y, status_w, 1), buf);
++        } else {
++            let pct_text = format!(" {percent}% ");
++            let pct_w = pct_text.chars().count() as u16;
++            let pct_x = sep_rect.x + sep_rect.width - pct_w - 1;
++            Span::from(pct_text)
++                .dim()
++                .render_ref(Rect::new(pct_x, sep_rect.y, pct_w, 1), buf);
++        }
+     }
+ 
+     fn handle_key_event(&mut self, tui: &mut tui::Tui, key_event: KeyEvent) -> Result<()> {
+         match key_event {
+             e if self.keymap.scroll_up.is_pressed(e) => {
+-                self.scroll_offset = self.scroll_offset.saturating_sub(1);
++                self.scroll_up_rows(PAGER_SCROLL_ROWS);
+             }
+             e if self.keymap.scroll_down.is_pressed(e) => {
+-                self.scroll_offset = self.scroll_offset.saturating_add(1);
++                self.scroll_down_rows(PAGER_SCROLL_ROWS);
+             }
+             e if self.keymap.page_up.is_pressed(e) => {
+                 let page_height = self.page_height(tui.terminal.viewport_area);
+-                self.scroll_offset = self.scroll_offset.saturating_sub(page_height);
++                self.scroll_up_rows(page_height);
+             }
+             e if self.keymap.page_down.is_pressed(e) => {
+                 let page_height = self.page_height(tui.terminal.viewport_area);
+-                self.scroll_offset = self.scroll_offset.saturating_add(page_height);
++                self.scroll_down_rows(page_height);
+             }
+             e if self.keymap.half_page_down.is_pressed(e) => {
+                 let area = self.content_area(tui.terminal.viewport_area);
+                 let half_page = (area.height as usize).saturating_add(1) / 2;
+-                self.scroll_offset = self.scroll_offset.saturating_add(half_page);
++                self.scroll_down_rows(half_page);
+             }
+             e if self.keymap.half_page_up.is_pressed(e) => {
+                 let area = self.content_area(tui.terminal.viewport_area);
+                 let half_page = (area.height as usize).saturating_add(1) / 2;
+-                self.scroll_offset = self.scroll_offset.saturating_sub(half_page);
++                self.scroll_up_rows(half_page);
+             }
+             e if self.keymap.jump_top.is_pressed(e) => {
+                 self.scroll_offset = 0;
++                self.follow_tail = false;
+             }
+             e if self.keymap.jump_bottom.is_pressed(e) => {
+-                self.scroll_offset = usize::MAX;
++                self.set_follow_tail(true);
+             }
+             _ => {
+                 return Ok(());
+@@ -305,6 +334,42 @@ impl PagerView {
+         self.last_content_height = Some(height as usize);
+     }
+ 
++    fn max_scroll_offset(&self) -> usize {
++        self.last_rendered_height
++            .unwrap_or_default()
++            .saturating_sub(self.last_content_height.unwrap_or_default())
++    }
++
++    fn effective_scroll_offset(&self) -> usize {
++        if self.follow_tail {
++            self.max_scroll_offset()
++        } else {
++            self.scroll_offset.min(self.max_scroll_offset())
++        }
++    }
++
++    fn scroll_up_rows(&mut self, rows: usize) {
++        self.scroll_offset = self.effective_scroll_offset().saturating_sub(rows);
++        self.follow_tail = false;
++    }
++
++    fn scroll_down_rows(&mut self, rows: usize) {
++        let max_scroll = self.max_scroll_offset();
++        let next = self
++            .effective_scroll_offset()
++            .saturating_add(rows)
++            .min(max_scroll);
++        self.scroll_offset = next;
++        self.follow_tail = next >= max_scroll;
++    }
++
++    fn set_follow_tail(&mut self, follow_tail: bool) {
++        self.follow_tail = follow_tail;
++        if follow_tail {
++            self.scroll_offset = self.max_scroll_offset();
++        }
++    }
++
+     fn content_area(&self, area: Rect) -> Rect {
+         let mut area = area;
+         area.y = area.y.saturating_add(1);
+@@ -315,7 +380,7 @@ impl PagerView {
+ 
+ impl PagerView {
+     fn is_scrolled_to_bottom(&self) -> bool {
+-        if self.scroll_offset == usize::MAX {
++        if self.follow_tail {
+             return true;
+         }
+         let Some(height) = self.last_content_height else {
+@@ -336,6 +401,7 @@ impl PagerView {
+ 
+     /// Request that the given text chunk index be scrolled into view on next render.
+     fn scroll_chunk_into_view(&mut self, chunk_index: usize) {
++        self.follow_tail = false;
+         self.pending_scroll_chunk = Some(chunk_index);
+     }
+ 
+@@ -482,6 +548,7 @@ impl TranscriptOverlay {
+                 "T R A N S C R I P T".to_string(),
+                 usize::MAX,
+                 keymap,
++                /*show_lines_below*/ true,
+             ),
+             cells: transcript_cells,
+             highlight_cell: None,
+@@ -564,7 +631,7 @@ impl TranscriptOverlay {
+             self.view.renderables.push(tail);
+         }
+         if follow_bottom {
+-            self.view.scroll_offset = usize::MAX;
++            self.view.set_follow_tail(true);
+         }
+     }
+ 
+@@ -584,7 +651,7 @@ impl TranscriptOverlay {
+         }
+         self.rebuild_renderables();
+         if follow_bottom {
+-            self.view.scroll_offset = usize::MAX;
++            self.view.set_follow_tail(true);
+         }
+     }
+ 
+@@ -627,7 +694,7 @@ impl TranscriptOverlay {
+             self.rebuild_renderables();
+         }
+         if follow_bottom {
+-            self.view.scroll_offset = usize::MAX;
++            self.view.set_follow_tail(true);
+         }
+     }
+ 
+@@ -675,7 +742,7 @@ impl TranscriptOverlay {
+             }
+         }
+         if follow_bottom {
+-            self.view.scroll_offset = usize::MAX;
++            self.view.set_follow_tail(true);
+         }
+     }
+ 
+@@ -839,7 +906,13 @@ impl StaticOverlay {
+         keymap: PagerKeymap,
+     ) -> Self {
+         Self {
+-            view: PagerView::new(renderables, title, /*scroll_offset*/ 0, keymap),
++            view: PagerView::new(
++                renderables,
++                title,
++                /*scroll_offset*/ 0,
++                keymap,
++                /*show_lines_below*/ false,
++            ),
+             is_done: false,
+         }
+     }
+@@ -1033,6 +1106,7 @@ mod tests {
+             title.to_string(),
+             scroll_offset,
+             default_pager_keymap(),
++            /*show_lines_below*/ false,
+         )
+     }
+ 
+@@ -1265,6 +1339,7 @@ mod tests {
+         let mut buf = Buffer::empty(area);
+ 
+         overlay.render(area, &mut buf);
++        overlay.view.set_follow_tail(false);
+         overlay.view.scroll_offset = 0;
+         overlay.render(area, &mut buf);
+ 
+@@ -1296,7 +1371,8 @@ mod tests {
+             lines: vec!["tail".into()],
+         }));
+ 
+-        assert_eq!(overlay.view.scroll_offset, usize::MAX);
++        assert!(overlay.view.follow_tail);
++        assert_eq!(overlay.view.scroll_offset, overlay.view.max_scroll_offset());
+     }
+ 
+     #[test]
+@@ -1314,6 +1390,7 @@ mod tests {
+         term.draw(|f| overlay.render(f.area(), f.buffer_mut()))
+             .expect("draw");
+ 
++        overlay.view.set_follow_tail(false);
+         overlay.view.scroll_offset = 0;
+ 
+         overlay.insert_cell(Arc::new(TestCell {
+@@ -1323,6 +1400,49 @@ mod tests {
+         assert_eq!(overlay.view.scroll_offset, 0);
+     }
+ 
++    #[test]
++    fn transcript_overlay_manual_scroll_stays_fixed_as_live_tail_grows() {
++        let mut overlay = transcript_overlay(
++            (0..24)
++                .map(|i| {
++                    Arc::new(TestCell {
++                        lines: vec![Line::from(format!("line{i}"))],
++                    }) as Arc<dyn HistoryCell>
++                })
++                .collect(),
++        );
++        let area = Rect::new(0, 0, 40, 12);
++        let mut buf = Buffer::empty(area);
++        overlay.render(area, &mut buf);
++
++        let bottom = overlay.view.scroll_offset;
++        overlay.view.scroll_up_rows(PAGER_SCROLL_ROWS);
++        let frozen_offset = overlay.view.scroll_offset;
++        assert_eq!(bottom.saturating_sub(frozen_offset), PAGER_SCROLL_ROWS);
++        assert!(!overlay.view.follow_tail);
++
++        overlay.sync_live_tail(
++            area.width,
++            Some(ActiveCellTranscriptKey {
++                revision: 1,
++                is_stream_continuation: false,
++                animation_tick: None,
++            }),
++            |_| {
++                Some(
++                    (0..8)
++                        .map(|i| HyperlinkLine::from(format!("live tail {i}")))
++                        .collect(),
++                )
++            },
++        );
++        overlay.render(area, &mut buf);
++
++        assert_eq!(overlay.view.scroll_offset, frozen_offset);
++        assert!(overlay.view.max_scroll_offset() > frozen_offset);
++        assert!(buffer_to_text(&buf, area).contains("lines below"));
++    }
++
+     #[test]
+     fn transcript_overlay_insert_preserves_cached_cell_heights() {
+         let height_calls = Arc::new(AtomicUsize::new(0));
+@@ -1451,6 +1571,7 @@ mod tests {
+ 
+         // Prime layout so last_content_height is populated and paging uses the real content height.
+         let mut buf = Buffer::empty(area);
++        overlay.view.set_follow_tail(false);
+         overlay.view.scroll_offset = 0;
+         overlay.render(area, &mut buf);
+         let page_height = overlay.view.page_height(area);
+diff --git a/codex-rs/tui/src/snapshots/codex_tui__pager_overlay__tests__transcript_overlay_apply_patch_scroll_vt100.snap b/codex-rs/tui/src/snapshots/codex_tui__pager_overlay__tests__transcript_overlay_apply_patch_scroll_vt100.snap
+index 1f086e8..ea75173 100644
+--- a/codex-rs/tui/src/snapshots/codex_tui__pager_overlay__tests__transcript_overlay_apply_patch_scroll_vt100.snap
++++ b/codex-rs/tui/src/snapshots/codex_tui__pager_overlay__tests__transcript_overlay_apply_patch_scroll_vt100.snap
+@@ -10,6 +10,6 @@ expression: snapshot
+ • Added foo.txt (+2 -0)
+     1 +hello
+     2 +world
+-─────────────────────────────────────────────────────────────────────────── 0% ─
++─────────────────────────────────────────────────────────── ↓ 7 lines below  0%
+  ↑/↓ to scroll   pgup/pgdn to page   home/end to jump
+  q to quit   esc to edit prev

@@ -1,9 +1,11 @@
 param(
-    [string]$CodexSource = (Join-Path (Split-Path -Parent $PSScriptRoot) ".research\codex-rust-v0.145.0\codex-rs"),
+    [string]$CodexSource = (Join-Path (Split-Path -Parent $PSScriptRoot) ".build\codex-rust-v0.145.0\codex-rs"),
+    [string]$CargoTarget = "",
     [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath("UserProfile")) ".local\share\simplerouter\simplerouter-codex"),
     [ValidateSet("dev-small", "release")]
     [string]$Profile = "release",
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$RefreshSource
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,8 +14,21 @@ if (-not ($IsWindows -or $env:OS -eq "Windows_NT")) {
     throw "This script builds the Windows Codex companion bundle."
 }
 
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$defaultSourceRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot ".build\codex-rust-v0.145.0"))
+$defaultCodexSource = Join-Path $defaultSourceRoot "codex-rs"
 $codexSourcePath = [System.IO.Path]::GetFullPath($CodexSource)
 $cargoManifest = Join-Path $codexSourcePath "Cargo.toml"
+
+if ($RefreshSource -and $codexSourcePath -ne $defaultCodexSource) {
+    throw "-RefreshSource can only be used with the default generated Codex source."
+}
+if ($RefreshSource -or -not (Test-Path -LiteralPath $cargoManifest -PathType Leaf)) {
+    if ($codexSourcePath -ne $defaultCodexSource) {
+        throw "Codex Rust workspace not found at $codexSourcePath"
+    }
+    & (Join-Path $PSScriptRoot "prepare_codex_companion.ps1") -SourceRoot $defaultSourceRoot -Refresh:$RefreshSource
+}
 if (-not (Test-Path -LiteralPath $cargoManifest -PathType Leaf)) {
     throw "Codex Rust workspace not found at $codexSourcePath"
 }
@@ -26,10 +41,23 @@ if (-not (Test-Path -LiteralPath $cargo -PathType Leaf)) {
     throw "Could not find cargo. Install Rust or open a terminal with cargo on PATH."
 }
 
+$targetRoot = if ($CargoTarget) {
+    [System.IO.Path]::GetFullPath($CargoTarget)
+} elseif ($env:CARGO_TARGET_DIR) {
+    if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+        [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $codexSourcePath $env:CARGO_TARGET_DIR))
+    }
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $repoRoot ".build\codex-target"))
+}
+
 if (-not $SkipBuild) {
+    New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
     Push-Location $codexSourcePath
     try {
-        & $cargo build --profile $Profile `
+        & $cargo build --target-dir $targetRoot --profile $Profile `
             --package codex-cli --bin codex `
             --package codex-windows-sandbox --bin codex-command-runner --bin codex-windows-sandbox-setup
         if ($LASTEXITCODE -ne 0) {
@@ -38,16 +66,6 @@ if (-not $SkipBuild) {
     } finally {
         Pop-Location
     }
-}
-
-$targetRoot = if ($env:CARGO_TARGET_DIR) {
-    if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
-        $env:CARGO_TARGET_DIR
-    } else {
-        Join-Path $codexSourcePath $env:CARGO_TARGET_DIR
-    }
-} else {
-    Join-Path $codexSourcePath "target"
 }
 $outputDir = Join-Path $targetRoot $Profile
 $sources = @(
