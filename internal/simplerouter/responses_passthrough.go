@@ -1,6 +1,7 @@
 package simplerouter
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -224,19 +225,45 @@ func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, 
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
-	buffer := make([]byte, 32*1024)
-	for {
-		n, readErr := resp.Body.Read(buffer)
-		if n > 0 {
-			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
-				return
+	writeBlocks := func(blocks [][]byte) bool {
+		for _, block := range blocks {
+			if len(block) == 0 {
+				continue
 			}
-			if flusher != nil {
-				flusher.Flush()
+			if _, err := w.Write(block); err != nil {
+				return false
+			}
+		}
+		if len(blocks) > 0 && flusher != nil {
+			flusher.Flush()
+		}
+		return true
+	}
+	filter := newReasoningReplayFilter()
+	reader := bufio.NewReaderSize(resp.Body, 32*1024)
+	var block []byte
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			block = append(block, line...)
+			if isBlankSSELine(line) {
+				if !writeBlocks(filter.processBlock(block)) {
+					return
+				}
+				block = nil
 			}
 		}
 		if readErr != nil {
+			if len(block) > 0 && !writeBlocks(filter.processBlock(block)) {
+				return
+			}
+			writeBlocks(filter.finish())
 			return
 		}
 	}
+}
+
+func isBlankSSELine(line []byte) bool {
+	trimmed := bytes.TrimSuffix(bytes.TrimSuffix(line, []byte("\n")), []byte("\r"))
+	return len(trimmed) == 0
 }

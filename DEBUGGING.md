@@ -1,5 +1,26 @@
 # Debugging SimpleRouter CLI Patches
 
+## OpenRouter /responses: server-tools reasoning replay
+
+When a `/responses` request carries a server-side tool such as `web_search`,
+OpenRouter routes it through its server-tools wrapper (visible as a parent
+generation with `router: "server-tools"` spawning the inference child). As of
+2026-08-03 that wrapper re-emits the entire reasoning text a second time: the
+`response.reasoning_text.delta` stream ends with one delta replaying everything
+already streamed, and the `reasoning_text.done` / `content_part.done` /
+`output_item.done` / `response.completed` artifacts carry the doubled string.
+`responses_passthrough.go` now filters this (`responses_reasoning_dedup.go`);
+clean streams pass through byte-for-byte. To re-check upstream behavior, POST a
+captured Codex request (it includes `web_search`) directly to
+`https://openrouter.ai/api/v1/responses` and test whether the concatenated
+reasoning deltas satisfy first-half == second-half.
+
+Related metric trap: for these server-tools children the OpenRouter dashboard's
+generation_time includes the provider time-to-first-token, so its displayed
+throughput underestimates the decode rate; the parent generation's
+generation_time is the client-facing decode window and matches the patched
+TUI's tok/s (native output tokens / first-to-last output delta).
+
 ## Codex companion: know the source of truth
 
 Current `main` launches Codex. Its patched companion is represented by the
