@@ -43,6 +43,8 @@ For a failure inside a multi-edit feature, create diagnostic copies with `live-t
 
 `claude_capture_test.go` and `claude_stream_probe_test.go` invoke `claude -p` with JSON/stream-JSON output. They are useful for request and SSE inspection, but they do **not** exercise the interactive Ink terminal renderer. A response can be fully received while an exception in an interactive metrics callback prevents the assistant message from appearing.
 
+For OpenRouter, set `SIMPLEROUTER_OPENROUTER_TRACE` to a file path before launching SimpleRouter to append each raw upstream SSE JSON event before translation. This proves what reached the proxy, not what Claude rendered. Trace files can contain reasoning, text, and tool data; keep them in a private scratch location and remove them after diagnosis.
+
 For an interactive rendering failure on Windows:
 
 1. Launch the exact patched copy under a real ConPTY. Redirected pipes and custom terminal bridges are not equivalent to Claude's TUI path.

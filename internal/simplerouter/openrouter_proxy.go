@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -127,6 +128,13 @@ func (p *openRouterProxy) handleMessages(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
 		tr := newOpenRouterStreamTranslator(w, flusher, req.Model)
+		if tracePath := strings.TrimSpace(os.Getenv("SIMPLEROUTER_OPENROUTER_TRACE")); tracePath != "" {
+			if trace, traceErr := os.OpenFile(tracePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); traceErr == nil {
+				defer trace.Close()
+				fmt.Fprintf(trace, "\n# response model=%s at=%s\n", req.Model, time.Now().Format(time.RFC3339Nano))
+				tr.trace = trace
+			}
+		}
 		if err := readCompatSSE(resp.Body, tr.onEvent); err != nil && !errors.Is(err, errStreamAborted) {
 			tr.emitError("api_error", err.Error())
 		}
@@ -698,6 +706,7 @@ func openRouterStopReason(finish string, sawTool bool) string {
 // SSE events, streaming reasoning live through a thinkingStreamer.
 type openRouterStreamTranslator struct {
 	out        *sseWriter
+	trace      io.Writer
 	model      string
 	msgID      string
 	started    bool
@@ -748,6 +757,9 @@ func newOpenRouterStreamTranslator(w io.Writer, flush http.Flusher, model string
 }
 
 func (t *openRouterStreamTranslator) onEvent(raw json.RawMessage) error {
+	if t.trace != nil {
+		fmt.Fprintf(t.trace, "%s\n", raw)
+	}
 	var chunk openRouterChatResponse
 	if err := json.Unmarshal(raw, &chunk); err != nil {
 		return err
