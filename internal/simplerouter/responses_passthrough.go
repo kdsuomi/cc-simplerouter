@@ -13,8 +13,10 @@ import (
 )
 
 type responsesPassthroughOptions struct {
-	Label       string
-	ProviderTag string
+	Label                string
+	ProviderTag          string
+	ReasoningEffortMap   map[string]string
+	TranslateCustomTools bool
 }
 
 type responsesPassthroughProxy struct {
@@ -77,6 +79,18 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 	}
 	model, _ := json.Marshal(p.model)
 	request["model"] = model
+	if err := rewriteResponsesReasoningEffort(request, p.options.ReasoningEffortMap); err != nil {
+		writeResponsesError(w, http.StatusInternalServerError, "api_error", "rewrite reasoning effort: "+err.Error())
+		return
+	}
+	var customTools map[string]struct{}
+	if p.options.TranslateCustomTools {
+		customTools, err = translateResponsesCustomTools(request)
+		if err != nil {
+			writeResponsesError(w, http.StatusInternalServerError, "api_error", "translate custom tools: "+err.Error())
+			return
+		}
+	}
 	if tag := strings.TrimSpace(p.options.ProviderTag); tag != "" {
 		var provider map[string]any
 		if raw := request["provider"]; len(raw) > 0 {
@@ -95,7 +109,7 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 			writeResponsesError(w, http.StatusInternalServerError, "api_error", "encode JSON-object fallback: "+fallbackErr.Error())
 			return
 		} else if changed {
-			p.forwardResponsesPayload(w, r, request, fallbackPayload)
+			p.forwardResponsesPayload(w, r, request, fallbackPayload, customTools)
 			return
 		}
 	}
@@ -105,10 +119,35 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 		return
 	}
 
-	p.forwardResponsesPayload(w, r, request, payload)
+	p.forwardResponsesPayload(w, r, request, payload, customTools)
 }
 
-func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWriter, r *http.Request, request map[string]json.RawMessage, payload []byte) {
+func rewriteResponsesReasoningEffort(request map[string]json.RawMessage, mapping map[string]string) error {
+	if len(mapping) == 0 {
+		return nil
+	}
+	var reasoning map[string]json.RawMessage
+	if err := json.Unmarshal(request["reasoning"], &reasoning); err != nil || reasoning == nil {
+		return nil
+	}
+	var effort string
+	if err := json.Unmarshal(reasoning["effort"], &effort); err != nil {
+		return nil
+	}
+	mapped := mappedReasoningEffort(effort, mapping)
+	if mapped == "" || mapped == effort {
+		return nil
+	}
+	encodedEffort, err := json.Marshal(mapped)
+	if err != nil {
+		return err
+	}
+	reasoning["effort"] = encodedEffort
+	request["reasoning"], err = json.Marshal(reasoning)
+	return err
+}
+
+func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWriter, r *http.Request, request map[string]json.RawMessage, payload []byte, customTools map[string]struct{}) {
 	resp, err := p.sendResponsesRequest(r, payload)
 	if err != nil {
 		writeResponsesError(w, http.StatusBadGateway, "api_error", p.options.Label+" request failed: "+err.Error())
@@ -142,7 +181,7 @@ func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWrite
 		relayResponsesUpstreamError(w, resp, p.options.Label)
 		return
 	}
-	p.relayResponsesStream(w, resp)
+	p.relayResponsesStream(w, resp, customTools)
 }
 
 func (p *responsesPassthroughProxy) sendResponsesRequest(r *http.Request, payload []byte) (*http.Response, error) {
@@ -207,7 +246,7 @@ func jsonObjectFallbackPayload(request map[string]json.RawMessage) ([]byte, bool
 	return payload, true, err
 }
 
-func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, resp *http.Response) {
+func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, resp *http.Response, customTools map[string]struct{}) {
 	for _, name := range []string{
 		"Content-Type",
 		"Cache-Control",
@@ -240,6 +279,7 @@ func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, 
 		return true
 	}
 	filter := newReasoningReplayFilter()
+	customToolTranslator := newResponsesCustomToolStreamTranslator(customTools)
 	reader := bufio.NewReaderSize(resp.Body, 32*1024)
 	var block []byte
 	for {
@@ -247,15 +287,21 @@ func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, 
 		if len(line) > 0 {
 			block = append(block, line...)
 			if isBlankSSELine(line) {
-				if !writeBlocks(filter.processBlock(block)) {
-					return
+				for _, translated := range customToolTranslator.processBlock(block) {
+					if !writeBlocks(filter.processBlock(translated)) {
+						return
+					}
 				}
 				block = nil
 			}
 		}
 		if readErr != nil {
-			if len(block) > 0 && !writeBlocks(filter.processBlock(block)) {
-				return
+			if len(block) > 0 {
+				for _, translated := range customToolTranslator.processBlock(block) {
+					if !writeBlocks(filter.processBlock(translated)) {
+						return
+					}
+				}
 			}
 			writeBlocks(filter.finish())
 			return

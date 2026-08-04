@@ -102,7 +102,7 @@ uses a different protocol.
 | OpenAI | `POST https://api.openai.com/v1/responses` | Direct |
 | DeepSeek | `POST https://api.deepseek.com/chat/completions` | Loopback Responses-to-Chat translator |
 | Z.AI | `POST https://api.z.ai/api/paas/v4/chat/completions` | Loopback Responses-to-Chat translator |
-| Meta Model API | `POST https://api.meta.ai/v1/responses` | Direct |
+| Meta Model API | `POST https://api.meta.ai/v1/responses` | Loopback Responses compatibility proxy |
 
 The loopback servers bind to `127.0.0.1`, forward the selected session key, and
 shut down with Codex.
@@ -163,6 +163,17 @@ DeepSeek receives its documented `thinking` object, compatible reasoning-effort
 mapping, and streamed usage request. Z.AI receives `thinking.clear_thinking:
 false`, `tool_stream: true`, and its documented reasoning effort, including
 `none`.
+
+The Meta adapter preserves the native Responses protocol and server-managed
+reasoning replay. It caps Codex-only `max` and `ultra` reasoning levels at
+Meta's documented `xhigh` maximum. Meta's current Codex endpoint accepts
+function tools but rejects Codex 0.145's freeform `custom` tools, so the proxy
+presents them as equivalent function tools upstream and translates calls and
+results back to Codex's custom-tool format. It also disables strict validation
+on function declarations whose optional parameters Meta would otherwise reject,
+and omits Codex's optional `tool_search.limit` field so Meta can validate that
+built-in tool's required-only schema. Codex's unsupported
+`web_search.search_content_types` hint is removed while web search remains enabled.
 
 ## Model selection
 

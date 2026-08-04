@@ -20,6 +20,7 @@ func withTestHome(t *testing.T) string {
 	oldFindCodex := findCodexFn
 	oldPrepareCatalog := prepareCodexModelCatalogFn
 	oldStartResponsesPassthroughProxy := startResponsesPassthroughProxyFn
+	oldStartMetaResponsesProxy := startMetaResponsesProxyFn
 	userHomeDir = func() (string, error) { return dir, nil }
 	findCodexFn = func() (string, error) { return filepath.Join(dir, "codex-test"), nil }
 	prepareCodexModelCatalogFn = func(_ string, _ Model, _ bool) (string, func(), error) {
@@ -28,11 +29,15 @@ func withTestHome(t *testing.T) string {
 	startResponsesPassthroughProxyFn = func(upstreamBase, _ string, _ *http.Client, _ responsesPassthroughOptions) (string, func(), error) {
 		return upstreamBase, func() {}, nil
 	}
+	startMetaResponsesProxyFn = func(upstreamBase, _ string, _ *http.Client) (string, func(), error) {
+		return upstreamBase, func() {}, nil
+	}
 	t.Cleanup(func() {
 		userHomeDir = old
 		findCodexFn = oldFindCodex
 		prepareCodexModelCatalogFn = oldPrepareCatalog
 		startResponsesPassthroughProxyFn = oldStartResponsesPassthroughProxy
+		startMetaResponsesProxyFn = oldStartMetaResponsesProxy
 	})
 	return dir
 }
@@ -781,6 +786,59 @@ func TestOpenAILaunchesAgainstNativeResponses(t *testing.T) {
 	}
 	if !slices.Equal(spec.Args, codexArgs("gpt-5.5", srv.URL, filepath.Join(home, "models.json"), false, nil, nil)) {
 		t.Fatalf("Args = %v", spec.Args)
+	}
+}
+
+func TestMetaLaunchesThroughResponsesCompatibilityProxy(t *testing.T) {
+	home := withTestHome(t)
+	if err := saveConfig(Config{Provider: providerMeta, MetaAPIKey: "meta-test", LastMetaModel: "muse-spark-1.1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+
+	var proxyBase, proxyModel string
+	startMetaResponsesProxyFn = func(upstreamBase, model string, _ *http.Client) (string, func(), error) {
+		proxyBase, proxyModel = upstreamBase, model
+		return "http://127.0.0.1:9393/v1", func() {}, nil
+	}
+
+	var spec launchSpec
+	stderr := &strings.Builder{}
+	a := &app{
+		stdin:       strings.NewReader("\n\n"),
+		stdout:      &strings.Builder{},
+		stderr:      stderr,
+		httpClient:  srv.Client(),
+		metaAPIBase: srv.URL,
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
+	}
+	if err := a.run(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if proxyBase != srv.URL || proxyModel != "muse-spark-1.1" {
+		t.Fatalf("Meta proxy got (%q, %q)", proxyBase, proxyModel)
+	}
+	model := curatedProviderModels(providerMeta)[0]
+	wantArgs := metaCodexArgs(model, "http://127.0.0.1:9393/v1", filepath.Join(home, "models.json"), false, nil, nil)
+	if !slices.Equal(spec.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
+	}
+	if envMap(spec.Env)[codexAPIKeyEnv] != "meta-test" {
+		t.Fatalf("session key was not forwarded")
+	}
+	if !strings.Contains(stderr.String(), "reasoning high") {
+		t.Fatalf("launch summary missing Meta reasoning level: %q", stderr.String())
 	}
 }
 

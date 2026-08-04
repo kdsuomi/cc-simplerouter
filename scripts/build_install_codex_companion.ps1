@@ -23,14 +23,27 @@ $cargoManifest = Join-Path $codexSourcePath "Cargo.toml"
 if ($RefreshSource -and $codexSourcePath -ne $defaultCodexSource) {
     throw "-RefreshSource can only be used with the default generated Codex source."
 }
-if ($RefreshSource -or -not (Test-Path -LiteralPath $cargoManifest -PathType Leaf)) {
-    if ($codexSourcePath -ne $defaultCodexSource) {
-        throw "Codex Rust workspace not found at $codexSourcePath"
-    }
+if ($codexSourcePath -eq $defaultCodexSource) {
     & (Join-Path $PSScriptRoot "prepare_codex_companion.ps1") -SourceRoot $defaultSourceRoot -Refresh:$RefreshSource
 }
 if (-not (Test-Path -LiteralPath $cargoManifest -PathType Leaf)) {
     throw "Codex Rust workspace not found at $codexSourcePath"
+}
+
+# sqlx migration checksums include line endings. Official Windows Codex state
+# databases record CRLF checksums, so never install a companion built from LF
+# migration files, including when the caller supplies a custom source checkout.
+$migrationFiles = @(Get-ChildItem -LiteralPath (Join-Path $codexSourcePath "state") -Filter "*.sql" -File -Recurse)
+if ($migrationFiles.Count -eq 0) {
+    throw "No Codex state migration files found under $codexSourcePath\state"
+}
+foreach ($migration in $migrationFiles) {
+    $bytes = [System.IO.File]::ReadAllBytes($migration.FullName)
+    for ($index = 0; $index -lt $bytes.Length; $index++) {
+        if ($bytes[$index] -eq 10 -and ($index -eq 0 -or $bytes[$index - 1] -ne 13)) {
+            throw "Codex Windows companion migration uses LF line endings: $($migration.FullName). Use a CRLF checkout; do not repair the user's SQLite migration ledger."
+        }
+    }
 }
 
 $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source

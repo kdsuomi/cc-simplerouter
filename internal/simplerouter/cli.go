@@ -49,6 +49,7 @@ var prepareCodexModelCatalogFn = prepareCodexModelCatalog
 var startGeminiResponsesProxyFn = startGeminiResponsesProxy
 var startDeepSeekResponsesProxyFn = startDeepSeekResponsesProxy
 var startZAIResponsesProxyFn = startZAIResponsesProxy
+var startMetaResponsesProxyFn = startMetaResponsesProxy
 var startResponsesPassthroughProxyFn = startResponsesPassthroughProxy
 
 func Main(args []string) int {
@@ -210,9 +211,12 @@ func (a *app) run(ctx context.Context, args []string) error {
 		defer stop()
 		baseURL = proxyURL
 	case provider == providerMeta:
-		// Meta's current Model API has a native Responses endpoint, including
-		// reasoning replay and the web_search server tool.
-		baseURL = a.metaBase()
+		proxyURL, stop, perr := startMetaResponsesProxyFn(a.metaBase(), modelID, a.httpClient)
+		if perr != nil {
+			return fmt.Errorf("start Meta Responses proxy: %w", perr)
+		}
+		defer stop()
+		baseURL = proxyURL
 	default:
 		baseURL = a.openRouterBase()
 		proxyURL, stop, perr := startResponsesPassthroughProxyFn(baseURL, modelID, a.httpClient, responsesPassthroughOptions{
@@ -234,10 +238,14 @@ func (a *app) run(ctx context.Context, args []string) error {
 
 	thinkingMode := launchThinkingMode(provider, disableThinking)
 	a.printLaunchSummary(modelID, selected.ContextLength, thinkingMode, dir, launchProviderLabel(provider, res))
+	launchArgs := codexArgs(modelID, baseURL, catalogPath, disableThinking, codexPositionals, passthrough)
+	if provider == providerMeta {
+		launchArgs = metaCodexArgs(selected, baseURL, catalogPath, disableThinking, codexPositionals, passthrough)
+	}
 	spec := launchSpec{
 		Path: codexPath,
 		Dir:  dir,
-		Args: codexArgs(modelID, baseURL, catalogPath, disableThinking, codexPositionals, passthrough),
+		Args: launchArgs,
 		Env:  buildCodexEnv(os.Environ(), key),
 	}
 	if a.runCommand != nil {
@@ -388,6 +396,9 @@ func launchProviderLabel(provider string, res pickResult) string {
 func launchThinkingMode(provider string, disableThinking bool) string {
 	if disableThinking {
 		return "disabled"
+	}
+	if provider == providerMeta {
+		return "high"
 	}
 	return "provider default"
 }

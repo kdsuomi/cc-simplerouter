@@ -22,6 +22,23 @@ upstream checkout does not discard incremental build artifacts. Pass
 `-SkipBuild` to reinstall existing outputs or `-RefreshSource` to recreate and
 repatch the generated checkout.
 
+## Windows migration line endings
+
+The Windows companion must be built with CRLF line endings in every
+`codex-rs/state/**/*.sql` migration. SQLx hashes the raw embedded migration
+bytes, including line endings, and the official Windows Codex CLI records CRLF
+checksums in the user's SQLite state databases. A companion built from LF
+migrations treats the same SQL as a modified historical migration and refuses
+to start.
+
+`prepare_codex_companion.ps1` therefore clones with `core.autocrlf=true` and
+adds a generated-checkout-only `.git/info/attributes` rule that explicitly
+materializes state SQL as CRLF. `build_install_codex_companion.ps1` checks every
+state migration before Cargo runs or any binary is installed. Do not change the
+generated Windows checkout to `core.autocrlf=false`. If the guard reports an LF
+migration, recreate the generated checkout with `-RefreshSource`; do not edit,
+delete, or rewrite the user's `state_*.sqlite` migration ledger.
+
 When changing the companion, commit the work in the generated checkout, export
 the complete series from `rust-v0.145.0` with `git format-patch --no-signature`,
 replace the files in `patches/0.145.0`, and update the expected tree in

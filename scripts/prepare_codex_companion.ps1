@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $upstreamTag = "rust-v0.145.0"
 $upstreamCommit = "25af12f7e61572b0bc18ddb1008be543b91519b0"
-$expectedTree = "7af7d58073477d66405b71a76fbb54df3d830a4d"
+$expectedTree = "194bb3a3d336de504b8a97521501b1f099a3e055"
 $patchRoot = Join-Path $repoRoot "codex\patches\0.145.0"
 $defaultBuildRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot ".build"))
 $sourcePath = [System.IO.Path]::GetFullPath($SourceRoot)
@@ -43,6 +43,24 @@ function Test-PreparedSource {
         return $false
     }
 
+    $autoCrlf = (& $git -C $sourcePath config --bool core.autocrlf 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $autoCrlf.Trim() -ne "true") {
+        return $false
+    }
+
+    $migrationFiles = @(Get-ChildItem -LiteralPath (Join-Path $sourcePath "codex-rs\state") -Filter "*.sql" -File -Recurse)
+    if ($migrationFiles.Count -eq 0) {
+        return $false
+    }
+    foreach ($migration in $migrationFiles) {
+        $bytes = [System.IO.File]::ReadAllBytes($migration.FullName)
+        for ($index = 0; $index -lt $bytes.Length; $index++) {
+            if ($bytes[$index] -eq 10 -and ($index -eq 0 -or $bytes[$index - 1] -ne 13)) {
+                return $false
+            }
+        }
+    }
+
     return $tree.Trim() -eq $expectedTree
 }
 
@@ -64,9 +82,32 @@ if (Test-Path -LiteralPath $sourcePath) {
 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $sourcePath) | Out-Null
-& $git clone --branch $upstreamTag --depth 1 --single-branch --config core.autocrlf=false $Repository $sourcePath
+# sqlx hashes the raw migration bytes embedded at compile time. The official
+# Windows Codex build uses CRLF migrations, so the Windows companion must do the
+# same or it cannot open the user's existing state databases.
+& $git clone --branch $upstreamTag --depth 1 --single-branch --config core.autocrlf=true $Repository $sourcePath
 if ($LASTEXITCODE -ne 0) {
     throw "Could not clone $Repository at $upstreamTag"
+}
+
+# Make the migration line endings explicit instead of relying only on Git's
+# text-file heuristic. info/attributes affects the generated checkout without
+# changing the pinned upstream tree or the exported SimpleRouter patch series.
+$infoAttributes = Join-Path $sourcePath ".git\info\attributes"
+@(
+    "# SimpleRouter Windows companion build invariant"
+    "codex-rs/state/**/*.sql text eol=crlf"
+) | Set-Content -LiteralPath $infoAttributes -Encoding ASCII
+& $git -C $sourcePath checkout --force HEAD -- "codex-rs/state"
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not materialize Codex state migrations with CRLF line endings"
+}
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$migrationFiles = @(Get-ChildItem -LiteralPath (Join-Path $sourcePath "codex-rs\state") -Filter "*.sql" -File -Recurse)
+foreach ($migration in $migrationFiles) {
+    $content = [System.IO.File]::ReadAllText($migration.FullName)
+    $crlfContent = $content.Replace("`r`n", "`n").Replace("`n", "`r`n")
+    [System.IO.File]::WriteAllText($migration.FullName, $crlfContent, $utf8NoBom)
 }
 
 $actualBase = (& $git -C $sourcePath rev-parse --verify HEAD).Trim()

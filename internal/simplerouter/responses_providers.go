@@ -39,6 +39,18 @@ func startZAIResponsesProxy(upstreamBase, model string, httpClient *http.Client,
 	return startResponsesChatProxy(upstreamBase, model, httpClient, zaiResponsesOptions(disableReasoning))
 }
 
+func startMetaResponsesProxy(upstreamBase, model string, httpClient *http.Client) (string, func(), error) {
+	return startResponsesPassthroughProxy(upstreamBase, model, httpClient, metaResponsesOptions())
+}
+
+func metaResponsesOptions() responsesPassthroughOptions {
+	return responsesPassthroughOptions{
+		Label:                "Meta",
+		ReasoningEffortMap:   map[string]string{"max": "xhigh", "ultra": "xhigh"},
+		TranslateCustomTools: true,
+	}
+}
+
 func zaiResponsesOptions(disableReasoning bool) responsesChatProxyOptions {
 	thinking := map[string]any{"type": "disabled"}
 	if !disableReasoning {

@@ -82,7 +82,16 @@ func curatedProviderModels(provider string) []Model {
 		}
 	case providerMeta:
 		models = []Model{
-			{ID: "muse-spark-1.1", Name: "Muse Spark 1.1", ContextLength: 1_048_576, SupportedParameters: []string{"tools", "reasoning"}},
+			{
+				ID:                        "muse-spark-1.1",
+				Name:                      "Muse Spark 1.1",
+				ContextLength:             1_048_576,
+				SupportedParameters:       []string{"tools", "reasoning"},
+				SupportedReasoningEfforts: []string{"none", "minimal", "low", "medium", "high", "xhigh"},
+				DefaultReasoningEffort:    "high",
+				DefaultReasoningSummary:   "auto",
+				AutoCompactTokenLimit:     900_000,
+			},
 		}
 	}
 	return append([]Model(nil), models...)

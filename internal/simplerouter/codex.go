@@ -196,6 +196,11 @@ func buildCodexModelCatalog(raw []byte, model Model, supportsReasoning bool) ([]
 		routed["default_reasoning_level"] = nil
 		routed["supported_reasoning_levels"] = []any{}
 		routed["default_reasoning_summary"] = "none"
+	} else {
+		applyModelReasoningMetadata(routed, model)
+	}
+	if model.AutoCompactTokenLimit > 0 {
+		routed["auto_compact_token_limit"] = model.AutoCompactTokenLimit
 	}
 
 	out, err := json.MarshalIndent(codexModelCatalog{Models: []map[string]any{routed}}, "", "  ")
@@ -205,12 +210,95 @@ func buildCodexModelCatalog(raw []byte, model Model, supportsReasoning bool) ([]
 	return append(out, '\n'), nil
 }
 
+func applyModelReasoningMetadata(routed map[string]any, model Model) {
+	if len(model.SupportedReasoningEfforts) > 0 {
+		descriptions := map[string]string{}
+		if levels, ok := routed["supported_reasoning_levels"].([]any); ok {
+			for _, raw := range levels {
+				level, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				effort, _ := level["effort"].(string)
+				description, _ := level["description"].(string)
+				if effort != "" && description != "" {
+					descriptions[effort] = description
+				}
+			}
+		}
+
+		levels := make([]any, 0, len(model.SupportedReasoningEfforts))
+		for _, effort := range model.SupportedReasoningEfforts {
+			effort = strings.ToLower(strings.TrimSpace(effort))
+			if effort == "" {
+				continue
+			}
+			description := descriptions[effort]
+			if description == "" {
+				description = reasoningEffortDescription(effort)
+			}
+			levels = append(levels, map[string]any{
+				"effort":      effort,
+				"description": description,
+			})
+		}
+		routed["supported_reasoning_levels"] = levels
+	}
+	if effort := strings.ToLower(strings.TrimSpace(model.DefaultReasoningEffort)); effort != "" {
+		routed["default_reasoning_level"] = effort
+	}
+	if summary := strings.ToLower(strings.TrimSpace(model.DefaultReasoningSummary)); summary != "" {
+		routed["default_reasoning_summary"] = summary
+	}
+}
+
+func reasoningEffortDescription(effort string) string {
+	switch effort {
+	case "none":
+		return "Disables reasoning"
+	case "minimal":
+		return "Minimal reasoning for the fastest responses"
+	case "low":
+		return "Fast responses with lighter reasoning"
+	case "medium":
+		return "Balances speed and reasoning depth for everyday tasks"
+	case "high":
+		return "Greater reasoning depth for complex problems"
+	case "xhigh":
+		return "Extra high reasoning depth for complex problems"
+	default:
+		return strings.ToUpper(effort[:1]) + effort[1:] + " reasoning"
+	}
+}
+
 func buildCodexEnv(base []string, key string) []string {
 	env := envWithout(base, codexAPIKeyEnv)
 	return append(env, codexAPIKeyEnv+"="+key)
 }
 
 func codexArgs(model, baseURL, catalogPath string, disableThinking bool, positionals, passthrough []string) []string {
+	return codexArgsWithOverrides(model, baseURL, catalogPath, disableThinking, positionals, passthrough, codexSessionOverrides{})
+}
+
+type codexSessionOverrides struct {
+	ReasoningEffort            string
+	ReasoningSummary           string
+	ContextWindow              int
+	AutoCompactTokenLimit      int
+	SupportsReasoningSummaries bool
+}
+
+func metaCodexArgs(model Model, baseURL, catalogPath string, disableThinking bool, positionals, passthrough []string) []string {
+	return codexArgsWithOverrides(model.ID, baseURL, catalogPath, disableThinking, positionals, passthrough, codexSessionOverrides{
+		ReasoningEffort:            model.DefaultReasoningEffort,
+		ReasoningSummary:           model.DefaultReasoningSummary,
+		ContextWindow:              model.ContextLength,
+		AutoCompactTokenLimit:      model.AutoCompactTokenLimit,
+		SupportsReasoningSummaries: true,
+	})
+}
+
+func codexArgsWithOverrides(model, baseURL, catalogPath string, disableThinking bool, positionals, passthrough []string, overrides codexSessionOverrides) []string {
 	provider := fmt.Sprintf(
 		`{ name = %s, base_url = %s, env_key = %s, wire_api = "responses", requires_openai_auth = false }`,
 		tomlString("simplerouter"),
@@ -229,11 +317,27 @@ func codexArgs(model, baseURL, catalogPath string, disableThinking bool, positio
 		// here prevents a global Fast-mode preference from leaking into this child.
 		"-c", "service_tier=" + tomlString(codexDefaultServiceTierOverride),
 	}
+	if overrides.ContextWindow > 0 {
+		args = append(args, "-c", fmt.Sprintf("model_context_window=%d", overrides.ContextWindow))
+	}
+	if overrides.AutoCompactTokenLimit > 0 {
+		args = append(args, "-c", fmt.Sprintf("model_auto_compact_token_limit=%d", overrides.AutoCompactTokenLimit))
+	}
+	if overrides.SupportsReasoningSummaries {
+		args = append(args, "-c", `model_supports_reasoning_summaries=true`)
+	}
 	if disableThinking {
 		args = append(args,
 			"-c", `model_reasoning_effort="none"`,
 			"-c", `model_reasoning_summary="none"`,
 		)
+	} else {
+		if effort := strings.TrimSpace(overrides.ReasoningEffort); effort != "" {
+			args = append(args, "-c", "model_reasoning_effort="+tomlString(effort))
+		}
+		if summary := strings.TrimSpace(overrides.ReasoningSummary); summary != "" {
+			args = append(args, "-c", "model_reasoning_summary="+tomlString(summary))
+		}
 	}
 	args = append(args, passthrough...)
 	if prompt := strings.TrimSpace(strings.Join(positionals, " ")); prompt != "" {

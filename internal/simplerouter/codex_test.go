@@ -109,6 +109,54 @@ func TestBuildCodexModelCatalogDisablesUnsupportedReasoning(t *testing.T) {
 	}
 }
 
+func TestBuildCodexModelCatalogAppliesProviderReasoningMetadata(t *testing.T) {
+	source := []byte(`{"models":[{
+	  "slug":"template",
+	  "apply_patch_tool_type":"freeform",
+	  "supports_parallel_tool_calls":true,
+	  "context_window":272000,
+	  "default_reasoning_level":"low",
+	  "supported_reasoning_levels":[
+	    {"effort":"low","description":"Low"},
+	    {"effort":"medium","description":"Medium"},
+	    {"effort":"high","description":"High"},
+	    {"effort":"xhigh","description":"Extra high"},
+	    {"effort":"max","description":"Maximum"},
+	    {"effort":"ultra","description":"Ultra"}
+	  ],
+	  "default_reasoning_summary":"none"
+	}]}`)
+	raw, err := buildCodexModelCatalog(source, Model{
+		ID:                        "muse-spark-1.1",
+		SupportedReasoningEfforts: []string{"none", "minimal", "low", "medium", "high", "xhigh"},
+		DefaultReasoningEffort:    "high",
+		DefaultReasoningSummary:   "auto",
+		AutoCompactTokenLimit:     900_000,
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got codexModelCatalog
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	model := got.Models[0]
+	levels := model["supported_reasoning_levels"].([]any)
+	efforts := make([]string, 0, len(levels))
+	for _, rawLevel := range levels {
+		efforts = append(efforts, rawLevel.(map[string]any)["effort"].(string))
+	}
+	if want := []string{"none", "minimal", "low", "medium", "high", "xhigh"}; !slices.Equal(efforts, want) {
+		t.Fatalf("reasoning efforts = %v, want %v", efforts, want)
+	}
+	if model["default_reasoning_level"] != "high" || model["default_reasoning_summary"] != "auto" {
+		t.Fatalf("reasoning defaults = %#v/%#v", model["default_reasoning_level"], model["default_reasoning_summary"])
+	}
+	if intValue(model["auto_compact_token_limit"]) != 900_000 {
+		t.Fatalf("auto compact limit = %#v", model["auto_compact_token_limit"])
+	}
+}
+
 func TestCodexArgsUseSessionProviderAndPreservePrompt(t *testing.T) {
 	args := codexArgs(
 		"vendor/model",
@@ -138,6 +186,35 @@ func TestCodexArgsUseSessionProviderAndPreservePrompt(t *testing.T) {
 	}
 	if args[len(args)-1] != "fix the tests" {
 		t.Fatalf("prompt = %q, want one final positional", args[len(args)-1])
+	}
+}
+
+func TestMetaCodexArgsApplyDocumentedSessionOverrides(t *testing.T) {
+	model := curatedProviderModels(providerMeta)[0]
+	args := metaCodexArgs(
+		model,
+		"http://127.0.0.1:8080/v1",
+		`C:\Temp\models.json`,
+		false,
+		nil,
+		nil,
+	)
+	joined := strings.Join(args, "\n")
+	for _, want := range []string{
+		`model_reasoning_effort="high"`,
+		`model_reasoning_summary="auto"`,
+		`model_context_window=1048576`,
+		`model_auto_compact_token_limit=900000`,
+		`model_supports_reasoning_summaries=true`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("Meta Codex args missing %q: %v", want, args)
+		}
+	}
+
+	disabled := strings.Join(metaCodexArgs(model, "http://127.0.0.1:8080/v1", `C:\Temp\models.json`, true, nil, nil), "\n")
+	if !strings.Contains(disabled, `model_reasoning_effort="none"`) || strings.Contains(disabled, `model_reasoning_effort="high"`) {
+		t.Fatalf("disabled Meta reasoning args = %s", disabled)
 	}
 }
 
@@ -205,14 +282,14 @@ func TestPrepareCodexModelCatalogWithInstalledCodex(t *testing.T) {
 	}
 }
 
-func TestInstalledCodexExecUsesGeneratedResponsesProvider(t *testing.T) {
+func TestInstalledCodexExecUsesGeneratedMetaResponsesProvider(t *testing.T) {
 	codexPath, err := findCodex()
 	if err != nil {
 		t.Skip(err)
 	}
 	requests := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/responses" {
+		if r.URL.Path != "/responses" {
 			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
 			return
 		}
@@ -248,11 +325,16 @@ func TestInstalledCodexExecUsesGeneratedResponsesProvider(t *testing.T) {
 		}, "\n"))
 	}))
 	defer server.Close()
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(
+		server.URL,
+		"muse-spark-1.1",
+		server.Client(),
+		metaResponsesOptions(),
+	))
+	defer proxy.Close()
 
-	catalogPath, cleanup, err := prepareCodexModelCatalog(codexPath, Model{
-		ID:            "test/provider-model",
-		ContextLength: 512_000,
-	}, true)
+	model := curatedProviderModels(providerMeta)[0]
+	catalogPath, cleanup, err := prepareCodexModelCatalog(codexPath, model, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,9 +349,9 @@ func TestInstalledCodexExecUsesGeneratedResponsesProvider(t *testing.T) {
 		"--color", "never",
 		"-c", `service_tier="fast"`,
 	}
-	args = append(args, codexArgs(
-		"test/provider-model",
-		server.URL+"/v1",
+	args = append(args, metaCodexArgs(
+		model,
+		proxy.URL+"/v1",
 		catalogPath,
 		false,
 		[]string{"Reply with OK and do not call tools."},
@@ -299,8 +381,12 @@ func TestInstalledCodexExecUsesGeneratedResponsesProvider(t *testing.T) {
 		if err := json.Unmarshal(raw, &body); err != nil {
 			t.Fatal(err)
 		}
-		if body["model"] != "test/provider-model" || body["stream"] != true {
+		if body["model"] != "muse-spark-1.1" || body["stream"] != true {
 			t.Fatalf("unexpected Responses request: %#v", body)
+		}
+		reasoning, _ := body["reasoning"].(map[string]any)
+		if reasoning["effort"] != "high" || reasoning["summary"] != "auto" {
+			t.Fatalf("unexpected Meta reasoning controls: %#v", reasoning)
 		}
 		if serviceTier, ok := body["service_tier"]; ok {
 			t.Fatalf("Responses request included service_tier = %#v", serviceTier)
@@ -310,13 +396,29 @@ func TestInstalledCodexExecUsesGeneratedResponsesProvider(t *testing.T) {
 			t.Fatal("Codex request did not include its tools")
 		}
 		var toolKinds []string
+		foundApplyPatch := false
 		for _, rawTool := range tools {
 			tool, _ := rawTool.(map[string]any)
 			toolKinds = append(toolKinds, fmt.Sprint(tool["type"])+":"+fmt.Sprint(tool["name"]))
+			if tool["type"] == "function" && tool["name"] == "apply_patch" {
+				foundApplyPatch = true
+				if _, found := tool["format"]; found {
+					t.Fatalf("Meta request retained apply_patch grammar format: %#v", tool)
+				}
+				parameters, _ := tool["parameters"].(map[string]any)
+				properties, _ := parameters["properties"].(map[string]any)
+				input, _ := properties["input"].(map[string]any)
+				if input["type"] != "string" || parameters["additionalProperties"] != false {
+					t.Fatalf("Meta apply_patch function schema = %#v", parameters)
+				}
+			}
 			if tool["type"] == "namespace" || tool["type"] == "web_search" || tool["type"] == "custom" {
 				encoded, _ := json.Marshal(tool)
 				t.Logf("captured special tool: %s", encoded)
 			}
+		}
+		if !foundApplyPatch {
+			t.Fatalf("Meta request did not include translated apply_patch function: %s", strings.Join(toolKinds, ", "))
 		}
 		t.Logf("captured Codex tools: %s", strings.Join(toolKinds, ", "))
 	default:

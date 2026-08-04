@@ -45,6 +45,16 @@ func TestZAIResponsesOptions(t *testing.T) {
 	}
 }
 
+func TestMetaResponsesOptions(t *testing.T) {
+	got := metaResponsesOptions()
+	if got.Label != "Meta" || !got.TranslateCustomTools {
+		t.Fatalf("Meta options = %+v", got)
+	}
+	if got.ReasoningEffortMap["max"] != "xhigh" || got.ReasoningEffortMap["ultra"] != "xhigh" {
+		t.Fatalf("Meta effort map = %#v", got.ReasoningEffortMap)
+	}
+}
+
 func TestDeepSeekResponsesRequestMatchesCurrentAPI(t *testing.T) {
 	body := captureProviderChatRequest(t, "deepseek-v4-flash", deepSeekResponsesOptions(false), "low")
 

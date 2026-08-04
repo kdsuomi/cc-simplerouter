@@ -52,6 +52,25 @@ real work, inspect `git diff --name-only HEAD`, the committed patch range, and
 the final tree hash. Export patches from commits, never from a noisy working
 tree.
 
+### Windows SQLx migration checksum failures
+
+The Windows companion checkout must keep every `codex-rs/state/**/*.sql`
+migration as CRLF. SQLx embeds and hashes the raw file bytes, so LF and CRLF
+versions of otherwise identical SQL have different migration checksums. The
+official Windows Codex CLI creates state databases with CRLF checksums; an LF
+companion then fails at startup with `migration N was previously applied but
+has been modified` even though SQLite integrity is healthy.
+
+The preparation script enforces `core.autocrlf=true` plus an explicit
+generated-checkout `.git/info/attributes` rule for state SQL, and the
+build/install script rejects bare-LF migration bytes before compiling or
+copying artifacts. Keep both checks when updating the pinned Codex release or
+accepting a custom source checkout. `codex doctor` can report the database as healthy without
+exercising normal session-startup migration validation, so verify the installed
+companion by launching SimpleRouter against an existing Windows Codex home.
+Never fix this symptom by changing one row in `_sqlx_migrations`: every embedded
+migration is line-ending-sensitive, and the user's database is not corrupt.
+
 `findCodex` prefers the installed bundle at
 `~/.local/share/simplerouter/simplerouter-codex/bin/codex-simplerouter.exe`.
 Testing an executable elsewhere does not prove that `simplerouter` launched it;

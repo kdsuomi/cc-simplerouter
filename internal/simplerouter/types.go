@@ -17,12 +17,16 @@ type Config struct {
 }
 
 type Model struct {
-	ID                  string
-	Name                string
-	ContextLength       int
-	PromptPrice         string
-	OutputPrice         string
-	SupportedParameters []string
+	ID                        string
+	Name                      string
+	ContextLength             int
+	PromptPrice               string
+	OutputPrice               string
+	SupportedParameters       []string
+	SupportedReasoningEfforts []string
+	DefaultReasoningEffort    string
+	DefaultReasoningSummary   string
+	AutoCompactTokenLimit     int
 }
 
 // Endpoint is one provider serving a model (from /models/:id/endpoints).

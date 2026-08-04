@@ -36,8 +36,8 @@ Subject: [PATCH 3/3] feat(tui): report generation throughput across retries
  codex-rs/tui/src/app_server_session.rs        |  65 ++++
  codex-rs/tui/src/chatwidget.rs                |   6 +-
  codex-rs/tui/src/chatwidget/constructor.rs    |   3 +
- .../tui/src/chatwidget/generation_rate.rs     | 312 ++++++++++++++++++
- .../src/chatwidget/generation_rate_tests.rs   | 161 +++++++++
+ .../tui/src/chatwidget/generation_rate.rs     | 261 +++++++++++++++
+ .../src/chatwidget/generation_rate_tests.rs   | 175 ++++++++++
  codex-rs/tui/src/chatwidget/live_reasoning.rs |   4 +-
  codex-rs/tui/src/chatwidget/protocol.rs       |  30 +-
  ...completed_turn_generation_rate_suffix.snap |  10 +
@@ -48,7 +48,7 @@ Subject: [PATCH 3/3] feat(tui): report generation throughput across retries
  .../src/chatwidget/tests/live_reasoning.rs    |  46 ++-
  codex-rs/tui/src/chatwidget/turn_runtime.rs   |   2 +
  codex-rs/tui/src/history_cell/messages.rs     |  23 ++
- 44 files changed, 1647 insertions(+), 165 deletions(-)
+ 44 files changed, 1610 insertions(+), 165 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/RawResponseStartedNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/RawResponseStoppedNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStartedNotification.ts
@@ -2677,14 +2677,13 @@ new file mode 100644
 index 0000000..915df43
 --- /dev/null
 +++ b/codex-rs/tui/src/chatwidget/generation_rate.rs
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,261 @@
 +//! SimpleRouter generation-rate tracking for the status-line suffix.
 +//!
-+//! Each upstream response is measured independently from its first output
-+//! delta to its last. Exact native output usage replaces the streaming
-+//! estimate when a response completes; interrupted responses remain visibly
-+//! approximate. Summing those per-response generation spans excludes request
-+//! latency, retry delays, local tools, and post-disconnect stalls.
++//! Exact native output usage replaces the streaming estimate when a response
++//! completes. The denominator is cumulative API sampling time, including time
++//! to first token and stream delivery, while excluding local tools and idle
++//! time between sampling requests.
 +
 +use std::time::Duration;
 +use std::time::Instant;
@@ -2694,54 +2693,37 @@ index 0000000..915df43
 +
 +const DISABLE_TOKEN_RATE_ENV: &str = "SIMPLEROUTER_DISABLE_TOKEN_RATE";
 +const DEFAULT_ESTIMATED_CHARS_PER_TOKEN: f64 = 4.0;
-+const MIN_LIVE_ESTIMATED_TOKENS: f64 = 8.0;
-+const MIN_LIVE_DURATION: Duration = Duration::from_millis(250);
-+
-+#[derive(Clone, Copy, Debug)]
-+struct DisplayRate {
-+    tokens_per_second: f64,
-+    estimated: bool,
-+}
-+
 +#[derive(Debug)]
 +struct ActiveSampling {
-+    first_output_at: Option<Instant>,
-+    last_output_at: Option<Instant>,
++    sampling_started_at: Instant,
++    active_api_duration_at_start: Duration,
 +    observed_output_chars: u64,
 +    exact_output_tokens: Option<f64>,
 +}
 +
 +impl ActiveSampling {
-+    fn new() -> Self {
++    fn new(active_api_duration_ms: i64, now: Instant) -> Self {
 +        Self {
-+            first_output_at: None,
-+            last_output_at: None,
++            sampling_started_at: now,
++            active_api_duration_at_start: Duration::from_millis(
++                active_api_duration_ms.max(0) as u64
++            ),
 +            observed_output_chars: 0,
 +            exact_output_tokens: None,
 +        }
 +    }
 +
-+    fn observe_delta(&mut self, delta: &str, now: Instant) {
++    fn observe_delta(&mut self, delta: &str, _now: Instant) {
 +        let output_chars = delta.chars().count() as u64;
 +        if output_chars == 0 {
 +            return;
 +        }
-+        self.first_output_at.get_or_insert(now);
-+        self.last_output_at = Some(now);
 +        self.observed_output_chars = self.observed_output_chars.saturating_add(output_chars);
 +    }
 +
-+    fn live_generation_duration(&self, now: Instant) -> Option<Duration> {
-+        self.first_output_at
-+            .map(|started_at| now.saturating_duration_since(started_at))
-+    }
-+
-+    fn final_generation_duration(&self) -> Option<Duration> {
-+        Some(
-+            self.last_output_at?
-+                .saturating_duration_since(self.first_output_at?),
-+        )
-+        .filter(|duration| !duration.is_zero())
++    fn live_api_duration(&self, now: Instant) -> Duration {
++        self.active_api_duration_at_start
++            .saturating_add(now.saturating_duration_since(self.sampling_started_at))
 +    }
 +}
 +
@@ -2751,11 +2733,11 @@ index 0000000..915df43
 +    turn_running: bool,
 +    turn_exact_output_tokens: f64,
 +    turn_estimated_output_chars: f64,
-+    turn_generation_duration: Duration,
++    turn_api_duration: Duration,
 +    active_sampling: Option<ActiveSampling>,
 +    calibration_output_chars: f64,
 +    calibration_output_tokens: f64,
-+    retained_rate: Option<DisplayRate>,
++    retained_rate: Option<f64>,
 +}
 +
 +impl GenerationRateTracker {
@@ -2765,7 +2747,7 @@ index 0000000..915df43
 +            turn_running: false,
 +            turn_exact_output_tokens: 0.0,
 +            turn_estimated_output_chars: 0.0,
-+            turn_generation_duration: Duration::ZERO,
++            turn_api_duration: Duration::ZERO,
 +            active_sampling: None,
 +            calibration_output_chars: 0.0,
 +            calibration_output_tokens: 0.0,
@@ -2780,7 +2762,7 @@ index 0000000..915df43
 +        self.turn_running = true;
 +        self.turn_exact_output_tokens = 0.0;
 +        self.turn_estimated_output_chars = 0.0;
-+        self.turn_generation_duration = Duration::ZERO;
++        self.turn_api_duration = Duration::ZERO;
 +        self.active_sampling = None;
 +        self.retained_rate = None;
 +    }
@@ -2789,23 +2771,26 @@ index 0000000..915df43
 +        if !self.enabled {
 +            return;
 +        }
-+        self.finalize_active_sampling(
-+            /*generation_duration*/ None, /*output_chars*/ None,
-+        );
++        if let Some(active) = self.active_sampling.as_ref() {
++            self.turn_api_duration = active.live_api_duration(now);
++        }
++        self.finalize_active_sampling(/*output_chars*/ None);
 +        self.retained_rate = self.turn_rate(now);
 +        self.turn_running = false;
 +    }
 +
-+    pub(super) fn sampling_started(&mut self, _active_api_duration_ms: i64, _now: Instant) {
++    pub(super) fn sampling_started(&mut self, active_api_duration_ms: i64, now: Instant) {
 +        if !self.enabled || !self.turn_running {
 +            return;
 +        }
-+        if self.active_sampling.is_some() {
-+            self.finalize_active_sampling(
-+                /*generation_duration*/ None, /*output_chars*/ None,
-+            );
++        if let Some(active) = self.active_sampling.as_ref() {
++            self.turn_api_duration = active.live_api_duration(now);
++            self.finalize_active_sampling(/*output_chars*/ None);
 +        }
-+        self.active_sampling = Some(ActiveSampling::new());
++        self.turn_api_duration = self
++            .turn_api_duration
++            .max(Duration::from_millis(active_api_duration_ms.max(0) as u64));
++        self.active_sampling = Some(ActiveSampling::new(active_api_duration_ms, now));
 +    }
 +
 +    pub(super) fn observe_delta(&mut self, delta: &str, now: Instant) {
@@ -2826,20 +2811,19 @@ index 0000000..915df43
 +
 +    pub(super) fn sampling_stopped(
 +        &mut self,
-+        _active_api_duration_ms: i64,
-+        generation_duration_ms: Option<i64>,
++        active_api_duration_ms: i64,
++        _generation_duration_ms: Option<i64>,
 +        streamed_output_chars: i64,
 +        now: Instant,
 +    ) {
 +        if !self.enabled || !self.turn_running {
 +            return;
 +        }
-+        let generation_duration = generation_duration_ms
-+            .and_then(|duration_ms| u64::try_from(duration_ms).ok())
-+            .map(Duration::from_millis)
-+            .filter(|duration| !duration.is_zero());
++        self.turn_api_duration = self
++            .turn_api_duration
++            .max(Duration::from_millis(active_api_duration_ms.max(0) as u64));
 +        let output_chars = u64::try_from(streamed_output_chars).ok();
-+        self.finalize_active_sampling(generation_duration, output_chars);
++        self.finalize_active_sampling(output_chars);
 +        self.retained_rate = self.turn_rate(now);
 +    }
 +
@@ -2849,32 +2833,19 @@ index 0000000..915df43
 +        } else {
 +            self.retained_rate
 +        }?;
-+        if !rate.tokens_per_second.is_finite() || rate.tokens_per_second <= 0.0 {
++        if !rate.is_finite() || rate <= 0.0 {
 +            return None;
 +        }
-+        let approximation = if rate.estimated { "~" } else { "" };
-+        Some(format!(
-+            "{approximation}{:.1} tok/s",
-+            rate.tokens_per_second
-+        ))
++        Some(format!("{rate:.1} tok/s"))
 +    }
 +
-+    fn finalize_active_sampling(
-+        &mut self,
-+        generation_duration: Option<Duration>,
-+        streamed_output_chars: Option<u64>,
-+    ) {
++    fn finalize_active_sampling(&mut self, streamed_output_chars: Option<u64>) {
 +        let Some(active) = self.active_sampling.take() else {
 +            return;
 +        };
-+        let generation_duration =
-+            generation_duration.or_else(|| active.final_generation_duration());
 +        let output_chars = streamed_output_chars
 +            .unwrap_or_default()
 +            .max(active.observed_output_chars) as f64;
-+        let Some(generation_duration) = generation_duration else {
-+            return;
-+        };
 +
 +        match active.exact_output_tokens {
 +            Some(output_tokens) if output_tokens > 0.0 => {
@@ -2887,46 +2858,24 @@ index 0000000..915df43
 +            _ if output_chars > 0.0 => {
 +                self.turn_estimated_output_chars += output_chars;
 +            }
-+            _ => return,
++            _ => (),
 +        }
-+        self.turn_generation_duration = self
-+            .turn_generation_duration
-+            .saturating_add(generation_duration);
 +    }
 +
-+    fn turn_rate(&self, now: Instant) -> Option<DisplayRate> {
++    fn turn_rate(&self, now: Instant) -> Option<f64> {
 +        let mut output_tokens =
 +            self.turn_exact_output_tokens + self.estimated_tokens(self.turn_estimated_output_chars);
-+        let mut generation_duration = self.turn_generation_duration;
-+        let mut estimated = self.turn_estimated_output_chars > 0.0;
++        let mut api_duration = self.turn_api_duration;
 +
 +        if let Some(active) = self.active_sampling.as_ref() {
 +            let active_tokens = active
 +                .exact_output_tokens
 +                .unwrap_or_else(|| self.estimated_tokens(active.observed_output_chars as f64));
-+            if active.exact_output_tokens.is_none() && active.observed_output_chars > 0 {
-+                estimated = true;
-+            }
-+            if let Some(active_duration) = active.live_generation_duration(now) {
-+                output_tokens += active_tokens;
-+                generation_duration = generation_duration.saturating_add(active_duration);
-+            }
-+
-+            if self.turn_generation_duration.is_zero()
-+                && active.exact_output_tokens.is_none()
-+                && active_tokens < MIN_LIVE_ESTIMATED_TOKENS
-+            {
-+                return None;
-+            }
-+            if self.turn_generation_duration.is_zero() && generation_duration < MIN_LIVE_DURATION {
-+                return None;
-+            }
++            output_tokens += active_tokens;
++            api_duration = active.live_api_duration(now);
 +        }
 +
-+        rate(output_tokens, generation_duration).map(|tokens_per_second| DisplayRate {
-+            tokens_per_second,
-+            estimated,
-+        })
++        rate(output_tokens, api_duration)
 +    }
 +
 +    fn estimated_tokens(&self, output_chars: f64) -> f64 {
@@ -2995,7 +2944,7 @@ new file mode 100644
 index 0000000..bcc0b9f
 --- /dev/null
 +++ b/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,175 @@
 +use std::time::Duration;
 +use std::time::Instant;
 +
@@ -3004,7 +2953,7 @@ index 0000000..bcc0b9f
 +use super::GenerationRateTracker;
 +
 +#[test]
-+fn turn_average_uses_only_generation_time_and_persists_until_the_next_turn() {
++fn turn_average_uses_cumulative_api_time_and_persists_until_the_next_turn() {
 +    let started_at = Instant::now();
 +    let mut tracker = GenerationRateTracker::new(true);
 +    tracker.begin_turn();
@@ -3013,7 +2962,7 @@ index 0000000..bcc0b9f
 +    tracker.observe_delta(&"a".repeat(40), started_at + Duration::from_secs(1));
 +    assert_eq!(
 +        tracker.status_suffix(started_at + Duration::from_secs(2)),
-+        Some("~10.0 tok/s".to_string())
++        Some("5.0 tok/s".to_string())
 +    );
 +    tracker.response_completed(Some(100));
 +    tracker.sampling_stopped(
@@ -3025,7 +2974,7 @@ index 0000000..bcc0b9f
 +
 +    assert_eq!(
 +        tracker.status_suffix(started_at + Duration::from_secs(100)),
-+        Some("50.0 tok/s".to_string())
++        Some("5.0 tok/s".to_string())
 +    );
 +
 +    tracker.sampling_started(
@@ -3047,7 +2996,7 @@ index 0000000..bcc0b9f
 +
 +    assert_eq!(
 +        tracker.status_suffix(started_at + Duration::from_secs(1_000)),
-+        Some("66.7 tok/s".to_string())
++        Some("5.0 tok/s".to_string())
 +    );
 +
 +    tracker.begin_turn();
@@ -3067,19 +3016,19 @@ index 0000000..bcc0b9f
 +    tracker.response_completed(Some(40));
 +    tracker.sampling_stopped(
 +        /*active_api_duration_ms*/ 10_000,
-+        /*generation_duration_ms*/ Some(2_000),
++        /*generation_duration_ms*/ None,
 +        /*streamed_output_chars*/ 400,
 +        started_at + Duration::from_secs(10),
 +    );
 +
 +    assert_eq!(
 +        tracker.status_suffix(started_at + Duration::from_secs(20)),
-+        Some("20.0 tok/s".to_string())
++        Some("4.0 tok/s".to_string())
 +    );
 +}
 +
 +#[test]
-+fn disconnect_stall_is_not_counted_as_generation_time() {
++fn sampling_time_includes_stream_delivery_stalls() {
 +    let started_at = Instant::now();
 +    let mut tracker = GenerationRateTracker::new(true);
 +    tracker.begin_turn();
@@ -3095,7 +3044,7 @@ index 0000000..bcc0b9f
 +
 +    assert_eq!(
 +        tracker.status_suffix(started_at + Duration::from_secs(200)),
-+        Some("~100.0 tok/s".to_string())
++        Some("2.0 tok/s".to_string())
 +    );
 +}
 +
@@ -3115,7 +3064,7 @@ index 0000000..bcc0b9f
 +    );
 +    assert_eq!(
 +        tracker.status_suffix(started_at + Duration::from_secs(20)),
-+        Some("~25.0 tok/s".to_string())
++        Some("5.0 tok/s".to_string())
 +    );
 +
 +    tracker.sampling_started(
@@ -3136,7 +3085,21 @@ index 0000000..bcc0b9f
 +
 +    assert_eq!(
 +        tracker.status_suffix(started_at + Duration::from_secs(200)),
-+        Some("~50.0 tok/s".to_string())
++        Some("7.5 tok/s".to_string())
++    );
++}
++
++#[test]
++fn live_rate_is_unqualified_from_the_first_delta() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(true);
++    tracker.begin_turn();
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++    tracker.observe_delta(&"x".repeat(4), started_at + Duration::from_millis(100));
++
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_millis(100)),
++        Some("10.0 tok/s".to_string())
 +    );
 +}
 +
@@ -3249,7 +3212,7 @@ index 0000000..5606337
 +"                                                                                "
 +"› Ask Codex to do anything                                                      "
 +"                                                                                "
-+"  60.0 tok/s                                                                    "
++"  6.0 tok/s                                                                     "
 diff --git a/codex-rs/tui/src/chatwidget/status_surfaces.rs b/codex-rs/tui/src/chatwidget/status_surfaces.rs
 index 7120462..d726dbd 100644
 --- a/codex-rs/tui/src/chatwidget/status_surfaces.rs
@@ -3394,7 +3357,7 @@ index 0000000..eb65f13
 +
 +    assert_eq!(
 +        chat.generation_rate.status_suffix(Instant::now()),
-+        Some("60.0 tok/s".to_string())
++        Some("6.0 tok/s".to_string())
 +    );
 +    assert_chatwidget_snapshot!(
 +        "simplerouter_completed_turn_generation_rate_suffix",
