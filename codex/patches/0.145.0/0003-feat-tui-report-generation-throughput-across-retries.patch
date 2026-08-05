@@ -1,15 +1,15 @@
-From 27980bab6f9ddd22e342d41623f75c6bf2d946fa Mon Sep 17 00:00:00 2001
+From 78346a431b18ce004bd3e13e02ec7c844546cab8 Mon Sep 17 00:00:00 2001
 From: Kyle <kdsuomi@users.noreply.github.com>
 Date: Mon, 3 Aug 2026 13:54:57 -0400
 Subject: [PATCH 3/3] feat(tui): report generation throughput across retries
 
 ---
  codex-rs/.cargo/config.toml                   |   5 +
- codex-rs/Cargo.lock                           | 260 +++++++--------
+ codex-rs/Cargo.lock                           | 260 ++++++++---------
  codex-rs/Cargo.toml                           |  22 +-
- .../schema/json/ServerNotification.json       |  98 ++++++
- .../codex_app_server_protocol.schemas.json    | 102 ++++++
- .../codex_app_server_protocol.v2.schemas.json | 102 ++++++
+ .../schema/json/ServerNotification.json       |  98 +++++++
+ .../codex_app_server_protocol.schemas.json    | 102 +++++++
+ .../codex_app_server_protocol.v2.schemas.json | 102 +++++++
  .../v2/RawResponseStartedNotification.json    |  23 ++
  .../v2/RawResponseStoppedNotification.json    |  37 +++
  .../schema/typescript/ServerNotification.ts   |   4 +-
@@ -24,8 +24,8 @@ Subject: [PATCH 3/3] feat(tui): report generation throughput across retries
  .../request_processors/thread_processor.rs    |   6 +-
  .../thread_processor_tests.rs                 |   1 +
  .../app-server/tests/suite/v2/turn_start.rs   |  38 ++-
- codex-rs/core/src/session/turn.rs             | 101 +++++-
- codex-rs/core/src/session/turn_tests.rs       |  53 +++
+ codex-rs/core/src/session/turn.rs             | 101 ++++++-
+ codex-rs/core/src/session/turn_tests.rs       |  53 ++++
  codex-rs/core/src/turn_timing.rs              |  16 +
  codex-rs/core/src/turn_timing_tests.rs        |  28 ++
  codex-rs/mcp-server/src/codex_tool_runner.rs  |   2 +
@@ -33,11 +33,11 @@ Subject: [PATCH 3/3] feat(tui): report generation throughput across retries
  codex-rs/rollout-trace/src/protocol_event.rs  |   4 +
  codex-rs/rollout/src/policy.rs                |   2 +
  .../tui/src/app/app_server_event_targets.rs   |   6 +
- codex-rs/tui/src/app_server_session.rs        |  65 ++++
- codex-rs/tui/src/chatwidget.rs                |   6 +-
+ codex-rs/tui/src/app_server_session.rs        |  68 +++++
+ codex-rs/tui/src/chatwidget.rs                |   7 +-
  codex-rs/tui/src/chatwidget/constructor.rs    |   3 +
- .../tui/src/chatwidget/generation_rate.rs     | 261 +++++++++++++++
- .../src/chatwidget/generation_rate_tests.rs   | 175 ++++++++++
+ .../tui/src/chatwidget/generation_rate.rs     | 275 ++++++++++++++++++
+ .../src/chatwidget/generation_rate_tests.rs   | 183 ++++++++++++
  codex-rs/tui/src/chatwidget/live_reasoning.rs |   4 +-
  codex-rs/tui/src/chatwidget/protocol.rs       |  30 +-
  ...completed_turn_generation_rate_suffix.snap |  10 +
@@ -48,7 +48,7 @@ Subject: [PATCH 3/3] feat(tui): report generation throughput across retries
  .../src/chatwidget/tests/live_reasoning.rs    |  46 ++-
  codex-rs/tui/src/chatwidget/turn_runtime.rs   |   2 +
  codex-rs/tui/src/history_cell/messages.rs     |  23 ++
- 44 files changed, 1610 insertions(+), 165 deletions(-)
+ 44 files changed, 1636 insertions(+), 165 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/RawResponseStartedNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/RawResponseStoppedNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStartedNotification.ts
@@ -2513,14 +2513,14 @@ index 5935e46..74b9e66 100644
              Some(notification.thread_id.as_str())
          }
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index 825103c..becdbc4 100644
+index 825103c..7d4d7c0 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
 @@ -6,6 +6,7 @@
  mod fs;
  
  use crate::bottom_pane::FeedbackAudience;
-+use crate::chatwidget::live_reasoning::is_simplerouter_provider_id;
++use crate::chatwidget::enabled_for_session;
  use crate::legacy_core::config::Config;
  use crate::permission_compat::legacy_compatible_permission_profile;
  use crate::service_tier_resolution;
@@ -2528,7 +2528,7 @@ index 825103c..becdbc4 100644
          developer_instructions: with_terminal_visualization_instructions(
              config, /*control_instructions*/ None,
          ),
-+        experimental_raw_events: simplerouter_raw_events_enabled(config, thread_params_mode),
++        experimental_raw_events: generation_rate_raw_events_enabled(config, thread_params_mode),
          ..ThreadStartParams::default()
      }
  }
@@ -2536,28 +2536,31 @@ index 825103c..becdbc4 100644
          developer_instructions: with_terminal_visualization_instructions(
              &config, /*control_instructions*/ None,
          ),
-+        experimental_raw_events: simplerouter_raw_events_enabled(&config, thread_params_mode),
++        experimental_raw_events: generation_rate_raw_events_enabled(&config, thread_params_mode),
          ..ThreadResumeParams::default()
      }
  }
-@@ -1623,10 +1626,16 @@ fn thread_fork_params_from_config(
+@@ -1623,10 +1626,19 @@ fn thread_fork_params_from_config(
          ),
          ephemeral: config.ephemeral,
          thread_source: Some(ThreadSource::User),
-+        experimental_raw_events: simplerouter_raw_events_enabled(&config, thread_params_mode),
++        experimental_raw_events: generation_rate_raw_events_enabled(&config, thread_params_mode),
          ..ThreadForkParams::default()
      }
  }
  
-+fn simplerouter_raw_events_enabled(config: &Config, thread_params_mode: ThreadParamsMode) -> bool {
++fn generation_rate_raw_events_enabled(
++    config: &Config,
++    thread_params_mode: ThreadParamsMode,
++) -> bool {
 +    thread_params_mode == ThreadParamsMode::Embedded
-+        && is_simplerouter_provider_id(&config.model_provider_id)
++        && enabled_for_session(&config.model_provider_id)
 +}
 +
  fn thread_cwd_from_config(
      config: &Config,
      thread_params_mode: ThreadParamsMode,
-@@ -2036,6 +2045,62 @@ mod tests {
+@@ -2036,6 +2048,62 @@ mod tests {
          assert_eq!(params.thread_source, Some(ThreadSource::User));
      }
  
@@ -2621,19 +2624,20 @@ index 825103c..becdbc4 100644
      async fn thread_start_params_can_mark_clear_source() {
          let temp_dir = tempfile::tempdir().expect("tempdir");
 diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
-index 859da68..5ce57d5 100644
+index 859da68..5d3a0d4 100644
 --- a/codex-rs/tui/src/chatwidget.rs
 +++ b/codex-rs/tui/src/chatwidget.rs
-@@ -338,6 +338,8 @@ use self::exec_state::UnifiedExecWaitStreak;
+@@ -338,6 +338,9 @@ use self::exec_state::UnifiedExecWaitStreak;
  use self::exec_state::command_execution_command_and_parsed;
  use self::exec_state::is_standard_tool_call;
  use self::exec_state::is_unified_exec_source;
 +mod generation_rate;
++pub(crate) use self::generation_rate::enabled_for_session;
 +use self::generation_rate::GenerationRateTracker;
  mod goal_status;
  use self::goal_status::GoalStatusState;
  #[cfg(test)]
-@@ -353,7 +355,7 @@ mod input_submission;
+@@ -353,7 +356,7 @@ mod input_submission;
  mod interrupts;
  use self::interrupts::InterruptManager;
  mod keymap_picker;
@@ -2642,7 +2646,7 @@ index 859da68..5ce57d5 100644
  mod mcp_startup;
  use self::mcp_startup::McpStartupStatus;
  mod pets;
-@@ -636,6 +638,8 @@ pub(crate) struct ChatWidget {
+@@ -636,6 +639,8 @@ pub(crate) struct ChatWidget {
      reasoning_summary_parts: Vec<String>,
      // Controls SimpleRouter's live reasoning preview for the current TUI session.
      live_reasoning_enabled: bool,
@@ -2652,7 +2656,7 @@ index 859da68..5ce57d5 100644
      live_reasoning_active: bool,
      // Throttles redraws while reasoning deltas arrive quickly.
 diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
-index 90fdba4..c6e4049 100644
+index 90fdba4..142b3df 100644
 --- a/codex-rs/tui/src/chatwidget/constructor.rs
 +++ b/codex-rs/tui/src/chatwidget/constructor.rs
 @@ -37,6 +37,8 @@ impl ChatWidget {
@@ -2660,7 +2664,7 @@ index 90fdba4..c6e4049 100644
          let live_reasoning_enabled =
              live_reasoning::is_simplerouter_provider_id(&config.model_provider_id);
 +        let generation_rate_enabled =
-+            generation_rate::enabled_for_provider(&config.model_provider_id);
++            generation_rate::enabled_for_session(&config.model_provider_id);
          let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
          let mut rng = rand::rng();
          let placeholder = PLACEHOLDERS[rng.random_range(0..PLACEHOLDERS.len())].to_string();
@@ -2674,10 +2678,10 @@ index 90fdba4..c6e4049 100644
              status_state: StatusState::default(),
 diff --git a/codex-rs/tui/src/chatwidget/generation_rate.rs b/codex-rs/tui/src/chatwidget/generation_rate.rs
 new file mode 100644
-index 0000000..915df43
+index 0000000..95b558d
 --- /dev/null
 +++ b/codex-rs/tui/src/chatwidget/generation_rate.rs
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,275 @@
 +//! SimpleRouter generation-rate tracking for the status-line suffix.
 +//!
 +//! Exact native output usage replaces the streaming estimate when a response
@@ -2692,6 +2696,7 @@ index 0000000..915df43
 +use super::live_reasoning::is_simplerouter_provider_id;
 +
 +const DISABLE_TOKEN_RATE_ENV: &str = "SIMPLEROUTER_DISABLE_TOKEN_RATE";
++const ENABLE_TOKEN_RATE_ENV: &str = "SIMPLEROUTER_ENABLE_TOKEN_RATE";
 +const DEFAULT_ESTIMATED_CHARS_PER_TOKEN: f64 = 4.0;
 +#[derive(Debug)]
 +struct ActiveSampling {
@@ -2891,11 +2896,24 @@ index 0000000..915df43
 +    }
 +}
 +
-+pub(super) fn enabled_for_provider(provider_id: &str) -> bool {
-+    is_simplerouter_provider_id(provider_id)
-+        && std::env::var(DISABLE_TOKEN_RATE_ENV)
-+            .map(|value| value.trim().is_empty())
-+            .unwrap_or(true)
++pub(crate) fn enabled_for_session(provider_id: &str) -> bool {
++    let explicit_enable = std::env::var(ENABLE_TOKEN_RATE_ENV).ok();
++    let explicit_disable = std::env::var(DISABLE_TOKEN_RATE_ENV).ok();
++    token_rate_enabled(
++        provider_id,
++        explicit_enable.as_deref(),
++        explicit_disable.as_deref(),
++    )
++}
++
++fn token_rate_enabled(
++    provider_id: &str,
++    explicit_enable: Option<&str>,
++    explicit_disable: Option<&str>,
++) -> bool {
++    (is_simplerouter_provider_id(provider_id)
++        || explicit_enable.is_some_and(|value| !value.trim().is_empty()))
++        && explicit_disable.is_none_or(|value| value.trim().is_empty())
 +}
 +
 +fn rate(output_tokens: f64, duration: Duration) -> Option<f64> {
@@ -2941,16 +2959,24 @@ index 0000000..915df43
 +mod tests;
 diff --git a/codex-rs/tui/src/chatwidget/generation_rate_tests.rs b/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
 new file mode 100644
-index 0000000..bcc0b9f
+index 0000000..bd543d2
 --- /dev/null
 +++ b/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,183 @@
 +use std::time::Duration;
 +use std::time::Instant;
 +
 +use pretty_assertions::assert_eq;
 +
 +use super::GenerationRateTracker;
++use super::token_rate_enabled;
++
++#[test]
++fn launcher_opt_in_enables_standard_provider_sessions() {
++    assert!(token_rate_enabled("openai", Some("1"), None));
++    assert!(!token_rate_enabled("openai", None, None));
++    assert!(!token_rate_enabled("openai", Some("1"), Some("1")));
++}
 +
 +#[test]
 +fn turn_average_uses_cumulative_api_time_and_persists_until_the_next_turn() {
@@ -3199,7 +3225,7 @@ index 9586f5f..b7ce62b 100644
              | ServerNotification::ProcessExited(_)
 diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap
 new file mode 100644
-index 0000000..5606337
+index 0000000..e930332
 --- /dev/null
 +++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap
 @@ -0,0 +1,10 @@
@@ -3285,7 +3311,7 @@ index 4d73db3..eaaea82 100644
  mod guardian;
 diff --git a/codex-rs/tui/src/chatwidget/tests/generation_rate.rs b/codex-rs/tui/src/chatwidget/tests/generation_rate.rs
 new file mode 100644
-index 0000000..eb65f13
+index 0000000..199993b
 --- /dev/null
 +++ b/codex-rs/tui/src/chatwidget/tests/generation_rate.rs
 @@ -0,0 +1,75 @@

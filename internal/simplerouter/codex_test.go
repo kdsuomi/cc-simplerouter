@@ -127,7 +127,7 @@ func TestBuildCodexModelCatalogAppliesProviderReasoningMetadata(t *testing.T) {
 	  "default_reasoning_summary":"none"
 	}]}`)
 	raw, err := buildCodexModelCatalog(source, Model{
-		ID:                        "muse-spark-1.1",
+		ID:                        "muse-spark-1.2",
 		SupportedReasoningEfforts: []string{"none", "minimal", "low", "medium", "high", "xhigh"},
 		DefaultReasoningEffort:    "high",
 		DefaultReasoningSummary:   "auto",
@@ -189,32 +189,83 @@ func TestCodexArgsUseSessionProviderAndPreservePrompt(t *testing.T) {
 	}
 }
 
-func TestMetaCodexArgsApplyDocumentedSessionOverrides(t *testing.T) {
-	model := curatedProviderModels(providerMeta)[0]
-	args := metaCodexArgs(
-		model,
-		"http://127.0.0.1:8080/v1",
-		`C:\Temp\models.json`,
-		false,
-		nil,
-		nil,
+func TestCodexSubscriptionArgsPreserveStandardCodexRouting(t *testing.T) {
+	args := codexSubscriptionArgs(
+		"gpt-5.6-terra",
+		true,
+		[]string{"fix", "the tests"},
+		[]string{"--sandbox", "workspace-write"},
 	)
+	want := []string{
+		"--model", "gpt-5.6-terra",
+		"-c", `model_reasoning_effort="none"`,
+		"-c", `model_reasoning_summary="none"`,
+		"--sandbox", "workspace-write",
+		"fix the tests",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("args = %v, want %v", args, want)
+	}
 	joined := strings.Join(args, "\n")
-	for _, want := range []string{
-		`model_reasoning_effort="high"`,
-		`model_reasoning_summary="auto"`,
-		`model_context_window=1048576`,
-		`model_auto_compact_token_limit=900000`,
-		`model_supports_reasoning_summaries=true`,
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("Meta Codex args missing %q: %v", want, args)
+	for _, forbidden := range []string{"model_provider", "model_providers", "base_url", "model_catalog_json"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("subscription args contain routing override %q: %v", forbidden, args)
 		}
 	}
+}
 
-	disabled := strings.Join(metaCodexArgs(model, "http://127.0.0.1:8080/v1", `C:\Temp\models.json`, true, nil, nil), "\n")
-	if !strings.Contains(disabled, `model_reasoning_effort="none"`) || strings.Contains(disabled, `model_reasoning_effort="high"`) {
-		t.Fatalf("disabled Meta reasoning args = %s", disabled)
+func TestBuildCodexSubscriptionEnvEnablesTokenRateWithoutSessionKey(t *testing.T) {
+	env := envMap(buildCodexSubscriptionEnv([]string{
+		"PATH=test-path",
+		codexAPIKeyEnv + "=stale-key",
+		codexTokenRateEnv + "=stale-value",
+	}))
+	if env["PATH"] != "test-path" || env[codexTokenRateEnv] != "1" {
+		t.Fatalf("subscription env = %v", env)
+	}
+	if _, ok := env[codexAPIKeyEnv]; ok {
+		t.Fatalf("subscription env retained %s", codexAPIKeyEnv)
+	}
+}
+
+func TestMetaCodexArgsApplyDocumentedSessionOverrides(t *testing.T) {
+	models := curatedProviderModels(providerMeta)
+	if len(models) < 3 {
+		t.Fatalf("curated Meta models = %d, want at least standard 1.2, contributor 1.2, and 1.1", len(models))
+	}
+	wantIDs := []string{"muse-spark-1.2", "muse-spark-1.2-contributor", "muse-spark-1.1"}
+	for i, want := range wantIDs {
+		if models[i].ID != want {
+			t.Fatalf("curated Meta model[%d] = %q, want %q", i, models[i].ID, want)
+		}
+	}
+	for _, model := range models {
+		args := metaCodexArgs(
+			model,
+			"http://127.0.0.1:8080/v1",
+			`C:\Temp\models.json`,
+			false,
+			nil,
+			nil,
+		)
+		joined := strings.Join(args, "\n")
+		for _, want := range []string{
+			"--model\n" + model.ID,
+			`model_reasoning_effort="high"`,
+			`model_reasoning_summary="auto"`,
+			`model_context_window=1048576`,
+			`model_auto_compact_token_limit=900000`,
+			`model_supports_reasoning_summaries=true`,
+		} {
+			if !strings.Contains(joined, want) {
+				t.Fatalf("Meta Codex args for %s missing %q: %v", model.ID, want, args)
+			}
+		}
+
+		disabled := strings.Join(metaCodexArgs(model, "http://127.0.0.1:8080/v1", `C:\Temp\models.json`, true, nil, nil), "\n")
+		if !strings.Contains(disabled, `model_reasoning_effort="none"`) || strings.Contains(disabled, `model_reasoning_effort="high"`) {
+			t.Fatalf("disabled Meta reasoning args for %s = %s", model.ID, disabled)
+		}
 	}
 }
 
@@ -327,13 +378,16 @@ func TestInstalledCodexExecUsesGeneratedMetaResponsesProvider(t *testing.T) {
 	defer server.Close()
 	proxy := httptest.NewServer(newResponsesPassthroughProxy(
 		server.URL,
-		"muse-spark-1.1",
+		"muse-spark-1.2",
 		server.Client(),
 		metaResponsesOptions(),
 	))
 	defer proxy.Close()
 
 	model := curatedProviderModels(providerMeta)[0]
+	if model.ID != "muse-spark-1.2" {
+		t.Fatalf("default Meta model = %q, want muse-spark-1.2", model.ID)
+	}
 	catalogPath, cleanup, err := prepareCodexModelCatalog(codexPath, model, true)
 	if err != nil {
 		t.Fatal(err)
@@ -381,7 +435,7 @@ func TestInstalledCodexExecUsesGeneratedMetaResponsesProvider(t *testing.T) {
 		if err := json.Unmarshal(raw, &body); err != nil {
 			t.Fatal(err)
 		}
-		if body["model"] != "muse-spark-1.1" || body["stream"] != true {
+		if body["model"] != "muse-spark-1.2" || body["stream"] != true {
 			t.Fatalf("unexpected Responses request: %#v", body)
 		}
 		reasoning, _ := body["reasoning"].(map[string]any)

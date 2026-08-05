@@ -221,7 +221,7 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 
 	proxy := httptest.NewServer(newResponsesPassthroughProxy(
 		upstream.URL,
-		"muse-spark-1.1",
+		"muse-spark-1.2",
 		upstream.Client(),
 		metaResponsesOptions(),
 	))
@@ -307,7 +307,7 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	}
 
 	request := <-captured
-	if request["model"] != "muse-spark-1.1" {
+	if request["model"] != "muse-spark-1.2" {
 		t.Fatalf("model = %#v", request["model"])
 	}
 	reasoning := request["reasoning"].(map[string]any)

@@ -25,6 +25,7 @@ const (
 	providerDeepSeek   = "deepseek"
 	providerZAI        = "zai"
 	providerMeta       = "meta"
+	providerCodex      = "codex"
 )
 
 type app struct {
@@ -78,7 +79,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("simplerouter", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
 	fs.StringVar(&modelFlag, "model", "", "Model id, name, or unique suffix")
-	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "deepseek", "zai", or "meta"`)
+	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "deepseek", "zai", "meta", or "codex"`)
 	fs.BoolVar(&selectModel, "select-model", false, "Select a provider and model interactively")
 	fs.BoolVar(&resetKey, "reset-key", false, "Forget the saved API keys before launching")
 	fs.BoolVar(&disableThinking, "disable-thinking", false, "Disable model reasoning for provider compatibility")
@@ -110,12 +111,33 @@ func (a *app) run(ctx context.Context, args []string) error {
 		printSetupBanner(a.stderr, style)
 		fmt.Fprintln(a.stderr)
 		fmt.Fprintln(a.stderr, style.header("simplerouter setup"))
-		fmt.Fprintln(a.stderr, style.paint(clrDim, "Choose a provider, validate key, choose a model, then launch Codex CLI."))
+		fmt.Fprintln(a.stderr, style.paint(clrDim, "Choose a provider, authenticate if needed, then launch Codex CLI."))
 	}
 
 	provider, err := a.determineProvider(cfg, modelFlag, providerFlag, selectModel, firstRun, bareCommand)
 	if err != nil {
 		return err
+	}
+	if provider == providerCodex {
+		cfg.Provider = provider
+		if err := saveConfig(cfg); err != nil {
+			return err
+		}
+		codexPath, err := findCodexFn()
+		if err != nil {
+			return err
+		}
+		a.printCodexSubscriptionLaunchSummary(dir)
+		spec := launchSpec{
+			Path: codexPath,
+			Dir:  dir,
+			Args: codexSubscriptionArgs(modelFlag, disableThinking, codexPositionals, passthrough),
+			Env:  buildCodexSubscriptionEnv(os.Environ()),
+		}
+		if a.runCommand != nil {
+			return a.runCommand(spec)
+		}
+		return runCodexCommand(spec)
 	}
 
 	// Backing out of the model picker (ESC / "b") always returns here to
@@ -314,6 +336,8 @@ func inferProviderFromModel(model string) string {
 func canonicalProvider(input string) string {
 	p := strings.ToLower(strings.TrimSpace(input))
 	switch p {
+	case "chatgpt", "subscription", "codex-subscription":
+		return providerCodex
 	case "z-ai", "z.ai", "bigmodel", "zhipu":
 		return providerZAI
 	default:
@@ -323,7 +347,7 @@ func canonicalProvider(input string) string {
 
 func isKnownProvider(provider string) bool {
 	switch provider {
-	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta:
+	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta, providerCodex:
 		return true
 	default:
 		return false
@@ -331,7 +355,7 @@ func isKnownProvider(provider string) bool {
 }
 
 func providerNames() []string {
-	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta}
+	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta, providerCodex}
 }
 
 func (a *app) openRouterBase() string {
@@ -871,4 +895,22 @@ func (a *app) printLaunchSummary(modelID string, contextLength int, thinkingMode
 		fmt.Fprintf(a.stderr, " %s provider %s", sep, style.paint(clrModelHi, providerName))
 	}
 	fmt.Fprintln(a.stderr)
+}
+
+func (a *app) printCodexSubscriptionLaunchSummary(dir string) {
+	launchDir := dir
+	if launchDir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			launchDir = wd
+		} else {
+			launchDir = "."
+		}
+	}
+	style := newTerminalStyle(a.stderr)
+	sep := style.paint(clrFaint, "|")
+	fmt.Fprintf(a.stderr, "%s existing ChatGPT sign-in %s dir %s\n",
+		style.paint(clrAccentBold, "Launching Codex CLI:"),
+		sep,
+		style.paint(clrDim, launchDir),
+	)
 }

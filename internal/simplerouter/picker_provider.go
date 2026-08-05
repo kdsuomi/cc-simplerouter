@@ -26,7 +26,8 @@ func providerOptions() []pickOption {
 		{ID: providerOpenAI, Label: "OpenAI", Detail: "GPT models, direct from OpenAI"},
 		{ID: providerDeepSeek, Label: "DeepSeek", Detail: "DeepSeek models, Chat compatibility"},
 		{ID: providerZAI, Label: "Z.AI", Detail: "GLM models, direct from Z.AI"},
-		{ID: providerMeta, Label: "Meta", Detail: "Muse Spark, native Responses API"},
+		{ID: providerMeta, Label: "Meta", Detail: "Muse Spark 1.2 / 1.1, native Responses API"},
+		{ID: providerCodex, Label: "Codex subscription", Detail: "Existing ChatGPT login, standard routing"},
 	}
 }
 

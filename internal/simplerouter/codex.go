@@ -14,6 +14,7 @@ import (
 
 const (
 	codexAPIKeyEnv                  = "SIMPLEROUTER_CODEX_API_KEY"
+	codexTokenRateEnv               = "SIMPLEROUTER_ENABLE_TOKEN_RATE"
 	codexProviderName               = "simplerouter_session"
 	codexDefaultServiceTierOverride = "default"
 	codexSimpleRouterBinaryName     = "codex-simplerouter"
@@ -272,8 +273,27 @@ func reasoningEffortDescription(effort string) string {
 }
 
 func buildCodexEnv(base []string, key string) []string {
-	env := envWithout(base, codexAPIKeyEnv)
+	env := envWithout(base, codexAPIKeyEnv, codexTokenRateEnv)
 	return append(env, codexAPIKeyEnv+"="+key)
+}
+
+func buildCodexSubscriptionEnv(base []string) []string {
+	env := envWithout(base, codexAPIKeyEnv, codexTokenRateEnv)
+	return append(env, codexTokenRateEnv+"=1")
+}
+
+func codexSubscriptionArgs(model string, disableThinking bool, positionals, passthrough []string) []string {
+	args := make([]string, 0, len(passthrough)+3)
+	if model = strings.TrimSpace(model); model != "" {
+		args = append(args, "--model", model)
+	}
+	if disableThinking {
+		args = append(args,
+			"-c", `model_reasoning_effort="none"`,
+			"-c", `model_reasoning_summary="none"`,
+		)
+	}
+	return appendCodexPassthroughAndPrompt(args, positionals, passthrough)
 }
 
 func codexArgs(model, baseURL, catalogPath string, disableThinking bool, positionals, passthrough []string) []string {
@@ -339,6 +359,10 @@ func codexArgsWithOverrides(model, baseURL, catalogPath string, disableThinking 
 			args = append(args, "-c", "model_reasoning_summary="+tomlString(summary))
 		}
 	}
+	return appendCodexPassthroughAndPrompt(args, positionals, passthrough)
+}
+
+func appendCodexPassthroughAndPrompt(args, positionals, passthrough []string) []string {
 	args = append(args, passthrough...)
 	if prompt := strings.TrimSpace(strings.Join(positionals, " ")); prompt != "" {
 		args = append(args, prompt)

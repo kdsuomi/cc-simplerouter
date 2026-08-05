@@ -28,6 +28,8 @@ var recommendedGeminiModelIDs = []string{
 }
 
 var recommendedFirstClassModelIDs = []string{
+	"muse-spark-1.2",
+	"muse-spark-1.2-contributor",
 	"muse-spark-1.1",
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
@@ -55,6 +57,8 @@ var testedModelIDs = map[string]bool{
 	"deepseek-v4-pro":              true,
 	"glm-5.2":                      true,
 	"glm-5":                        true,
+	"muse-spark-1.2":               true,
+	"muse-spark-1.2-contributor":   true,
 	"muse-spark-1.1":               true,
 }
 
@@ -81,17 +85,25 @@ func curatedProviderModels(provider string) []Model {
 			{ID: "glm-5", Name: "GLM-5", ContextLength: 200_000, SupportedParameters: []string{"tools", "reasoning"}},
 		}
 	case providerMeta:
-		models = []Model{
-			{
-				ID:                        "muse-spark-1.1",
-				Name:                      "Muse Spark 1.1",
+		// Meta Model API model IDs and session defaults from
+		// https://dev.meta.ai/docs/models and https://dev.meta.ai/docs/coding-agents
+		// (standard vs contributor tier, 1,048,576 context, high/auto reasoning).
+		muse := func(id, name string) Model {
+			return Model{
+				ID:                        id,
+				Name:                      name,
 				ContextLength:             1_048_576,
 				SupportedParameters:       []string{"tools", "reasoning"},
 				SupportedReasoningEfforts: []string{"none", "minimal", "low", "medium", "high", "xhigh"},
 				DefaultReasoningEffort:    "high",
 				DefaultReasoningSummary:   "auto",
 				AutoCompactTokenLimit:     900_000,
-			},
+			}
+		}
+		models = []Model{
+			muse("muse-spark-1.2", "Muse Spark 1.2"),
+			muse("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor"),
+			muse("muse-spark-1.1", "Muse Spark 1.1"),
 		}
 	}
 	return append([]Model(nil), models...)

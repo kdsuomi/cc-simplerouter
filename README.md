@@ -1,7 +1,8 @@
 # simplerouter for Codex CLI
 
 `simplerouter` launches an installed [OpenAI Codex CLI](https://developers.openai.com/codex)
-against OpenRouter, Google AI Studio, OpenAI, DeepSeek, Z.AI, or Meta Model API.
+with an existing Codex subscription or against OpenRouter, Google AI Studio, OpenAI,
+DeepSeek, Z.AI, or Meta Model API.
 It supplies Codex with one session-scoped Responses provider and a model descriptor
 derived from the installed Codex release, preserving Codex features such as freeform
 `apply_patch`, namespaced tools, parallel tool calls, reasoning, and multi-agent support.
@@ -21,7 +22,8 @@ simplerouter --provider gemini --select-model     # live Google AI Studio catalo
 simplerouter --provider openai --model gpt-5.6-sol
 simplerouter --provider deepseek --model deepseek-v4-flash
 simplerouter --provider zai --model glm-5.2
-simplerouter --provider meta --model muse-spark-1.1
+simplerouter --provider meta --model muse-spark-1.2
+simplerouter --provider codex .                    # existing ChatGPT sign-in, standard routing
 simplerouter . -- --full-auto                     # pass an option through to Codex
 ```
 
@@ -103,6 +105,7 @@ uses a different protocol.
 | DeepSeek | `POST https://api.deepseek.com/chat/completions` | Loopback Responses-to-Chat translator |
 | Z.AI | `POST https://api.z.ai/api/paas/v4/chat/completions` | Loopback Responses-to-Chat translator |
 | Meta Model API | `POST https://api.meta.ai/v1/responses` | Loopback Responses compatibility proxy |
+| Codex subscription | Standard Codex backend | Direct; no provider or endpoint overrides |
 
 The loopback servers bind to `127.0.0.1`, forward the selected session key, and
 shut down with Codex.
@@ -197,6 +200,11 @@ The current OpenAI picker begins with GPT-5.6 Sol, Terra, and Luna. The official
 `gpt-5.6` alias for Sol is accepted with `--model` but omitted from the picker
 to avoid a duplicate row.
 
+Meta's curated list follows the Model API catalog: `muse-spark-1.2` (standard
+tier default), `muse-spark-1.2-contributor` (discounted contributor tier), and
+`muse-spark-1.1`. All three share a 1M-token context window and the same
+reasoning defaults (`high` effort, `auto` summary).
+
 ## Command line
 
 ```text
@@ -204,7 +212,7 @@ simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key
 ```
 
 - `--model MODEL`: model ID, display name, or unique suffix
-- `--provider PROVIDER`: `openrouter`, `gemini`, `openai`, `deepseek`, `zai`, or `meta`
+- `--provider PROVIDER`: `openrouter`, `gemini`, `openai`, `deepseek`, `zai`, `meta`, or `codex`
 - `--select-model`: open the provider/model picker even when a choice is saved
 - `--reset-key`: clear every saved provider key before selection
 - `--disable-thinking`: disable Codex reasoning and the provider's thinking mode
@@ -238,6 +246,11 @@ discarding model choices.
 The temporary Codex provider reads the selected key from the private
 `SIMPLEROUTER_CODEX_API_KEY` environment variable. Existing environment entries
 and normal Codex configuration remain available to Codex unchanged.
+
+The `codex` provider launches the patched companion with the user's existing Codex
+configuration and stored ChatGPT sign-in. It does not create a temporary model
+provider, set a base URL, select an API key, or start a proxy. A child-process-only
+marker enables the companion's generation-rate display without changing routing.
 
 ## Compatibility notes
 
@@ -282,4 +295,6 @@ Protocol references used by this implementation:
 - [Gemini Interactions API V1](https://ai.google.dev/api/interactions-api-v1)
 - [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion)
 - [Z.AI Chat Completions](https://docs.z.ai/api-reference/llm/chat-completion)
+- [Meta Model API models](https://dev.meta.ai/docs/models) (`muse-spark-1.2`, `muse-spark-1.2-contributor`, `muse-spark-1.1`)
+- [Meta Model API coding agents (Codex)](https://dev.meta.ai/docs/coding-agents)
 - [Meta Muse Spark 1.1 and Model API](https://ai.meta.com/blog/introducing-muse-spark-meta-model-api/)

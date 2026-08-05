@@ -579,13 +579,15 @@ func TestResetSavedKeyClearsBothKeys(t *testing.T) {
 
 func TestInferProviderFromModel(t *testing.T) {
 	cases := map[string]string{
-		"z-ai/glm-5.2":          providerOpenRouter,
-		"gemini-2.5-flash":      providerGemini,
-		"models/gemini-2.5-pro": providerGemini,
-		"models/other-model":    providerGemini,
-		"glm-5.2":               providerZAI,
-		"muse-spark-1.1":        providerMeta,
-		"":                      "",
+		"z-ai/glm-5.2":               providerOpenRouter,
+		"gemini-2.5-flash":           providerGemini,
+		"models/gemini-2.5-pro":      providerGemini,
+		"models/other-model":         providerGemini,
+		"glm-5.2":                    providerZAI,
+		"muse-spark-1.1":             providerMeta,
+		"muse-spark-1.2":             providerMeta,
+		"muse-spark-1.2-contributor": providerMeta,
+		"":                           "",
 	}
 	for input, want := range cases {
 		if got := inferProviderFromModel(input); got != want {
@@ -789,9 +791,78 @@ func TestOpenAILaunchesAgainstNativeResponses(t *testing.T) {
 	}
 }
 
+func TestCodexSubscriptionLaunchPreservesExistingCodexRoutingAndAuth(t *testing.T) {
+	home := withTestHome(t)
+	work := filepath.Join(home, "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfig(Config{
+		Provider:         providerOpenRouter,
+		OpenRouterAPIKey: "sk-or-test",
+		LastModel:        "z-ai/glm-5.2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepareCodexModelCatalogFn = func(string, Model, bool) (string, func(), error) {
+		t.Fatal("subscription launch must not prepare a temporary model catalog")
+		return "", func() {}, nil
+	}
+	t.Setenv(codexAPIKeyEnv, "stale-session-key")
+	t.Setenv(codexTokenRateEnv, "stale-marker")
+	t.Setenv("SIMPLEROUTER_TEST_INHERITED", "present")
+
+	var spec launchSpec
+	stderr := &strings.Builder{}
+	a := &app{
+		stdin:  strings.NewReader(""),
+		stdout: &strings.Builder{},
+		stderr: stderr,
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
+	}
+	if err := a.run(context.Background(), []string{
+		"--provider", "codex",
+		work,
+		"fix", "the tests",
+		"--", "--full-auto",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	wantArgs := []string{"--full-auto", "fix the tests"}
+	if !slices.Equal(spec.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
+	}
+	if spec.Path != filepath.Join(home, "codex-test") || spec.Dir != work {
+		t.Fatalf("launch target = (%q, %q)", spec.Path, spec.Dir)
+	}
+	env := envMap(spec.Env)
+	if env[codexTokenRateEnv] != "1" || env["SIMPLEROUTER_TEST_INHERITED"] != "present" {
+		t.Fatalf("subscription environment = %v", env)
+	}
+	if _, ok := env[codexAPIKeyEnv]; ok {
+		t.Fatalf("subscription launch retained %s", codexAPIKeyEnv)
+	}
+	if !strings.Contains(stderr.String(), "existing ChatGPT sign-in") {
+		t.Fatalf("subscription launch summary missing: %q", stderr.String())
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != providerCodex || cfg.OpenRouterAPIKey != "sk-or-test" || cfg.LastModel != "z-ai/glm-5.2" {
+		t.Fatalf("config = %+v", cfg)
+	}
+}
+
 func TestMetaLaunchesThroughResponsesCompatibilityProxy(t *testing.T) {
 	home := withTestHome(t)
-	if err := saveConfig(Config{Provider: providerMeta, MetaAPIKey: "meta-test", LastMetaModel: "muse-spark-1.1"}); err != nil {
+	if err := saveConfig(Config{Provider: providerMeta, MetaAPIKey: "meta-test", LastMetaModel: "muse-spark-1.2"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -826,10 +897,13 @@ func TestMetaLaunchesThroughResponsesCompatibilityProxy(t *testing.T) {
 	if err := a.run(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if proxyBase != srv.URL || proxyModel != "muse-spark-1.1" {
+	if proxyBase != srv.URL || proxyModel != "muse-spark-1.2" {
 		t.Fatalf("Meta proxy got (%q, %q)", proxyBase, proxyModel)
 	}
 	model := curatedProviderModels(providerMeta)[0]
+	if model.ID != "muse-spark-1.2" {
+		t.Fatalf("default Meta model = %q, want muse-spark-1.2", model.ID)
+	}
 	wantArgs := metaCodexArgs(model, "http://127.0.0.1:9393/v1", filepath.Join(home, "models.json"), false, nil, nil)
 	if !slices.Equal(spec.Args, wantArgs) {
 		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
@@ -839,6 +913,61 @@ func TestMetaLaunchesThroughResponsesCompatibilityProxy(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "reasoning high") {
 		t.Fatalf("launch summary missing Meta reasoning level: %q", stderr.String())
+	}
+}
+
+func TestMetaContributorModelLaunches(t *testing.T) {
+	home := withTestHome(t)
+	if err := saveConfig(Config{Provider: providerMeta, MetaAPIKey: "meta-test", LastMetaModel: "muse-spark-1.2-contributor"}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+
+	var proxyModel string
+	startMetaResponsesProxyFn = func(_, model string, _ *http.Client) (string, func(), error) {
+		proxyModel = model
+		return "http://127.0.0.1:9394/v1", func() {}, nil
+	}
+
+	var spec launchSpec
+	a := &app{
+		stdin:       strings.NewReader("\n\n"),
+		stdout:      &strings.Builder{},
+		stderr:      &strings.Builder{},
+		httpClient:  srv.Client(),
+		metaAPIBase: srv.URL,
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
+	}
+	if err := a.run(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if proxyModel != "muse-spark-1.2-contributor" {
+		t.Fatalf("Meta proxy model = %q, want muse-spark-1.2-contributor", proxyModel)
+	}
+	var model Model
+	for _, m := range curatedProviderModels(providerMeta) {
+		if m.ID == "muse-spark-1.2-contributor" {
+			model = m
+			break
+		}
+	}
+	if model.ID == "" {
+		t.Fatal("muse-spark-1.2-contributor missing from curated Meta models")
+	}
+	wantArgs := metaCodexArgs(model, "http://127.0.0.1:9394/v1", filepath.Join(home, "models.json"), false, nil, nil)
+	if !slices.Equal(spec.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
 	}
 }
 
