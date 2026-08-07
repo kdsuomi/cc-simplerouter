@@ -299,6 +299,11 @@ func geminiSupportsMixedTools(model string) bool {
 	return strings.Contains(strings.ToLower(model), "gemini-3")
 }
 
+// emptyGeminiFunctionParameters is the minimal JSON Schema Gemini's Interactions
+// API accepts for parameterless tools. Omitting parameters, or sending null,
+// fails with: "schema at top-level must be a boolean or an object".
+var emptyGeminiFunctionParameters = json.RawMessage(`{"type":"object","properties":{}}`)
+
 func geminiInteractionFunction(name, description string, parameters json.RawMessage) map[string]any {
 	tool := map[string]any{
 		"type": "function",
@@ -307,10 +312,18 @@ func geminiInteractionFunction(name, description string, parameters json.RawMess
 	if description != "" {
 		tool["description"] = description
 	}
-	if scrubbed := scrubJSONSchema(parameters); len(scrubbed) > 0 {
-		if schema, ok := rawJSONValue(scrubbed); ok {
-			tool["parameters"] = schema
-		}
+	// Interactions requires parameters to be a boolean or object schema.
+	// scrubJSONSchema returns nil for empty/unusable Codex schemas (e.g.
+	// get_context_remaining / new_context with properties:{}), so fall back
+	// to an empty object schema instead of omitting the field.
+	schema := scrubJSONSchema(parameters)
+	if len(schema) == 0 {
+		schema = emptyGeminiFunctionParameters
+	}
+	if value, ok := rawJSONValue(schema); ok {
+		tool["parameters"] = value
+	} else {
+		tool["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
 	return tool
 }

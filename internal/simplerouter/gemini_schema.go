@@ -3,11 +3,12 @@ package simplerouter
 import "encoding/json"
 
 // scrubJSONSchema converts a Codex function schema into the OpenAPI subset
-// Gemini accepts through its OpenAI-compatible function-calling surface.
+// Gemini accepts through its function-calling / Interactions surface.
 // Gemini rejects requests containing unknown schema keywords, so this strips
 // or rewrites everything outside the accepted subset. Returns nil when the
-// schema is empty or unusable — callers should omit parameters entirely then
-// (Gemini rejects OBJECT schemas with empty properties).
+// schema is empty or unusable — callers must still send a parameters schema
+// to the Interactions API (use an empty object schema); omitting parameters
+// fails with "schema at top-level must be a boolean or an object".
 func scrubJSONSchema(raw json.RawMessage) json.RawMessage {
 	if len(raw) == 0 {
 		return nil
@@ -241,7 +242,9 @@ func unionStringSlices(a, b any) []any {
 }
 
 // emptyObjectSchema reports whether a scrubbed schema carries no constraints
-// worth sending (Gemini rejects OBJECT schemas with an empty properties map).
+// worth preserving. Callers of scrubJSONSchema should substitute a minimal
+// empty object schema for Interactions function tools rather than omitting
+// parameters.
 func emptyObjectSchema(m map[string]any) bool {
 	if len(m) == 0 {
 		return true

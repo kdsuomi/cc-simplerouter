@@ -76,6 +76,57 @@ func TestResponsesToolsToGeminiInteractionsPreservesCodexToolsAndSearch(t *testi
 	}
 }
 
+func TestGeminiInteractionFunctionAlwaysSendsParametersSchema(t *testing.T) {
+	// Codex ships parameterless tools as empty object schemas. After scrubbing,
+	// Interactions still requires a parameters object (or boolean).
+	cases := []struct {
+		name       string
+		parameters json.RawMessage
+	}{
+		{"missing", nil},
+		{"null", json.RawMessage(`null`)},
+		{"empty object", json.RawMessage(`{}`)},
+		{"empty properties", json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)},
+		{"type object only", json.RawMessage(`{"type":"object"}`)},
+		{"invalid json", json.RawMessage(`not-json`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tool := geminiInteractionFunction("get_context_remaining", "remaining tokens", tc.parameters)
+			params, ok := tool["parameters"].(map[string]any)
+			if !ok {
+				t.Fatalf("parameters missing or not an object: %#v", tool)
+			}
+			if params["type"] != "object" {
+				t.Fatalf("parameters.type = %#v, want object", params["type"])
+			}
+			props, _ := params["properties"].(map[string]any)
+			if props == nil {
+				t.Fatalf("parameters.properties missing: %#v", params)
+			}
+			if _, hasAdditional := params["additionalProperties"]; hasAdditional {
+				t.Fatalf("additionalProperties should be scrubbed: %#v", params)
+			}
+		})
+	}
+
+	// Non-empty schemas still scrub and preserve useful fields.
+	tool := geminiInteractionFunction("shell_command", "run", json.RawMessage(`{
+		"type":"object",
+		"additionalProperties":false,
+		"properties":{"command":{"type":"string","description":"cmd"}},
+		"required":["command"]
+	}`))
+	params := tool["parameters"].(map[string]any)
+	props := params["properties"].(map[string]any)
+	if props["command"].(map[string]any)["type"] != "string" {
+		t.Fatalf("shell parameters not preserved: %#v", params)
+	}
+	if _, ok := params["additionalProperties"]; ok {
+		t.Fatalf("additionalProperties should be scrubbed: %#v", params)
+	}
+}
+
 func TestGeminiInteractionGenerationConfigMapsReasoning(t *testing.T) {
 	req := &responsesRequest{
 		Reasoning:       &responsesReasoning{Effort: "minimal", Summary: "auto"},
