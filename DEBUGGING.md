@@ -15,11 +15,25 @@ captured Codex request (it includes `web_search`) directly to
 `https://openrouter.ai/api/v1/responses` and test whether the concatenated
 reasoning deltas satisfy first-half == second-half.
 
-Related metric trap: for these server-tools children the OpenRouter dashboard's
-generation_time includes the provider time-to-first-token, so its displayed
-throughput underestimates the decode rate; the parent generation's
-generation_time is the client-facing decode window and matches the patched
-TUI's tok/s (native output tokens / first-to-last output delta).
+Related metric trap: OpenRouter's `generation_time` can include provider
+time-to-first-token, so a single unlabeled tok/s value can ambiguously describe
+either decode speed or whole-request throughput. The patched TUI reports both:
+
+- `stream` uses native output tokens over first-to-last output timing. It uses
+  `N - 1` token intervals per response and combines retries without counting the
+  gaps between them.
+- `API` uses native output tokens over cumulative active API time. It includes
+  time-to-first-token and delivery stalls, but excludes local tool execution and
+  between-request orchestration.
+
+While a response is live, both values use categorized character estimates and
+are prefixed with `~`. Text, tool arguments, and reasoning are counted; raw
+reasoning takes precedence over its summary to avoid double-counting. The live
+display waits for at least eight estimated tokens and 250 ms of output, and its
+content/raw-reasoning calibration is updated from exact terminal usage. Once
+upstream usage arrives, the exact output and reasoning token counts replace the
+estimate. These distinctions are intentional when comparing the TUI with an
+OpenRouter generation record.
 
 ## Codex companion: know the source of truth
 

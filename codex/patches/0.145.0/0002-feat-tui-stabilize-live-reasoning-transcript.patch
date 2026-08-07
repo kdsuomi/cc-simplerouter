@@ -1,7 +1,7 @@
-From 7b61555a7636507618ce436b6804018c4e58f4ed Mon Sep 17 00:00:00 2001
+From 02a30c38a30b47f748dac60339e1b9fbb0ffe2e9 Mon Sep 17 00:00:00 2001
 From: Kyle <kdsuomi@users.noreply.github.com>
 Date: Tue, 28 Jul 2026 00:03:04 -0400
-Subject: [PATCH 2/3] feat(tui): stabilize live reasoning transcript
+Subject: [PATCH 2/4] feat(tui): stabilize live reasoning transcript
 
 ---
  codex-rs/tui/src/chatwidget/live_reasoning.rs |   5 +-
