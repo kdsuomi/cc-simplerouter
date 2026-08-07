@@ -25,6 +25,7 @@ const (
 	providerDeepSeek   = "deepseek"
 	providerZAI        = "zai"
 	providerMeta       = "meta"
+	providerXAI        = "xai"
 	providerCodex      = "codex"
 )
 
@@ -39,6 +40,7 @@ type app struct {
 	deepSeekAPIBase string // DeepSeek API base override (tests)
 	zaiAPIBase      string // Z.AI API base override (tests)
 	metaAPIBase     string // Meta API base override (tests)
+	xaiAPIBase      string // xAI API base override (tests)
 	lineReader      *bufio.Reader
 	runCommand      func(spec launchSpec) error
 }
@@ -51,7 +53,9 @@ var startGeminiResponsesProxyFn = startGeminiResponsesProxy
 var startDeepSeekResponsesProxyFn = startDeepSeekResponsesProxy
 var startZAIResponsesProxyFn = startZAIResponsesProxy
 var startMetaResponsesProxyFn = startMetaResponsesProxy
+var startXAIResponsesProxyFn = startXAIResponsesProxy
 var startResponsesPassthroughProxyFn = startResponsesPassthroughProxy
+var loadGrokCLISessionTokenFn = loadGrokCLISessionToken
 
 func Main(args []string) int {
 	a := &app{
@@ -79,7 +83,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("simplerouter", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
 	fs.StringVar(&modelFlag, "model", "", "Model id, name, or unique suffix")
-	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "deepseek", "zai", "meta", or "codex"`)
+	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "xai", "deepseek", "zai", "meta", or "codex"`)
 	fs.BoolVar(&selectModel, "select-model", false, "Select a provider and model interactively")
 	fs.BoolVar(&resetKey, "reset-key", false, "Forget the saved API keys before launching")
 	fs.BoolVar(&disableThinking, "disable-thinking", false, "Disable model reasoning for provider compatibility")
@@ -106,7 +110,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 		return err
 	}
 	style := newTerminalStyle(a.stderr)
-	firstRun := modelFlag == "" && cfg.Provider == "" && cfg.LastModel == "" && cfg.LastGeminiModel == "" && cfg.LastOpenAIModel == "" && cfg.LastDeepSeekModel == "" && cfg.LastZAIModel == "" && cfg.LastMetaModel == ""
+	firstRun := modelFlag == "" && cfg.Provider == "" && cfg.LastModel == "" && cfg.LastGeminiModel == "" && cfg.LastOpenAIModel == "" && cfg.LastDeepSeekModel == "" && cfg.LastZAIModel == "" && cfg.LastMetaModel == "" && cfg.LastGrokModel == ""
 	if firstRun {
 		printSetupBanner(a.stderr, style)
 		fmt.Fprintln(a.stderr)
@@ -145,7 +149,9 @@ func (a *app) run(ctx context.Context, args []string) error {
 	// saved config, or --model inference.
 	var key string
 	var res pickResult
+	var persistKey = true
 	for {
+		persistKey = true
 		switch provider {
 		case providerGemini:
 			key, res, err = a.selectGemini(ctx, cfg, modelFlag, selectModel, firstRun, style)
@@ -157,6 +163,8 @@ func (a *app) run(ctx context.Context, args []string) error {
 			key, res, err = a.selectZAI(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		case providerMeta:
 			key, res, err = a.selectMeta(ctx, cfg, modelFlag, selectModel, firstRun, style)
+		case providerXAI:
+			key, persistKey, res, err = a.selectXAI(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		default:
 			key, res, err = a.selectOpenRouter(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		}
@@ -193,6 +201,11 @@ func (a *app) run(ctx context.Context, args []string) error {
 	case providerMeta:
 		cfg.MetaAPIKey = key
 		cfg.LastMetaModel = modelID
+	case providerXAI:
+		if persistKey {
+			cfg.XAIAPIKey = key
+		}
+		cfg.LastGrokModel = modelID
 	default:
 		cfg.OpenRouterAPIKey = key
 		cfg.LastModel = modelID
@@ -239,6 +252,13 @@ func (a *app) run(ctx context.Context, args []string) error {
 		}
 		defer stop()
 		baseURL = proxyURL
+	case provider == providerXAI:
+		proxyURL, stop, perr := startXAIResponsesProxyFn(a.xaiBase(), modelID, a.httpClient)
+		if perr != nil {
+			return fmt.Errorf("start xAI Responses proxy: %w", perr)
+		}
+		defer stop()
+		baseURL = proxyURL
 	default:
 		baseURL = a.openRouterBase()
 		proxyURL, stop, perr := startResponsesPassthroughProxyFn(baseURL, modelID, a.httpClient, responsesPassthroughOptions{
@@ -258,11 +278,11 @@ func (a *app) run(ctx context.Context, args []string) error {
 	}
 	defer cleanupCatalog()
 
-	thinkingMode := launchThinkingMode(provider, disableThinking)
+	thinkingMode := launchThinkingMode(provider, selected, disableThinking)
 	a.printLaunchSummary(modelID, selected.ContextLength, thinkingMode, dir, launchProviderLabel(provider, res))
 	launchArgs := codexArgs(modelID, baseURL, catalogPath, disableThinking, codexPositionals, passthrough)
-	if provider == providerMeta {
-		launchArgs = metaCodexArgs(selected, baseURL, catalogPath, disableThinking, codexPositionals, passthrough)
+	if provider == providerMeta || provider == providerXAI {
+		launchArgs = reasoningAwareCodexArgs(selected, baseURL, catalogPath, disableThinking, codexPositionals, passthrough)
 	}
 	spec := launchSpec{
 		Path: codexPath,
@@ -330,6 +350,9 @@ func inferProviderFromModel(model string) string {
 	if strings.HasPrefix(lower, "muse-") {
 		return providerMeta
 	}
+	if strings.HasPrefix(lower, "grok-") {
+		return providerXAI
+	}
 	return ""
 }
 
@@ -340,6 +363,8 @@ func canonicalProvider(input string) string {
 		return providerCodex
 	case "z-ai", "z.ai", "bigmodel", "zhipu":
 		return providerZAI
+	case "grok", "x-ai", "x.ai", "spacexai":
+		return providerXAI
 	default:
 		return p
 	}
@@ -347,7 +372,7 @@ func canonicalProvider(input string) string {
 
 func isKnownProvider(provider string) bool {
 	switch provider {
-	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta, providerCodex:
+	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta, providerXAI, providerCodex:
 		return true
 	default:
 		return false
@@ -355,7 +380,7 @@ func isKnownProvider(provider string) bool {
 }
 
 func providerNames() []string {
-	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta, providerCodex}
+	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerXAI, providerDeepSeek, providerZAI, providerMeta, providerCodex}
 }
 
 func (a *app) openRouterBase() string {
@@ -401,6 +426,13 @@ func (a *app) metaBase() string {
 	return defaultMetaAPIBase
 }
 
+func (a *app) xaiBase() string {
+	if strings.TrimSpace(a.xaiAPIBase) != "" {
+		return a.xaiAPIBase
+	}
+	return defaultXAIAPIBase
+}
+
 func launchProviderLabel(provider string, res pickResult) string {
 	switch provider {
 	case providerGemini:
@@ -413,15 +445,29 @@ func launchProviderLabel(provider string, res pickResult) string {
 		return "Z.AI"
 	case providerMeta:
 		return "Meta"
+	case providerXAI:
+		return "xAI"
 	}
 	return res.ProviderName // pinned OpenRouter endpoint, or ""
 }
 
-func launchThinkingMode(provider string, disableThinking bool) string {
+func launchThinkingMode(provider string, model Model, disableThinking bool) string {
+	if provider == providerXAI && modelSupportsReasoning(model) && len(model.SupportedReasoningEfforts) == 0 {
+		return "fixed"
+	}
 	if disableThinking {
+		if provider == providerXAI && modelSupportsReasoning(model) && !slices.Contains(model.SupportedReasoningEfforts, "none") {
+			return "low"
+		}
 		return "disabled"
 	}
-	if provider == providerMeta {
+	if provider == providerMeta || provider == providerXAI {
+		if !modelSupportsReasoning(model) {
+			return "disabled"
+		}
+		if effort := strings.TrimSpace(model.DefaultReasoningEffort); effort != "" {
+			return effort
+		}
 		return "high"
 	}
 	return "provider default"
@@ -611,6 +657,60 @@ func (a *app) metaKey(ctx context.Context, cfg Config) (string, error) {
 	})
 }
 
+// xaiKey resolves credentials for the xAI Responses API, in order:
+//  1. XAI_API_KEY / GROK_API_KEY environment variables
+//  2. Saved simplerouter xai_api_key
+//  3. Grok CLI OIDC session in ~/.grok/auth.json (auto-refreshed)
+//  4. Interactive prompt
+//
+// Session tokens are not persisted into simplerouter's config (they expire and
+// belong to the CLI auth file). persist is false for that source.
+func (a *app) xaiKey(ctx context.Context, cfg Config) (key string, persist bool, err error) {
+	validate := func(ctx context.Context, key string) error {
+		return validateBearerModelsKey(ctx, a.httpClient, a.xaiBase(), key, "xAI")
+	}
+	for _, name := range []string{"XAI_API_KEY", "GROK_API_KEY"} {
+		if key := cleanAPIKey(os.Getenv(name)); key != "" {
+			return key, true, nil
+		}
+	}
+	if cfg.XAIAPIKey != "" {
+		if err := validate(ctx, cfg.XAIAPIKey); err == nil {
+			return cfg.XAIAPIKey, true, nil
+		} else if errors.Is(err, errProviderKeyRejected) {
+			fmt.Fprintln(a.stderr, newTerminalStyle(a.stderr).warning("Saved xAI API key is no longer valid."))
+		} else {
+			fmt.Fprintln(a.stderr, newTerminalStyle(a.stderr).warning("Could not reach xAI to validate the saved key; using it anyway."))
+			return cfg.XAIAPIKey, true, nil
+		}
+	}
+	if token, err := loadGrokCLISessionTokenFn(ctx, a.httpClient); err != nil {
+		fmt.Fprintln(a.stderr, newTerminalStyle(a.stderr).warning("Could not load Grok CLI credentials: "+err.Error()))
+	} else if token != "" {
+		if err := validate(ctx, token); err == nil {
+			fmt.Fprintln(a.stderr, newTerminalStyle(a.stderr).paint(clrDim, "Using Grok CLI login from ~/.grok/auth.json"))
+			return token, false, nil
+		} else if errors.Is(err, errProviderKeyRejected) {
+			fmt.Fprintln(a.stderr, newTerminalStyle(a.stderr).warning("Grok CLI session was rejected by xAI; sign in again with `grok login` or paste an API key."))
+		} else {
+			fmt.Fprintln(a.stderr, newTerminalStyle(a.stderr).warning("Could not reach xAI to validate the Grok CLI session; using it anyway."))
+			return token, false, nil
+		}
+	}
+	key, err = a.promptAPIKey("xAI")
+	if err != nil {
+		return "", false, err
+	}
+	if err := validate(ctx, key); err != nil {
+		if errors.Is(err, errProviderKeyRejected) {
+			return "", false, err
+		}
+		fmt.Fprintln(a.stderr, newTerminalStyle(a.stderr).warning("Could not reach xAI to validate the key; using it anyway."))
+		return key, true, nil
+	}
+	return key, true, nil
+}
+
 func (a *app) providerKey(ctx context.Context, label string, envNames []string, saved string, validate func(context.Context, string) error) (string, error) {
 	for _, name := range envNames {
 		if key := cleanAPIKey(os.Getenv(name)); key != "" {
@@ -729,6 +829,15 @@ func (a *app) selectMeta(ctx context.Context, cfg Config, modelFlag string, sele
 		return "", pickResult{}, err
 	}
 	return a.selectStaticModel(providerMeta, "Meta", key, cfg.LastMetaModel, modelFlag, selectModel, firstRun, style)
+}
+
+func (a *app) selectXAI(ctx context.Context, cfg Config, modelFlag string, selectModel, firstRun bool, style terminalStyle) (string, bool, pickResult, error) {
+	key, persist, err := a.xaiKey(ctx, cfg)
+	if err != nil {
+		return "", false, pickResult{}, err
+	}
+	key, res, err := a.selectStaticModel(providerXAI, "xAI", key, cfg.LastGrokModel, modelFlag, selectModel, firstRun, style)
+	return key, persist, res, err
 }
 
 func (a *app) selectStaticModel(provider, label, key, lastModel, modelFlag string, selectModel, firstRun bool, style terminalStyle) (string, pickResult, error) {

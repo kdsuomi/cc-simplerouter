@@ -55,6 +55,54 @@ func TestMetaResponsesOptions(t *testing.T) {
 	}
 }
 
+func TestXAIResponsesOptions(t *testing.T) {
+	got := xaiResponsesOptions("grok-4.5")
+	if got.Label != "xAI" || !got.TranslateCustomTools || !got.FlattenNamespaces {
+		t.Fatalf("xAI options = %+v", got)
+	}
+	if !got.OmitNullEncryptedReasoningContent || got.OmitReasoningControls {
+		t.Fatalf("xAI Grok 4.5 reasoning options = %+v", got)
+	}
+	for input, want := range map[string]string{
+		"none": "low", "minimal": "low", "xhigh": "high", "max": "high", "ultra": "high",
+	} {
+		if got.ReasoningEffortMap[input] != want {
+			t.Fatalf("xAI Grok 4.5 effort map[%q] = %q, want %q", input, got.ReasoningEffortMap[input], want)
+		}
+	}
+	allowed := map[string]bool{}
+	for _, tpe := range got.AllowedToolTypes {
+		allowed[tpe] = true
+	}
+	if !allowed["function"] || allowed["namespace"] || allowed["tool_search"] || allowed["custom"] {
+		t.Fatalf("xAI allowed tool types = %#v", got.AllowedToolTypes)
+	}
+
+	grok43 := xaiResponsesOptions("grok-4.3")
+	if _, mapped := grok43.ReasoningEffortMap["none"]; mapped {
+		t.Fatalf("Grok 4.3 none effort should be preserved: %#v", grok43.ReasoningEffortMap)
+	}
+	if grok43.ReasoningEffortMap["xhigh"] != "high" {
+		t.Fatalf("Grok 4.3 xhigh effort map = %#v", grok43.ReasoningEffortMap)
+	}
+
+	multiAgent := xaiResponsesOptions("grok-4.20-multi-agent-0309")
+	if multiAgent.ReasoningEffortMap["xhigh"] != "xhigh" || multiAgent.ReasoningEffortMap["ultra"] != "xhigh" {
+		t.Fatalf("Grok Multi-Agent effort map = %#v", multiAgent.ReasoningEffortMap)
+	}
+
+	for _, model := range []string{"grok-build-0.1", "grok-4.20-0309-reasoning"} {
+		fixed := xaiResponsesOptions(model)
+		if !fixed.OmitReasoningEffort || fixed.OmitReasoningControls {
+			t.Fatalf("%s fixed reasoning options = %+v", model, fixed)
+		}
+	}
+	nonReasoning := xaiResponsesOptions("grok-4.20-0309-non-reasoning")
+	if nonReasoning.OmitReasoningEffort || !nonReasoning.OmitReasoningControls {
+		t.Fatalf("Grok non-reasoning options = %+v", nonReasoning)
+	}
+}
+
 func TestDeepSeekResponsesRequestMatchesCurrentAPI(t *testing.T) {
 	body := captureProviderChatRequest(t, "deepseek-v4-flash", deepSeekResponsesOptions(false), "low")
 

@@ -10,6 +10,337 @@ import (
 	"testing"
 )
 
+func TestXAIPassthroughFlattensNamespacesAndDropsUnsupportedTools(t *testing.T) {
+	captured := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Upstream returns a flattened namespaced function call; proxy must restore namespace for Codex.
+		fmt.Fprint(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"collaboration__list_agents\",\"call_id\":\"call_1\",\"arguments\":\"{\\\"limit\\\":1}\"}}\n\n")
+		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"name\":\"collaboration__list_agents\",\"call_id\":\"call_1\",\"arguments\":\"{\\\"limit\\\":1}\"}]}}\n\n")
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(
+		upstream.URL,
+		"grok-4.5",
+		http.DefaultClient,
+		xaiResponsesOptions("grok-4.5"),
+	))
+	defer proxy.Close()
+
+	requestBody := `{
+	  "model":"ignored",
+	  "input":[
+	    {
+	      "type":"function_call",
+	      "name":"list_agents",
+	      "namespace":"collaboration",
+	      "call_id":"call_prior",
+	      "arguments":"{\"limit\":2}"
+	    }
+	  ],
+	  "tools":[
+	    {
+	      "type":"custom",
+	      "name":"apply_patch",
+	      "description":"Apply a patch",
+	      "format":{"type":"grammar","syntax":"lark","definition":"start: PATCH"}
+	    },
+	    {
+	      "type":"namespace",
+	      "name":"collaboration",
+	      "description":"Multi-agent tools",
+	      "tools":[{
+	        "type":"function",
+	        "name":"list_agents",
+	        "strict":true,
+	        "parameters":{"type":"object","properties":{"limit":{"type":"integer"}}}
+	      }]
+	    },
+	    {
+	      "type":"tool_search",
+	      "execution":"client",
+	      "parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+	    },
+	    {
+	      "type":"web_search",
+	      "external_web_access":false,
+	      "search_content_types":["text"]
+	    }
+	  ],
+	  "stream":true,
+	  "reasoning":{"effort":"none"}
+	}`
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/responses", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("proxy status = %d %s", resp.StatusCode, responseBody)
+	}
+	if !strings.Contains(string(responseBody), `"namespace":"collaboration"`) ||
+		!strings.Contains(string(responseBody), `"name":"list_agents"`) {
+		t.Fatalf("stream did not restore Codex namespace identity: %s", responseBody)
+	}
+	if strings.Contains(string(responseBody), "collaboration__list_agents") {
+		t.Fatalf("flattened name leaked back to Codex: %s", responseBody)
+	}
+
+	request := <-captured
+	if request["model"] != "grok-4.5" {
+		t.Fatalf("model = %#v", request["model"])
+	}
+	reasoning := request["reasoning"].(map[string]any)
+	if reasoning["effort"] != "low" {
+		t.Fatalf("reasoning effort = %#v, want low (none mapped)", reasoning)
+	}
+	tools := request["tools"].([]any)
+	var types []string
+	foundFlatNamespace := false
+	foundApplyPatch := false
+	foundWebSearch := false
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		types = append(types, fmt.Sprint(tool["type"])+":"+fmt.Sprint(tool["name"]))
+		switch tool["type"] {
+		case "namespace", "tool_search", "custom":
+			t.Fatalf("unsupported tool type reached xAI: %#v", tool)
+		case "function":
+			if tool["name"] == "collaboration__list_agents" {
+				foundFlatNamespace = true
+			}
+			if tool["name"] == "apply_patch" {
+				foundApplyPatch = true
+			}
+		case "web_search":
+			foundWebSearch = true
+			if _, found := tool["search_content_types"]; found {
+				t.Fatalf("web_search retained search_content_types: %#v", tool)
+			}
+			if _, found := tool["external_web_access"]; found {
+				t.Fatalf("web_search retained external_web_access: %#v", tool)
+			}
+		}
+	}
+	if !foundFlatNamespace || !foundApplyPatch || !foundWebSearch {
+		t.Fatalf("xAI tools incomplete: %s", strings.Join(types, ", "))
+	}
+	input := request["input"].([]any)
+	prior := input[0].(map[string]any)
+	if prior["type"] != "function_call" || prior["name"] != "collaboration__list_agents" {
+		t.Fatalf("prior namespaced call not flattened: %#v", prior)
+	}
+	if _, found := prior["namespace"]; found {
+		t.Fatalf("prior call retained namespace field: %#v", prior)
+	}
+}
+
+func TestXAIPassthroughOmitsCodexNullContentFromEncryptedReasoning(t *testing.T) {
+	captured := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(
+		upstream.URL,
+		"grok-4.5",
+		http.DefaultClient,
+		xaiResponsesOptions("grok-4.5"),
+	))
+	defer proxy.Close()
+
+	requestBody := `{
+	  "model":"ignored",
+	  "input":[
+	    {"type":"message","role":"user","content":[{"type":"input_text","text":"run it"}]},
+	    {"type":"reasoning","summary":[],"content":null,"encrypted_content":"opaque+/=state"},
+	    {"type":"function_call","name":"shell_command","arguments":"{\"command\":\"pwd\"}","call_id":"call_1"},
+	    {"type":"function_call_output","call_id":"call_1","output":"done"}
+	  ],
+	  "tools":[{"type":"function","name":"shell_command","parameters":{"type":"object"}}],
+	  "stream":true
+	}`
+	response, err := http.Post(proxy.URL+"/v1/responses", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("proxy status = %d: %s", response.StatusCode, body)
+	}
+
+	request := <-captured
+	input := request["input"].([]any)
+	reasoning := input[1].(map[string]any)
+	if reasoning["encrypted_content"] != "opaque+/=state" {
+		t.Fatalf("encrypted reasoning changed: %#v", reasoning)
+	}
+	if _, found := reasoning["content"]; found {
+		t.Fatalf("Codex content:null reached xAI: %#v", reasoning)
+	}
+	if _, found := reasoning["summary"]; !found {
+		t.Fatalf("reasoning summary was removed: %#v", reasoning)
+	}
+}
+
+func TestXAINonReasoningPassthroughOmitsReasoning(t *testing.T) {
+	captured := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(
+		upstream.URL,
+		"grok-4.20-0309-non-reasoning",
+		http.DefaultClient,
+		xaiResponsesOptions("grok-4.20-0309-non-reasoning"),
+	))
+	defer proxy.Close()
+
+	response, err := http.Post(proxy.URL+"/v1/responses", "application/json", strings.NewReader(`{
+	  "model":"ignored",
+	  "input":"hello",
+	  "reasoning":{"effort":"high","summary":"auto"},
+	  "stream":true
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("proxy status = %d: %s", response.StatusCode, body)
+	}
+	if _, found := (<-captured)["reasoning"]; found {
+		t.Fatal("reasoning controls reached xAI non-reasoning model")
+	}
+}
+
+func TestXAIFixedReasoningOmitsOnlyEffort(t *testing.T) {
+	request := map[string]json.RawMessage{
+		"reasoning": json.RawMessage(`{"effort":"high","summary":"auto"}`),
+	}
+	if err := omitResponsesReasoningEffort(request); err != nil {
+		t.Fatal(err)
+	}
+	var reasoning map[string]any
+	if err := json.Unmarshal(request["reasoning"], &reasoning); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := reasoning["effort"]; found || reasoning["summary"] != "auto" {
+		t.Fatalf("fixed reasoning controls = %#v", reasoning)
+	}
+
+	onlyEffort := map[string]json.RawMessage{
+		"reasoning": json.RawMessage(`{"effort":"high"}`),
+	}
+	if err := omitResponsesReasoningEffort(onlyEffort); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := onlyEffort["reasoning"]; found {
+		t.Fatalf("empty reasoning object retained: %#v", onlyEffort)
+	}
+}
+
+func TestXAIPassthroughDropsToolChoiceWhenEveryToolIsUnsupported(t *testing.T) {
+	captured := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(
+		upstream.URL,
+		"grok-4.5",
+		http.DefaultClient,
+		xaiResponsesOptions("grok-4.5"),
+	))
+	defer proxy.Close()
+
+	response, err := http.Post(proxy.URL+"/v1/responses", "application/json", strings.NewReader(`{
+	  "model":"ignored",
+	  "input":"hello",
+	  "tools":[{"type":"tool_search","execution":"client"}],
+	  "tool_choice":"auto",
+	  "stream":true
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("proxy status = %d: %s", response.StatusCode, body)
+	}
+
+	request := <-captured
+	if tools := request["tools"].([]any); len(tools) != 0 {
+		t.Fatalf("unsupported tools reached xAI: %#v", tools)
+	}
+	if _, found := request["tool_choice"]; found {
+		t.Fatalf("tool_choice remained after every tool was filtered: %#v", request)
+	}
+	for name, request := range map[string]map[string]json.RawMessage{
+		"empty": {
+			"tools":       json.RawMessage(`[]`),
+			"tool_choice": json.RawMessage(`"auto"`),
+		},
+		"missing": {
+			"tool_choice": json.RawMessage(`"auto"`),
+		},
+	} {
+		if err := filterResponsesToolsByType(request, []string{"function"}); err != nil {
+			t.Fatalf("%s tools: %v", name, err)
+		}
+		if _, found := request["tool_choice"]; found {
+			t.Fatalf("%s tools retained tool_choice: %#v", name, request)
+		}
+	}
+}
+
 func TestResponsesPassthroughPinsOpenRouterEndpointAndRelaysStream(t *testing.T) {
 	captured := make(chan map[string]any, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

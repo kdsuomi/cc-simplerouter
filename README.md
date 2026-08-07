@@ -20,6 +20,7 @@ simplerouter                                      # pick provider, enter key, pi
 simplerouter --model z-ai/glm-5.2 .               # OpenRouter model, current directory
 simplerouter --provider gemini --select-model     # live Google AI Studio catalog
 simplerouter --provider openai --model gpt-5.6-sol
+simplerouter --provider xai --model grok-4.5       # Grok CLI login or XAI_API_KEY
 simplerouter --provider deepseek --model deepseek-v4-flash
 simplerouter --provider zai --model glm-5.2
 simplerouter --provider meta --model muse-spark-1.2
@@ -102,6 +103,7 @@ uses a different protocol.
 | OpenRouter | `POST https://openrouter.ai/api/v1/responses` | Direct, unless an inference endpoint is pinned |
 | Google AI Studio | `POST https://generativelanguage.googleapis.com/v1/interactions?alt=sse` | Loopback Responses-to-Interactions translator |
 | OpenAI | `POST https://api.openai.com/v1/responses` | Direct |
+| xAI (Grok) | `POST https://api.x.ai/v1/responses` | Loopback Responses compatibility proxy |
 | DeepSeek | `POST https://api.deepseek.com/chat/completions` | Loopback Responses-to-Chat translator |
 | Z.AI | `POST https://api.z.ai/api/paas/v4/chat/completions` | Loopback Responses-to-Chat translator |
 | Meta Model API | `POST https://api.meta.ai/v1/responses` | Loopback Responses compatibility proxy |
@@ -178,6 +180,21 @@ and omits Codex's optional `tool_search.limit` field so Meta can validate that
 built-in tool's required-only schema. Codex's unsupported
 `web_search.search_content_types` hint is removed while web search remains enabled.
 
+The xAI (Grok) adapter also preserves the native Responses protocol against
+`https://api.x.ai/v1`. It rewrites Codex freeform `custom` tools (for example
+`apply_patch`) as function tools, flattens multi-agent `namespace` groups into
+`namespace__tool` functions (restoring the original name + `namespace` on the
+return stream), and drops unsupported Codex tool types such as `tool_search`.
+xAI accepts only `function` plus built-ins such as `web_search` and `x_search`.
+Reasoning effort is normalized per model: Grok 4.5 clamps Codex-only levels to
+its documented `low`/`medium`/`high` range, Grok 4.3 preserves true `none`, and
+Grok 4.20 Multi-Agent preserves `xhigh`. Grok Build 0.1 and Grok 4.20 Reasoning
+use their fixed provider effort because xAI rejects the effort control for those
+models; their supported summary control is preserved. Default Grok 4.5 effort is
+`high` with summarized reasoning streamed live. On continuation requests, the
+adapter also removes Codex's serialization-only `content: null` while preserving
+xAI's opaque encrypted reasoning state verbatim.
+
 ## Model selection
 
 Run `simplerouter` or `simplerouter --select-model` to open the provider and
@@ -193,8 +210,13 @@ model pickers.
 OpenRouter and Gemini catalogs are fetched from their live model endpoints.
 The OpenRouter list keeps the provider's popularity order with recommended
 coding models pinned at the top. The Gemini list is restricted to usable text
-generation models. OpenAI, DeepSeek, Z.AI, and Meta use small, documented
+generation models. OpenAI, xAI, DeepSeek, Z.AI, and Meta use small, documented
 curated lists.
+
+xAI's curated list starts with `grok-4.5` (500k context, default high reasoning),
+then `grok-4.3`, `grok-build-0.1`, and the Grok 4.20 reasoning / non-reasoning /
+multi-agent variants. Documented aliases such as `grok-4.5-latest` and
+`grok-latest` are accepted with `--model` but omitted from the picker.
 
 The current OpenAI picker begins with GPT-5.6 Sol, Terra, and Luna. The official
 `gpt-5.6` alias for Sol is accepted with `--model` but omitted from the picker
@@ -212,7 +234,7 @@ simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key
 ```
 
 - `--model MODEL`: model ID, display name, or unique suffix
-- `--provider PROVIDER`: `openrouter`, `gemini`, `openai`, `deepseek`, `zai`, `meta`, or `codex`
+- `--provider PROVIDER`: `openrouter`, `gemini`, `openai`, `xai` (alias `grok`), `deepseek`, `zai`, `meta`, or `codex`
 - `--select-model`: open the provider/model picker even when a choice is saved
 - `--reset-key`: clear every saved provider key before selection
 - `--disable-thinking`: disable Codex reasoning and the provider's thinking mode
@@ -221,7 +243,7 @@ simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key
 If the first positional argument names a directory, Codex starts there. Other
 positional text becomes the initial prompt. A provider can usually be inferred
 from an explicit model ID: slash-qualified IDs select OpenRouter, while
-`gemini-*`, `gpt-*`, `deepseek-*`, `glm-*`, and `muse-*` select their first-class
+`gemini-*`, `gpt-*`, `grok-*`, `deepseek-*`, `glm-*`, and `muse-*` select their first-class
 providers.
 
 ## Keys and local configuration
@@ -233,13 +255,16 @@ Environment variables take precedence over saved values:
 | OpenRouter | `OPENROUTER_API_KEY` |
 | Google AI Studio | `GEMINI_API_KEY`, `GOOGLE_API_KEY` |
 | OpenAI | `OPENAI_API_KEY` |
+| xAI (Grok) | `XAI_API_KEY`, `GROK_API_KEY`, then Grok CLI session in `~/.grok/auth.json` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 | Z.AI | `ZAI_API_KEY`, `BIGMODEL_API_KEY` |
 | Meta | `META_API_KEY`, `MODEL_API_KEY` |
 
 If no environment value is present, the launcher validates a saved key where
 the provider exposes a suitable endpoint, or prompts without echoing in an
-interactive terminal. Selected keys and models are stored in
+interactive terminal. For xAI, a valid Grok CLI login (`grok login`) is reused
+automatically and refreshed via OIDC when expired; that session token is not
+copied into SimpleRouter's config. Selected keys and models are stored in
 `~/.simplerouter/config.json`; `--reset-key` removes the stored keys without
 discarding model choices.
 
@@ -298,3 +323,7 @@ Protocol references used by this implementation:
 - [Meta Model API models](https://dev.meta.ai/docs/models) (`muse-spark-1.2`, `muse-spark-1.2-contributor`, `muse-spark-1.1`)
 - [Meta Model API coding agents (Codex)](https://dev.meta.ai/docs/coding-agents)
 - [Meta Muse Spark 1.1 and Model API](https://ai.meta.com/blog/introducing-muse-spark-meta-model-api/)
+- [xAI Models](https://docs.x.ai/developers/models) (`grok-4.5`, `grok-4.3`, `grok-build-0.1`)
+- [xAI Responses API](https://docs.x.ai/developers/model-capabilities/text/generate-text)
+- [xAI Reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning)
+- [Grok Build authentication](https://docs.x.ai/build/enterprise#authentication)

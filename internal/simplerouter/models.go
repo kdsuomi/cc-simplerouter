@@ -28,6 +28,10 @@ var recommendedGeminiModelIDs = []string{
 }
 
 var recommendedFirstClassModelIDs = []string{
+	"grok-4.5",
+	"grok-4.3",
+	"grok-build-0.1",
+	"grok-4.20-0309-reasoning",
 	"muse-spark-1.2",
 	"muse-spark-1.2-contributor",
 	"muse-spark-1.1",
@@ -105,6 +109,38 @@ func curatedProviderModels(provider string) []Model {
 			muse("muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor"),
 			muse("muse-spark-1.1", "Muse Spark 1.1"),
 		}
+	case providerXAI:
+		// xAI text models from https://docs.x.ai/developers/models (August 2026).
+		// Grok 4.5 supports low/medium/high and cannot disable reasoning. Grok 4.3
+		// additionally supports none; only the multi-agent model supports xhigh.
+		// Grok Build 0.1 and Grok 4.20 Reasoning use fixed, non-configurable effort.
+		grokReasoning := func(id, name string, ctx int, efforts []string, defaultEffort string) Model {
+			autoCompact := int(float64(ctx) * 0.8)
+			return Model{
+				ID:                        id,
+				Name:                      name,
+				ContextLength:             ctx,
+				SupportedParameters:       []string{"tools", "reasoning"},
+				SupportedReasoningEfforts: efforts,
+				DefaultReasoningEffort:    defaultEffort,
+				DefaultReasoningSummary:   "auto",
+				AutoCompactTokenLimit:     autoCompact,
+			}
+		}
+		models = []Model{
+			grokReasoning("grok-4.5", "Grok 4.5", 500_000, []string{"low", "medium", "high"}, "high"),
+			grokReasoning("grok-4.3", "Grok 4.3", 1_000_000, []string{"none", "low", "medium", "high"}, "low"),
+			grokReasoning("grok-build-0.1", "Grok Build 0.1", 256_000, nil, ""),
+			grokReasoning("grok-4.20-0309-reasoning", "Grok 4.20 Reasoning", 1_000_000, nil, ""),
+			{
+				ID:                    "grok-4.20-0309-non-reasoning",
+				Name:                  "Grok 4.20 Non-Reasoning",
+				ContextLength:         1_000_000,
+				SupportedParameters:   []string{"tools"},
+				AutoCompactTokenLimit: 800_000,
+			},
+			grokReasoning("grok-4.20-multi-agent-0309", "Grok 4.20 Multi-Agent", 1_000_000, []string{"low", "medium", "high", "xhigh"}, "high"),
+		}
 	}
 	return append([]Model(nil), models...)
 }
@@ -116,6 +152,14 @@ func curatedProviderModelAliases(provider string) []Model {
 	case providerOpenAI:
 		return []Model{
 			{ID: "gpt-5.6", Name: "GPT-5.6 (Sol alias)", ContextLength: 1_050_000, SupportedParameters: []string{"tools", "reasoning"}},
+		}
+	case providerXAI:
+		// Documented aliases from https://docs.x.ai/developers/models
+		return []Model{
+			{ID: "grok-4.5-latest", Name: "Grok 4.5 (latest alias)", ContextLength: 500_000, SupportedParameters: []string{"tools", "reasoning"}, SupportedReasoningEfforts: []string{"low", "medium", "high"}, DefaultReasoningEffort: "high", DefaultReasoningSummary: "auto", AutoCompactTokenLimit: 400_000},
+			{ID: "grok-build-latest", Name: "Grok Build (latest alias)", ContextLength: 500_000, SupportedParameters: []string{"tools", "reasoning"}, SupportedReasoningEfforts: []string{"low", "medium", "high"}, DefaultReasoningEffort: "high", DefaultReasoningSummary: "auto", AutoCompactTokenLimit: 400_000},
+			{ID: "grok-4.3-latest", Name: "Grok 4.3 (latest alias)", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}, SupportedReasoningEfforts: []string{"none", "low", "medium", "high"}, DefaultReasoningEffort: "low", DefaultReasoningSummary: "auto", AutoCompactTokenLimit: 800_000},
+			{ID: "grok-latest", Name: "Grok (latest alias)", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}, SupportedReasoningEfforts: []string{"none", "low", "medium", "high"}, DefaultReasoningEffort: "low", DefaultReasoningSummary: "auto", AutoCompactTokenLimit: 800_000},
 		}
 	default:
 		return nil

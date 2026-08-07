@@ -21,6 +21,8 @@ func withTestHome(t *testing.T) string {
 	oldPrepareCatalog := prepareCodexModelCatalogFn
 	oldStartResponsesPassthroughProxy := startResponsesPassthroughProxyFn
 	oldStartMetaResponsesProxy := startMetaResponsesProxyFn
+	oldStartXAIResponsesProxy := startXAIResponsesProxyFn
+	oldLoadGrokCLISession := loadGrokCLISessionTokenFn
 	userHomeDir = func() (string, error) { return dir, nil }
 	findCodexFn = func() (string, error) { return filepath.Join(dir, "codex-test"), nil }
 	prepareCodexModelCatalogFn = func(_ string, _ Model, _ bool) (string, func(), error) {
@@ -32,12 +34,21 @@ func withTestHome(t *testing.T) string {
 	startMetaResponsesProxyFn = func(upstreamBase, _ string, _ *http.Client) (string, func(), error) {
 		return upstreamBase, func() {}, nil
 	}
+	startXAIResponsesProxyFn = func(upstreamBase, _ string, _ *http.Client) (string, func(), error) {
+		return upstreamBase, func() {}, nil
+	}
+	// Default: no Grok CLI session so unit tests do not touch the real machine login.
+	loadGrokCLISessionTokenFn = func(context.Context, *http.Client) (string, error) {
+		return "", nil
+	}
 	t.Cleanup(func() {
 		userHomeDir = old
 		findCodexFn = oldFindCodex
 		prepareCodexModelCatalogFn = oldPrepareCatalog
 		startResponsesPassthroughProxyFn = oldStartResponsesPassthroughProxy
 		startMetaResponsesProxyFn = oldStartMetaResponsesProxy
+		startXAIResponsesProxyFn = oldStartXAIResponsesProxy
+		loadGrokCLISessionTokenFn = oldLoadGrokCLISession
 	})
 	return dir
 }
@@ -160,6 +171,36 @@ func TestCurrentOpenAIModelsAndAlias(t *testing.T) {
 	res, ok := resolveModel("gpt-5.6", resolveModels)
 	if !ok || !res.Exact || res.Model.ID != "gpt-5.6" || res.Model.ContextLength != 1_050_000 {
 		t.Fatalf("GPT-5.6 alias resolution = %#v, %v", res, ok)
+	}
+}
+
+func TestCurrentXAIReasoningMetadata(t *testing.T) {
+	models := append(curatedProviderModels(providerXAI), curatedProviderModelAliases(providerXAI)...)
+	byID := make(map[string]Model, len(models))
+	for _, model := range models {
+		byID[model.ID] = model
+	}
+
+	for _, id := range []string{"grok-4.5", "grok-4.5-latest", "grok-build-latest"} {
+		if got := byID[id].SupportedReasoningEfforts; !slices.Equal(got, []string{"low", "medium", "high"}) {
+			t.Fatalf("%s reasoning efforts = %#v", id, got)
+		}
+	}
+	for _, id := range []string{"grok-build-0.1", "grok-4.20-0309-reasoning"} {
+		if got := byID[id].SupportedReasoningEfforts; len(got) != 0 || byID[id].DefaultReasoningEffort != "" || !modelSupportsReasoning(byID[id]) {
+			t.Fatalf("%s fixed reasoning metadata = %#v", id, byID[id])
+		}
+	}
+	for _, id := range []string{"grok-4.3", "grok-4.3-latest", "grok-latest"} {
+		if got := byID[id].SupportedReasoningEfforts; !slices.Equal(got, []string{"none", "low", "medium", "high"}) {
+			t.Fatalf("%s reasoning efforts = %#v", id, got)
+		}
+	}
+	if got := byID["grok-4.20-multi-agent-0309"].SupportedReasoningEfforts; !slices.Equal(got, []string{"low", "medium", "high", "xhigh"}) {
+		t.Fatalf("Grok Multi-Agent reasoning efforts = %#v", got)
+	}
+	if modelSupportsReasoning(byID["grok-4.20-0309-non-reasoning"]) {
+		t.Fatal("Grok non-reasoning model unexpectedly advertises reasoning")
 	}
 }
 
@@ -361,14 +402,30 @@ func TestInvalidSavedKeyPromptsForReplacement(t *testing.T) {
 }
 
 func TestLaunchThinkingMode(t *testing.T) {
-	if got := launchThinkingMode(providerOpenRouter, false); got != "provider default" {
+	if got := launchThinkingMode(providerOpenRouter, Model{}, false); got != "provider default" {
 		t.Fatalf("OpenRouter reasoning mode = %q", got)
 	}
-	if got := launchThinkingMode(providerZAI, false); got != "provider default" {
+	if got := launchThinkingMode(providerZAI, Model{}, false); got != "provider default" {
 		t.Fatalf("Z.AI reasoning mode = %q", got)
 	}
-	if got := launchThinkingMode(providerOpenRouter, true); got != "disabled" {
+	if got := launchThinkingMode(providerOpenRouter, Model{}, true); got != "disabled" {
 		t.Fatalf("disabled reasoning mode = %q", got)
+	}
+	grok45 := Model{SupportedParameters: []string{"reasoning"}, SupportedReasoningEfforts: []string{"low", "medium", "high"}, DefaultReasoningEffort: "high"}
+	if got := launchThinkingMode(providerXAI, grok45, true); got != "low" {
+		t.Fatalf("Grok 4.5 disabled reasoning mode = %q", got)
+	}
+	grok43 := Model{SupportedParameters: []string{"reasoning"}, SupportedReasoningEfforts: []string{"none", "low", "medium", "high"}, DefaultReasoningEffort: "low"}
+	if got := launchThinkingMode(providerXAI, grok43, true); got != "disabled" {
+		t.Fatalf("Grok 4.3 disabled reasoning mode = %q", got)
+	}
+	nonReasoning := Model{SupportedParameters: []string{"tools"}}
+	if got := launchThinkingMode(providerXAI, nonReasoning, false); got != "disabled" {
+		t.Fatalf("Grok non-reasoning mode = %q", got)
+	}
+	fixedReasoning := Model{SupportedParameters: []string{"tools", "reasoning"}}
+	if got := launchThinkingMode(providerXAI, fixedReasoning, true); got != "fixed" {
+		t.Fatalf("Grok fixed reasoning mode = %q", got)
 	}
 }
 
@@ -552,12 +609,14 @@ func TestResetSavedKeyClearsBothKeys(t *testing.T) {
 		DeepSeekAPIKey:    "sk-deepseek",
 		ZAIAPIKey:         "sk-zai",
 		MetaAPIKey:        "sk-meta",
+		XAIAPIKey:         "xai-test",
 		LastModel:         "z-ai/glm-5.2",
 		LastGeminiModel:   "gemini-2.5-flash",
 		LastOpenAIModel:   "gpt-5.5",
 		LastDeepSeekModel: "deepseek-v4-flash",
 		LastZAIModel:      "glm-5.2",
 		LastMetaModel:     "muse-spark-1.1",
+		LastGrokModel:     "grok-4.5",
 	}
 	if err := saveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -569,10 +628,10 @@ func TestResetSavedKeyClearsBothKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.OpenRouterAPIKey != "" || got.GeminiAPIKey != "" || got.OpenAIAPIKey != "" || got.DeepSeekAPIKey != "" || got.ZAIAPIKey != "" || got.MetaAPIKey != "" {
+	if got.OpenRouterAPIKey != "" || got.GeminiAPIKey != "" || got.OpenAIAPIKey != "" || got.DeepSeekAPIKey != "" || got.ZAIAPIKey != "" || got.MetaAPIKey != "" || got.XAIAPIKey != "" {
 		t.Fatalf("keys not cleared: %+v", got)
 	}
-	if got.Provider != providerGemini || got.LastModel != cfg.LastModel || got.LastGeminiModel != cfg.LastGeminiModel || got.LastOpenAIModel != cfg.LastOpenAIModel || got.LastDeepSeekModel != cfg.LastDeepSeekModel || got.LastZAIModel != cfg.LastZAIModel || got.LastMetaModel != cfg.LastMetaModel {
+	if got.Provider != providerGemini || got.LastModel != cfg.LastModel || got.LastGeminiModel != cfg.LastGeminiModel || got.LastOpenAIModel != cfg.LastOpenAIModel || got.LastDeepSeekModel != cfg.LastDeepSeekModel || got.LastZAIModel != cfg.LastZAIModel || got.LastMetaModel != cfg.LastMetaModel || got.LastGrokModel != cfg.LastGrokModel {
 		t.Fatalf("non-key fields changed: %+v", got)
 	}
 }
@@ -587,11 +646,21 @@ func TestInferProviderFromModel(t *testing.T) {
 		"muse-spark-1.1":             providerMeta,
 		"muse-spark-1.2":             providerMeta,
 		"muse-spark-1.2-contributor": providerMeta,
+		"grok-4.5":                   providerXAI,
+		"grok-build-0.1":             providerXAI,
 		"":                           "",
 	}
 	for input, want := range cases {
 		if got := inferProviderFromModel(input); got != want {
 			t.Errorf("inferProviderFromModel(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestCanonicalProviderGrokAliases(t *testing.T) {
+	for _, input := range []string{"xai", "grok", "XAI", "x-ai", "x.ai"} {
+		if got := canonicalProvider(input); got != providerXAI {
+			t.Errorf("canonicalProvider(%q) = %q, want %q", input, got, providerXAI)
 		}
 	}
 }
@@ -916,6 +985,137 @@ func TestMetaLaunchesThroughResponsesCompatibilityProxy(t *testing.T) {
 	}
 }
 
+func TestXAILaunchesThroughResponsesCompatibilityProxy(t *testing.T) {
+	home := withTestHome(t)
+	if err := saveConfig(Config{Provider: providerXAI, XAIAPIKey: "xai-test", LastGrokModel: "grok-4.5"}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+
+	var proxyBase, proxyModel string
+	startXAIResponsesProxyFn = func(upstreamBase, model string, _ *http.Client) (string, func(), error) {
+		proxyBase, proxyModel = upstreamBase, model
+		return "http://127.0.0.1:9494/v1", func() {}, nil
+	}
+	// Avoid reading the real machine's Grok CLI credentials in unit tests.
+	loadGrokCLISessionTokenFn = func(context.Context, *http.Client) (string, error) {
+		return "", nil
+	}
+
+	var spec launchSpec
+	stderr := &strings.Builder{}
+	a := &app{
+		stdin:      strings.NewReader("\n\n"),
+		stdout:     &strings.Builder{},
+		stderr:     stderr,
+		httpClient: srv.Client(),
+		xaiAPIBase: srv.URL,
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
+	}
+	if err := a.run(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if proxyBase != srv.URL || proxyModel != "grok-4.5" {
+		t.Fatalf("xAI proxy got (%q, %q)", proxyBase, proxyModel)
+	}
+	model := curatedProviderModels(providerXAI)[0]
+	if model.ID != "grok-4.5" {
+		t.Fatalf("default Grok model = %q, want grok-4.5", model.ID)
+	}
+	wantArgs := reasoningAwareCodexArgs(model, "http://127.0.0.1:9494/v1", filepath.Join(home, "models.json"), false, nil, nil)
+	if !slices.Equal(spec.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
+	}
+	if envMap(spec.Env)[codexAPIKeyEnv] != "xai-test" {
+		t.Fatalf("session key was not forwarded")
+	}
+	if !strings.Contains(stderr.String(), "reasoning high") {
+		t.Fatalf("launch summary missing xAI reasoning level: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "provider xAI") {
+		t.Fatalf("launch summary missing xAI provider label: %q", stderr.String())
+	}
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != providerXAI || cfg.XAIAPIKey != "xai-test" || cfg.LastGrokModel != "grok-4.5" {
+		t.Fatalf("config = %+v", cfg)
+	}
+}
+
+func TestXAIUsesGrokCLISessionWithoutPersistingToken(t *testing.T) {
+	withTestHome(t)
+	if err := saveConfig(Config{Provider: providerXAI, LastGrokModel: "grok-4.5"}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer session-jwt" {
+			http.Error(w, "bad auth", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+
+	startXAIResponsesProxyFn = func(string, string, *http.Client) (string, func(), error) {
+		return "http://127.0.0.1:9495/v1", func() {}, nil
+	}
+	loadGrokCLISessionTokenFn = func(context.Context, *http.Client) (string, error) {
+		return "session-jwt", nil
+	}
+
+	var spec launchSpec
+	stderr := &strings.Builder{}
+	a := &app{
+		stdin:      strings.NewReader("\n\n"),
+		stdout:     &strings.Builder{},
+		stderr:     stderr,
+		httpClient: srv.Client(),
+		xaiAPIBase: srv.URL,
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
+	}
+	if err := a.run(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if envMap(spec.Env)[codexAPIKeyEnv] != "session-jwt" {
+		t.Fatalf("session JWT was not forwarded to Codex")
+	}
+	if !strings.Contains(stderr.String(), "Using Grok CLI login") {
+		t.Fatalf("expected Grok CLI login notice: %q", stderr.String())
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.XAIAPIKey != "" {
+		t.Fatalf("session JWT should not be persisted: %+v", cfg)
+	}
+	if cfg.LastGrokModel != "grok-4.5" {
+		t.Fatalf("last model not saved: %+v", cfg)
+	}
+}
+
 func TestMetaContributorModelLaunches(t *testing.T) {
 	home := withTestHome(t)
 	if err := saveConfig(Config{Provider: providerMeta, MetaAPIKey: "meta-test", LastMetaModel: "muse-spark-1.2-contributor"}); err != nil {
@@ -1067,7 +1267,7 @@ func TestBareCommandWithLegacyLastModelShowsProviderPicker(t *testing.T) {
 
 	stderr := &strings.Builder{}
 	a := &app{
-		stdin:      strings.NewReader("5\n\n"), // Z.AI, first model
+		stdin:      strings.NewReader("6\n\n"), // Z.AI, first model
 		stdout:     &strings.Builder{},
 		stderr:     stderr,
 		runCommand: func(launchSpec) error { return nil },

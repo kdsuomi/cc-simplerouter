@@ -13,6 +13,42 @@ var freeformFunctionParameters = json.RawMessage(`{
   "additionalProperties":false
 }`)
 
+// responsesToolTranslation holds reverse mappings used when replaying the
+// upstream Responses stream back to Codex after request-side tool rewrites.
+type responsesToolTranslation struct {
+	CustomTools map[string]struct{}
+	// Registry maps flattened function names (namespace__child) back to Codex
+	// identities when FlattenNamespaces is enabled.
+	Registry *responseToolRegistry
+}
+
+func translateResponsesTools(request map[string]json.RawMessage, options responsesPassthroughOptions) (responsesToolTranslation, error) {
+	out := responsesToolTranslation{CustomTools: map[string]struct{}{}}
+	if options.TranslateCustomTools {
+		custom, err := translateResponsesCustomTools(request)
+		if err != nil {
+			return out, err
+		}
+		out.CustomTools = custom
+	}
+	if options.FlattenNamespaces {
+		registry, err := flattenResponsesNamespaceTools(request)
+		if err != nil {
+			return out, err
+		}
+		out.Registry = registry
+		if err := rewriteNamespacedFunctionCallsInInput(request, registry); err != nil {
+			return out, err
+		}
+	}
+	if len(options.AllowedToolTypes) > 0 {
+		if err := filterResponsesToolsByType(request, options.AllowedToolTypes); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
+}
+
 func translateResponsesCustomTools(request map[string]json.RawMessage) (map[string]struct{}, error) {
 	customTools := map[string]struct{}{}
 	var tools []json.RawMessage
@@ -56,6 +92,229 @@ func translateResponsesCustomTools(request map[string]json.RawMessage) (map[stri
 		return nil, err
 	}
 	return customTools, nil
+}
+
+// flattenResponsesNamespaceTools rewrites Codex multi-agent namespace tools into
+// top-level function tools named namespace__child, matching the Chat adapter.
+// Returns the registry used for reverse mapping on the response stream.
+func flattenResponsesNamespaceTools(request map[string]json.RawMessage) (*responseToolRegistry, error) {
+	var tools []json.RawMessage
+	if err := json.Unmarshal(request["tools"], &tools); err != nil {
+		return nil, nil
+	}
+	registry := newResponseToolRegistry()
+	out := make([]json.RawMessage, 0, len(tools))
+	changed := false
+	for _, raw := range tools {
+		var tool rawResponseTool
+		if err := json.Unmarshal(raw, &tool); err != nil {
+			out = append(out, raw)
+			continue
+		}
+		if tool.Type != "namespace" {
+			out = append(out, raw)
+			continue
+		}
+		changed = true
+		for _, childRaw := range tool.Tools {
+			var child rawResponseTool
+			if err := json.Unmarshal(childRaw, &child); err != nil {
+				return nil, err
+			}
+			if child.Type != "function" && child.Type != "custom" {
+				continue
+			}
+			chatName := registry.register(responseToolIdentity{
+				Name:      child.Name,
+				Namespace: tool.Name,
+				Custom:    child.Type == "custom",
+			})
+			description := strings.TrimSpace(child.Description)
+			if tool.Description != "" {
+				description = strings.TrimSpace(strings.TrimSpace(tool.Description) + "\n\n" + description)
+			}
+			parameters := child.Parameters
+			if child.Type == "custom" {
+				parameters = freeformParametersWithFormat(child.Format)
+			} else if len(parameters) == 0 || string(parameters) == "null" {
+				parameters = json.RawMessage(`{"type":"object","properties":{}}`)
+			}
+			function := map[string]any{
+				"type":       "function",
+				"name":       chatName,
+				"parameters": json.RawMessage(parameters),
+				"strict":     false,
+			}
+			if description != "" {
+				function["description"] = description
+			}
+			encoded, err := json.Marshal(function)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, encoded)
+		}
+	}
+	if !changed {
+		return registry, nil
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+	request["tools"] = encoded
+	return registry, nil
+}
+
+func rewriteNamespacedFunctionCallsInInput(request map[string]json.RawMessage, registry *responseToolRegistry) error {
+	if registry == nil {
+		return nil
+	}
+	var input []json.RawMessage
+	if err := json.Unmarshal(request["input"], &input); err != nil {
+		return nil
+	}
+	changed := false
+	for index, raw := range input {
+		var item map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &item); err != nil {
+			continue
+		}
+		var itemType string
+		if json.Unmarshal(item["type"], &itemType) != nil {
+			continue
+		}
+		switch itemType {
+		case "function_call", "custom_tool_call":
+			var namespace, name string
+			_ = json.Unmarshal(item["namespace"], &namespace)
+			_ = json.Unmarshal(item["name"], &name)
+			if namespace == "" || name == "" {
+				continue
+			}
+			chatName := registry.chatName(namespace, name)
+			encodedName, err := json.Marshal(chatName)
+			if err != nil {
+				return err
+			}
+			item["name"] = encodedName
+			delete(item, "namespace")
+			// Upstream only sees function tools after custom/namespace rewrites.
+			if itemType == "custom_tool_call" {
+				// custom_tool_call should already have been rewritten; keep defensive.
+				item["type"] = json.RawMessage(`"function_call"`)
+			}
+			encoded, err := json.Marshal(item)
+			if err != nil {
+				return err
+			}
+			input[index] = encoded
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	request["input"] = encoded
+	return nil
+}
+
+func filterResponsesToolsByType(request map[string]json.RawMessage, allowed []string) error {
+	allow := make(map[string]struct{}, len(allowed))
+	for _, t := range allowed {
+		allow[strings.ToLower(strings.TrimSpace(t))] = struct{}{}
+	}
+	rawTools, found := request["tools"]
+	if !found {
+		delete(request, "tool_choice")
+		return nil
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(rawTools, &tools); err != nil {
+		return nil
+	}
+	out := make([]json.RawMessage, 0, len(tools))
+	changed := false
+	for _, raw := range tools {
+		var tool map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &tool); err != nil {
+			out = append(out, raw)
+			continue
+		}
+		var toolType string
+		_ = json.Unmarshal(tool["type"], &toolType)
+		// OpenAI compatibility alias.
+		if toolType == "web_search_preview" {
+			if _, ok := allow["web_search"]; ok {
+				tool["type"] = json.RawMessage(`"web_search"`)
+				if sanitizeWebSearchToolForStrictProviders(tool) {
+					// already mutated
+				}
+				encoded, err := json.Marshal(tool)
+				if err != nil {
+					return err
+				}
+				out = append(out, encoded)
+				changed = true
+				continue
+			}
+		}
+		if _, ok := allow[strings.ToLower(toolType)]; !ok {
+			changed = true
+			continue
+		}
+		// Strip Codex-only web_search fields that providers such as xAI reject
+		// (e.g. external_web_access, search_content_types).
+		if toolType == "web_search" {
+			if sanitizeWebSearchToolForStrictProviders(tool) {
+				encoded, err := json.Marshal(tool)
+				if err != nil {
+					return err
+				}
+				out = append(out, encoded)
+				changed = true
+				continue
+			}
+		}
+		out = append(out, raw)
+	}
+	if len(out) == 0 {
+		delete(request, "tool_choice")
+	}
+	if !changed {
+		return nil
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return err
+	}
+	request["tools"] = encoded
+	return nil
+}
+
+// sanitizeWebSearchToolForStrictProviders removes Codex-only web_search fields
+// that OpenAI accepts but providers like xAI reject with 400.
+// Keeps type and any remaining provider-neutral options.
+func sanitizeWebSearchToolForStrictProviders(tool map[string]json.RawMessage) bool {
+	changed := false
+	for _, key := range []string{
+		"external_web_access",
+		"search_content_types",
+		// Codex sometimes attaches filters/user_location that mirror OpenAI's
+		// web_search_preview shape; drop them when filtering for strict APIs.
+		"filters",
+		"user_location",
+	} {
+		if _, found := tool[key]; found {
+			delete(tool, key)
+			changed = true
+		}
+	}
+	return changed
 }
 
 func normalizeMetaResponsesTool(tool map[string]json.RawMessage) bool {
@@ -220,22 +479,28 @@ func translateResponsesCustomToolInput(request map[string]json.RawMessage) error
 	return nil
 }
 
-type responsesCustomToolStreamTranslator struct {
+type responsesToolStreamTranslator struct {
 	customTools map[string]struct{}
+	registry    *responseToolRegistry
 	itemIDs     map[string]struct{}
 	callIDs     map[string]struct{}
 }
 
-func newResponsesCustomToolStreamTranslator(customTools map[string]struct{}) *responsesCustomToolStreamTranslator {
-	return &responsesCustomToolStreamTranslator{
-		customTools: customTools,
+func newResponsesToolStreamTranslator(translation responsesToolTranslation) *responsesToolStreamTranslator {
+	return &responsesToolStreamTranslator{
+		customTools: translation.CustomTools,
+		registry:    translation.Registry,
 		itemIDs:     map[string]struct{}{},
 		callIDs:     map[string]struct{}{},
 	}
 }
 
-func (t *responsesCustomToolStreamTranslator) processBlock(block []byte) [][]byte {
-	if len(t.customTools) == 0 {
+func (t *responsesToolStreamTranslator) needsTranslation() bool {
+	return len(t.customTools) > 0 || (t.registry != nil && len(t.registry.byChatName) > 0)
+}
+
+func (t *responsesToolStreamTranslator) processBlock(block []byte) [][]byte {
+	if !t.needsTranslation() {
 		return [][]byte{block}
 	}
 	payload, ok := ssePayload(block)
@@ -252,7 +517,7 @@ func (t *responsesCustomToolStreamTranslator) processBlock(block []byte) [][]byt
 	}
 	switch eventType {
 	case "response.output_item.added", "response.output_item.done":
-		item, changed, itemID, callID := translateCustomFunctionCallItem(fields["item"], t.customTools)
+		item, changed, itemID, callID := t.translateFunctionCallItem(fields["item"])
 		if !changed {
 			return [][]byte{block}
 		}
@@ -268,21 +533,28 @@ func (t *responsesCustomToolStreamTranslator) processBlock(block []byte) [][]byt
 		if t.isCustomEvent(fields) {
 			return nil
 		}
+		if name, ok := t.restoreEventName(fields); ok {
+			fields["name"] = name
+			return [][]byte{rebuildDataBlock(block, fields)}
+		}
 	case "response.function_call_arguments.done":
-		if !t.isCustomEvent(fields) {
-			return [][]byte{block}
+		if t.isCustomEvent(fields) {
+			var arguments string
+			if json.Unmarshal(fields["arguments"], &arguments) != nil {
+				return nil
+			}
+			fields["type"] = json.RawMessage(`"response.custom_tool_call_input.delta"`)
+			fields["delta"], _ = json.Marshal(customToolInput(arguments))
+			delete(fields, "arguments")
+			delete(fields, "name")
+			return [][]byte{rebuildSSEEventBlock(block, "response.custom_tool_call_input.delta", fields)}
 		}
-		var arguments string
-		if json.Unmarshal(fields["arguments"], &arguments) != nil {
-			return nil
+		if name, ok := t.restoreEventName(fields); ok {
+			fields["name"] = name
+			return [][]byte{rebuildDataBlock(block, fields)}
 		}
-		fields["type"] = json.RawMessage(`"response.custom_tool_call_input.delta"`)
-		fields["delta"], _ = json.Marshal(customToolInput(arguments))
-		delete(fields, "arguments")
-		delete(fields, "name")
-		return [][]byte{rebuildSSEEventBlock(block, "response.custom_tool_call_input.delta", fields)}
 	case "response.created", "response.in_progress", "response.completed", "response.incomplete", "response.failed":
-		response, changed := translateCustomToolsInResponse(fields["response"], t.customTools)
+		response, changed := t.translateResponseObject(fields["response"])
 		if changed {
 			fields["response"] = response
 			return [][]byte{rebuildDataBlock(block, fields)}
@@ -291,7 +563,10 @@ func (t *responsesCustomToolStreamTranslator) processBlock(block []byte) [][]byt
 	return [][]byte{block}
 }
 
-func (t *responsesCustomToolStreamTranslator) isCustomEvent(fields map[string]json.RawMessage) bool {
+func (t *responsesToolStreamTranslator) isCustomEvent(fields map[string]json.RawMessage) bool {
+	if len(t.customTools) == 0 {
+		return false
+	}
 	var itemID, callID string
 	_ = json.Unmarshal(fields["item_id"], &itemID)
 	_ = json.Unmarshal(fields["call_id"], &callID)
@@ -300,7 +575,26 @@ func (t *responsesCustomToolStreamTranslator) isCustomEvent(fields map[string]js
 	return itemFound || callFound
 }
 
-func translateCustomFunctionCallItem(raw json.RawMessage, customTools map[string]struct{}) (json.RawMessage, bool, string, string) {
+func (t *responsesToolStreamTranslator) restoreEventName(fields map[string]json.RawMessage) (json.RawMessage, bool) {
+	if t.registry == nil {
+		return nil, false
+	}
+	var name string
+	if json.Unmarshal(fields["name"], &name) != nil || name == "" {
+		return nil, false
+	}
+	identity, ok := t.registry.byChatName[name]
+	if !ok || identity.Namespace == "" {
+		return nil, false
+	}
+	encoded, err := json.Marshal(identity.Name)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, true
+}
+
+func (t *responsesToolStreamTranslator) translateFunctionCallItem(raw json.RawMessage) (json.RawMessage, bool, string, string) {
 	var item map[string]json.RawMessage
 	if json.Unmarshal(raw, &item) != nil {
 		return raw, false, "", ""
@@ -310,16 +604,54 @@ func translateCustomFunctionCallItem(raw json.RawMessage, customTools map[string
 		json.Unmarshal(item["name"], &name) != nil {
 		return raw, false, "", ""
 	}
-	if _, found := customTools[name]; !found {
-		return raw, false, "", ""
-	}
-	var arguments, itemID, callID string
-	_ = json.Unmarshal(item["arguments"], &arguments)
+	var itemID, callID string
 	_ = json.Unmarshal(item["id"], &itemID)
 	_ = json.Unmarshal(item["call_id"], &callID)
-	item["type"] = json.RawMessage(`"custom_tool_call"`)
-	item["input"], _ = json.Marshal(customToolInput(arguments))
-	delete(item, "arguments")
+
+	// Restore Codex multi-agent namespace before custom-tool rewrite so custom
+	// tools that lived inside a namespace keep their identity.
+	changed := false
+	if t.registry != nil {
+		if identity, ok := t.registry.byChatName[name]; ok && identity.Namespace != "" {
+			encodedName, err := json.Marshal(identity.Name)
+			if err != nil {
+				return raw, false, "", ""
+			}
+			item["name"] = encodedName
+			item["namespace"], _ = json.Marshal(identity.Namespace)
+			name = identity.Name
+			changed = true
+			if identity.Custom {
+				var arguments string
+				_ = json.Unmarshal(item["arguments"], &arguments)
+				item["type"] = json.RawMessage(`"custom_tool_call"`)
+				item["input"], _ = json.Marshal(customToolInput(arguments))
+				delete(item, "arguments")
+				encoded, err := json.Marshal(item)
+				if err != nil {
+					return raw, false, "", ""
+				}
+				return encoded, true, itemID, callID
+			}
+		}
+	}
+
+	if _, found := t.customTools[name]; found {
+		var arguments string
+		_ = json.Unmarshal(item["arguments"], &arguments)
+		item["type"] = json.RawMessage(`"custom_tool_call"`)
+		item["input"], _ = json.Marshal(customToolInput(arguments))
+		delete(item, "arguments")
+		changed = true
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			return raw, false, "", ""
+		}
+		return encoded, true, itemID, callID
+	}
+	if !changed {
+		return raw, false, "", ""
+	}
 	encoded, err := json.Marshal(item)
 	if err != nil {
 		return raw, false, "", ""
@@ -327,7 +659,7 @@ func translateCustomFunctionCallItem(raw json.RawMessage, customTools map[string
 	return encoded, true, itemID, callID
 }
 
-func translateCustomToolsInResponse(raw json.RawMessage, customTools map[string]struct{}) (json.RawMessage, bool) {
+func (t *responsesToolStreamTranslator) translateResponseObject(raw json.RawMessage) (json.RawMessage, bool) {
 	var response map[string]json.RawMessage
 	if json.Unmarshal(raw, &response) != nil {
 		return raw, false
@@ -336,7 +668,7 @@ func translateCustomToolsInResponse(raw json.RawMessage, customTools map[string]
 	var output []json.RawMessage
 	if json.Unmarshal(response["output"], &output) == nil {
 		for index, item := range output {
-			translated, itemChanged, _, _ := translateCustomFunctionCallItem(item, customTools)
+			translated, itemChanged, _, _ := t.translateFunctionCallItem(item)
 			if itemChanged {
 				output[index] = translated
 				changed = true
@@ -360,7 +692,22 @@ func translateCustomToolsInResponse(raw json.RawMessage, customTools map[string]
 			if toolType != "function" {
 				continue
 			}
-			if _, found := customTools[name]; !found {
+			// Prefer registry reverse for flattened namespace tools.
+			if t.registry != nil {
+				if identity, ok := t.registry.byChatName[name]; ok && identity.Namespace != "" {
+					// Rebuild as namespace is complex; leave function form with original child name
+					// and drop the flattened name for Codex's tool list display.
+					tool["name"], _ = json.Marshal(identity.Name)
+					if identity.Custom {
+						tool["type"] = json.RawMessage(`"custom"`)
+						delete(tool, "parameters")
+					}
+					tools[index], _ = json.Marshal(tool)
+					toolsChanged = true
+					continue
+				}
+			}
+			if _, found := t.customTools[name]; !found {
 				continue
 			}
 			tool["type"] = json.RawMessage(`"custom"`)

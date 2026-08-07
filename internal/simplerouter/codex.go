@@ -309,12 +309,18 @@ type codexSessionOverrides struct {
 }
 
 func metaCodexArgs(model Model, baseURL, catalogPath string, disableThinking bool, positionals, passthrough []string) []string {
+	return reasoningAwareCodexArgs(model, baseURL, catalogPath, disableThinking, positionals, passthrough)
+}
+
+// reasoningAwareCodexArgs launches Codex with provider-curated reasoning
+// defaults, context window, and auto-compact limits (Meta Muse, xAI Grok).
+func reasoningAwareCodexArgs(model Model, baseURL, catalogPath string, disableThinking bool, positionals, passthrough []string) []string {
 	return codexArgsWithOverrides(model.ID, baseURL, catalogPath, disableThinking, positionals, passthrough, codexSessionOverrides{
 		ReasoningEffort:            model.DefaultReasoningEffort,
 		ReasoningSummary:           model.DefaultReasoningSummary,
 		ContextWindow:              model.ContextLength,
 		AutoCompactTokenLimit:      model.AutoCompactTokenLimit,
-		SupportsReasoningSummaries: true,
+		SupportsReasoningSummaries: modelSupportsReasoning(model),
 	})
 }
 

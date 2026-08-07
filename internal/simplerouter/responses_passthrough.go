@@ -13,10 +13,20 @@ import (
 )
 
 type responsesPassthroughOptions struct {
-	Label                string
-	ProviderTag          string
-	ReasoningEffortMap   map[string]string
-	TranslateCustomTools bool
+	Label                             string
+	ProviderTag                       string
+	ReasoningEffortMap                map[string]string
+	OmitReasoningEffort               bool
+	OmitReasoningControls             bool
+	TranslateCustomTools              bool
+	OmitNullEncryptedReasoningContent bool
+	// FlattenNamespaces rewrites Codex multi-agent namespace tools into top-level
+	// function tools (namespace__name). Required for providers such as xAI that
+	// reject the Responses "namespace" tool variant.
+	FlattenNamespaces bool
+	// AllowedToolTypes, when non-empty, drops any tool whose type is not listed
+	// after translation (e.g. Codex tool_search on xAI).
+	AllowedToolTypes []string
 }
 
 type responsesPassthroughProxy struct {
@@ -79,15 +89,30 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 	}
 	model, _ := json.Marshal(p.model)
 	request["model"] = model
-	if err := rewriteResponsesReasoningEffort(request, p.options.ReasoningEffortMap); err != nil {
-		writeResponsesError(w, http.StatusInternalServerError, "api_error", "rewrite reasoning effort: "+err.Error())
-		return
+	if p.options.OmitReasoningControls {
+		delete(request, "reasoning")
+	} else if p.options.OmitReasoningEffort {
+		if err := omitResponsesReasoningEffort(request); err != nil {
+			writeResponsesError(w, http.StatusInternalServerError, "api_error", "omit reasoning effort: "+err.Error())
+			return
+		}
+	} else {
+		if err := rewriteResponsesReasoningEffort(request, p.options.ReasoningEffortMap); err != nil {
+			writeResponsesError(w, http.StatusInternalServerError, "api_error", "rewrite reasoning effort: "+err.Error())
+			return
+		}
 	}
-	var customTools map[string]struct{}
-	if p.options.TranslateCustomTools {
-		customTools, err = translateResponsesCustomTools(request)
+	if p.options.OmitNullEncryptedReasoningContent {
+		if err := omitNullEncryptedReasoningContent(request); err != nil {
+			writeResponsesError(w, http.StatusInternalServerError, "api_error", "normalize encrypted reasoning: "+err.Error())
+			return
+		}
+	}
+	var toolTranslation responsesToolTranslation
+	if p.options.TranslateCustomTools || p.options.FlattenNamespaces || len(p.options.AllowedToolTypes) > 0 {
+		toolTranslation, err = translateResponsesTools(request, p.options)
 		if err != nil {
-			writeResponsesError(w, http.StatusInternalServerError, "api_error", "translate custom tools: "+err.Error())
+			writeResponsesError(w, http.StatusInternalServerError, "api_error", "translate tools: "+err.Error())
 			return
 		}
 	}
@@ -109,7 +134,7 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 			writeResponsesError(w, http.StatusInternalServerError, "api_error", "encode JSON-object fallback: "+fallbackErr.Error())
 			return
 		} else if changed {
-			p.forwardResponsesPayload(w, r, request, fallbackPayload, customTools)
+			p.forwardResponsesPayload(w, r, request, fallbackPayload, toolTranslation)
 			return
 		}
 	}
@@ -119,7 +144,28 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 		return
 	}
 
-	p.forwardResponsesPayload(w, r, request, payload, customTools)
+	p.forwardResponsesPayload(w, r, request, payload, toolTranslation)
+}
+
+func omitResponsesReasoningEffort(request map[string]json.RawMessage) error {
+	var reasoning map[string]json.RawMessage
+	if err := json.Unmarshal(request["reasoning"], &reasoning); err != nil || reasoning == nil {
+		return nil
+	}
+	if _, found := reasoning["effort"]; !found {
+		return nil
+	}
+	delete(reasoning, "effort")
+	if len(reasoning) == 0 {
+		delete(request, "reasoning")
+		return nil
+	}
+	encoded, err := json.Marshal(reasoning)
+	if err != nil {
+		return err
+	}
+	request["reasoning"] = encoded
+	return nil
 }
 
 func rewriteResponsesReasoningEffort(request map[string]json.RawMessage, mapping map[string]string) error {
@@ -147,7 +193,46 @@ func rewriteResponsesReasoningEffort(request map[string]json.RawMessage, mapping
 	return err
 }
 
-func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWriter, r *http.Request, request map[string]json.RawMessage, payload []byte, customTools map[string]struct{}) {
+func omitNullEncryptedReasoningContent(request map[string]json.RawMessage) error {
+	var input []json.RawMessage
+	if err := json.Unmarshal(request["input"], &input); err != nil {
+		return nil
+	}
+	changed := false
+	for index, raw := range input {
+		var item map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &item); err != nil {
+			continue
+		}
+		var itemType, encryptedContent string
+		if json.Unmarshal(item["type"], &itemType) != nil || itemType != "reasoning" ||
+			json.Unmarshal(item["encrypted_content"], &encryptedContent) != nil || encryptedContent == "" {
+			continue
+		}
+		content, found := item["content"]
+		if !found || !bytes.Equal(bytes.TrimSpace(content), []byte("null")) {
+			continue
+		}
+		delete(item, "content")
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			return err
+		}
+		input[index] = encoded
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	request["input"] = encoded
+	return nil
+}
+
+func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWriter, r *http.Request, request map[string]json.RawMessage, payload []byte, toolTranslation responsesToolTranslation) {
 	resp, err := p.sendResponsesRequest(r, payload)
 	if err != nil {
 		writeResponsesError(w, http.StatusBadGateway, "api_error", p.options.Label+" request failed: "+err.Error())
@@ -181,7 +266,7 @@ func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWrite
 		relayResponsesUpstreamError(w, resp, p.options.Label)
 		return
 	}
-	p.relayResponsesStream(w, resp, customTools)
+	p.relayResponsesStream(w, resp, toolTranslation)
 }
 
 func (p *responsesPassthroughProxy) sendResponsesRequest(r *http.Request, payload []byte) (*http.Response, error) {
@@ -246,7 +331,7 @@ func jsonObjectFallbackPayload(request map[string]json.RawMessage) ([]byte, bool
 	return payload, true, err
 }
 
-func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, resp *http.Response, customTools map[string]struct{}) {
+func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, resp *http.Response, toolTranslation responsesToolTranslation) {
 	for _, name := range []string{
 		"Content-Type",
 		"Cache-Control",
@@ -279,7 +364,7 @@ func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, 
 		return true
 	}
 	filter := newReasoningReplayFilter()
-	customToolTranslator := newResponsesCustomToolStreamTranslator(customTools)
+	toolTranslator := newResponsesToolStreamTranslator(toolTranslation)
 	reader := bufio.NewReaderSize(resp.Body, 32*1024)
 	var block []byte
 	for {
@@ -287,7 +372,7 @@ func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, 
 		if len(line) > 0 {
 			block = append(block, line...)
 			if isBlankSSELine(line) {
-				for _, translated := range customToolTranslator.processBlock(block) {
+				for _, translated := range toolTranslator.processBlock(block) {
 					if !writeBlocks(filter.processBlock(translated)) {
 						return
 					}
@@ -297,7 +382,7 @@ func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, 
 		}
 		if readErr != nil {
 			if len(block) > 0 {
-				for _, translated := range customToolTranslator.processBlock(block) {
+				for _, translated := range toolTranslator.processBlock(block) {
 					if !writeBlocks(filter.processBlock(translated)) {
 						return
 					}

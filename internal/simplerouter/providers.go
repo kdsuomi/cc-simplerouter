@@ -16,6 +16,7 @@ const (
 	defaultDeepSeekAPIBase = "https://api.deepseek.com"
 	defaultZAIAPIBase      = "https://api.z.ai/api/paas/v4"
 	defaultMetaAPIBase     = "https://api.meta.ai/v1"
+	defaultXAIAPIBase      = "https://api.x.ai/v1"
 )
 
 func validateBearerModels(ctx context.Context, httpClient *http.Client, apiBase, key, label string) error {
