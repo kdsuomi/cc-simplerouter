@@ -36,6 +36,7 @@ func TestBuildCodexModelCatalogPreservesFullToolDescriptor(t *testing.T) {
 	      "supports_parallel_tool_calls": true,
 	      "context_window": 272000,
 	      "max_context_window": 272000,
+	      "supports_search_tool": true,
 	      "default_reasoning_level": "medium",
 	      "supported_reasoning_levels": [{"effort":"low","description":"Low"}],
 	      "default_reasoning_summary": "auto",
@@ -70,6 +71,9 @@ func TestBuildCodexModelCatalogPreservesFullToolDescriptor(t *testing.T) {
 	}
 	if model["apply_patch_tool_type"] != "freeform" || !boolValue(model["supports_parallel_tool_calls"]) {
 		t.Fatalf("full Codex tools were not preserved: %#v", model)
+	}
+	if boolValue(model["supports_search_tool"]) {
+		t.Fatalf("routed model must expose MCP tools directly: %#v", model)
 	}
 	if model["tool_mode"] != nil || model["multi_agent_version"] != "v2" {
 		t.Fatalf("expected direct tools plus multi-agent v2, got %#v", model)
@@ -289,6 +293,34 @@ func TestFindCodexPrefersSimpleRouterBinary(t *testing.T) {
 	}
 	if got != patchedPath {
 		t.Fatalf("findCodex() = %q, want patched binary %q", got, patchedPath)
+	}
+}
+
+func TestCodexBrowserBridgeArgsUsesExecutableMacOSCompanion(t *testing.T) {
+	binDir := t.TempDir()
+	codexPath := filepath.Join(binDir, "codex")
+	bridgePath := filepath.Join(binDir, codexBrowserBridgeBinaryName)
+	if err := os.WriteFile(bridgePath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := codexBrowserBridgeArgs(codexPath, "darwin")
+	want := []string{
+		"-c",
+		"mcp_servers.node_repl.command=" + tomlString(bridgePath),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("bridge args = %v, want %v", got, want)
+	}
+}
+
+func TestCodexBrowserBridgeArgsSkipsOtherPlatformsAndMissingBridge(t *testing.T) {
+	codexPath := filepath.Join(t.TempDir(), "codex")
+	if got := codexBrowserBridgeArgs(codexPath, "darwin"); got != nil {
+		t.Fatalf("missing bridge args = %v, want nil", got)
+	}
+	if got := codexBrowserBridgeArgs(codexPath, "linux"); got != nil {
+		t.Fatalf("Linux bridge args = %v, want nil", got)
 	}
 }
 

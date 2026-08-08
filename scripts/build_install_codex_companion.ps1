@@ -1,5 +1,5 @@
 param(
-    [string]$CodexSource = (Join-Path (Split-Path -Parent $PSScriptRoot) ".build\codex-rust-v0.145.0\codex-rs"),
+    [string]$CodexSource = (Join-Path (Split-Path -Parent $PSScriptRoot) ".build\codex-rust-v0.147.0\codex-rs"),
     [string]$CargoTarget = "",
     [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath("UserProfile")) ".local\share\simplerouter\simplerouter-codex"),
     [ValidateSet("dev-small", "release")]
@@ -15,7 +15,7 @@ if (-not ($IsWindows -or $env:OS -eq "Windows_NT")) {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$defaultSourceRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot ".build\codex-rust-v0.145.0"))
+$defaultSourceRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot ".build\codex-rust-v0.147.0"))
 $defaultCodexSource = Join-Path $defaultSourceRoot "codex-rs"
 $codexSourcePath = [System.IO.Path]::GetFullPath($CodexSource)
 $cargoManifest = Join-Path $codexSourcePath "Cargo.toml"
@@ -54,6 +54,15 @@ if (-not (Test-Path -LiteralPath $cargo -PathType Leaf)) {
     throw "Could not find cargo. Install Rust or open a terminal with cargo on PATH."
 }
 
+$rustc = Join-Path (Split-Path -Parent $cargo) "rustc.exe"
+$target = "unknown"
+if (Test-Path -LiteralPath $rustc -PathType Leaf) {
+    $targetMatch = & $rustc -vV | Select-String -Pattern '^host: (.+)$'
+    if ($targetMatch) {
+        $target = $targetMatch.Matches.Groups[1].Value
+    }
+}
+
 $targetRoot = if ($CargoTarget) {
     [System.IO.Path]::GetFullPath($CargoTarget)
 } elseif ($env:CARGO_TARGET_DIR) {
@@ -66,13 +75,33 @@ $targetRoot = if ($CargoTarget) {
     [System.IO.Path]::GetFullPath((Join-Path $repoRoot ".build\codex-target"))
 }
 
+$officialPackage = if ($env:SIMPLEROUTER_CODEX_OFFICIAL_PACKAGE) {
+    $env:SIMPLEROUTER_CODEX_OFFICIAL_PACKAGE
+} else {
+    $standaloneRoot = Join-Path ([Environment]::GetFolderPath("UserProfile")) ".codex\packages\standalone"
+    $pinnedOfficialPackage = Join-Path $standaloneRoot "releases\0.147.0-$target"
+    if (Test-Path -LiteralPath $pinnedOfficialPackage -PathType Container) {
+        $pinnedOfficialPackage
+    } else {
+        Join-Path $standaloneRoot "current"
+    }
+}
+$officialCodeModeHost = Join-Path $officialPackage "bin\codex-code-mode-host.exe"
+$buildCodeModeHost = -not (Test-Path -LiteralPath $officialCodeModeHost -PathType Leaf)
+
 if (-not $SkipBuild) {
     New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
     Push-Location $codexSourcePath
     try {
-        & $cargo build --target-dir $targetRoot --profile $Profile `
-            --package codex-cli --bin codex `
-            --package codex-windows-sandbox --bin codex-command-runner --bin codex-windows-sandbox-setup
+        $buildArguments = @(
+            "build", "--locked", "--target-dir", $targetRoot, "--profile", $Profile,
+            "--package", "codex-cli", "--bin", "codex",
+            "--package", "codex-windows-sandbox", "--bin", "codex-command-runner", "--bin", "codex-windows-sandbox-setup"
+        )
+        if ($buildCodeModeHost) {
+            $buildArguments += @("--package", "codex-code-mode-host", "--bin", "codex-code-mode-host")
+        }
+        & $cargo @buildArguments
         if ($LASTEXITCODE -ne 0) {
             throw "Codex companion build failed with exit code $LASTEXITCODE"
         }
@@ -81,11 +110,28 @@ if (-not $SkipBuild) {
     }
 }
 $outputDir = Join-Path $targetRoot $Profile
+$codeModeHostSource = if ($buildCodeModeHost) {
+    Join-Path $outputDir "codex-code-mode-host.exe"
+} else {
+    $officialCodeModeHost
+}
 $sources = @(
+    @{ Source = (Join-Path $outputDir "codex.exe"); Destination = "bin\codex.exe" },
     @{ Source = (Join-Path $outputDir "codex.exe"); Destination = "bin\codex-simplerouter.exe" },
+    @{ Source = $codeModeHostSource; Destination = "bin\codex-code-mode-host.exe" },
     @{ Source = (Join-Path $outputDir "codex-command-runner.exe"); Destination = "codex-resources\codex-command-runner.exe" },
     @{ Source = (Join-Path $outputDir "codex-windows-sandbox-setup.exe"); Destination = "codex-resources\codex-windows-sandbox-setup.exe" }
 )
+
+$rgSource = Join-Path $officialPackage "codex-path\rg.exe"
+if (-not (Test-Path -LiteralPath $rgSource -PathType Leaf)) {
+    $rgCommand = Get-Command rg.exe -ErrorAction SilentlyContinue
+    $rgSource = if ($rgCommand) { $rgCommand.Source } else { "" }
+}
+if (-not $rgSource -or -not (Test-Path -LiteralPath $rgSource -PathType Leaf)) {
+    throw "Could not find rg.exe for the canonical Codex package."
+}
+$sources += @{ Source = $rgSource; Destination = "codex-path\rg.exe" }
 
 foreach ($file in $sources) {
     if (-not (Test-Path -LiteralPath $file.Source -PathType Leaf)) {
@@ -104,7 +150,24 @@ foreach ($file in $sources) {
     }
 }
 
-Write-Host "Installed SimpleRouter Codex companion bundle to $InstallRoot"
+$metadata = [ordered]@{
+    layoutVersion = 1
+    version = "0.147.0"
+    target = $target
+    variant = "codex"
+    entrypoint = "bin/codex.exe"
+    resourcesDir = "codex-resources"
+    pathDir = "codex-path"
+}
+$metadataPath = Join-Path $InstallRoot "codex-package.json"
+New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($metadataPath, ($metadata | ConvertTo-Json), $utf8NoBom)
+
+Write-Host "Installed canonical SimpleRouter Codex companion bundle to $InstallRoot"
+Write-Host "  bin\codex.exe"
 Write-Host "  bin\codex-simplerouter.exe"
+Write-Host "  bin\codex-code-mode-host.exe"
+Write-Host "  codex-path\rg.exe"
 Write-Host "  codex-resources\codex-command-runner.exe"
 Write-Host "  codex-resources\codex-windows-sandbox-setup.exe"

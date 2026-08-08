@@ -135,7 +135,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 		spec := launchSpec{
 			Path: codexPath,
 			Dir:  dir,
-			Args: codexSubscriptionArgs(modelFlag, disableThinking, codexPositionals, passthrough),
+			Args: codexArgsWithBrowserBridge(codexPath, codexSubscriptionArgs(modelFlag, disableThinking, codexPositionals, passthrough)),
 			Env:  buildCodexSubscriptionEnv(os.Environ()),
 		}
 		if a.runCommand != nil {
@@ -284,6 +284,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	if provider == providerMeta || provider == providerXAI {
 		launchArgs = reasoningAwareCodexArgs(selected, baseURL, catalogPath, disableThinking, codexPositionals, passthrough)
 	}
+	launchArgs = codexArgsWithBrowserBridge(codexPath, launchArgs)
 	spec := launchSpec{
 		Path: codexPath,
 		Dir:  dir,

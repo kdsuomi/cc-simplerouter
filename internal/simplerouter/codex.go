@@ -17,7 +17,9 @@ const (
 	codexTokenRateEnv               = "SIMPLEROUTER_ENABLE_TOKEN_RATE"
 	codexProviderName               = "simplerouter_session"
 	codexDefaultServiceTierOverride = "default"
+	codexCanonicalBinaryName        = "codex"
 	codexSimpleRouterBinaryName     = "codex-simplerouter"
+	codexBrowserBridgeBinaryName    = "node-repl-signed-parent"
 	codexSimpleRouterBundleName     = "simplerouter-codex"
 )
 
@@ -28,9 +30,10 @@ type codexModelCatalog struct {
 func findCodex() (string, error) {
 	home, homeErr := userHomeDir()
 	if homeErr == nil {
-		bundlePath := codexSimpleRouterBundlePath(home)
-		if info, statErr := os.Stat(bundlePath); statErr == nil && !info.IsDir() {
-			return bundlePath, nil
+		for _, bundlePath := range codexSimpleRouterBundlePaths(home) {
+			if info, statErr := os.Stat(bundlePath); statErr == nil && !info.IsDir() {
+				return bundlePath, nil
+			}
 		}
 	}
 
@@ -82,11 +85,44 @@ func findCodex() (string, error) {
 }
 
 func codexSimpleRouterBundlePath(home string) string {
-	name := codexSimpleRouterBinaryName
+	name := codexCanonicalBinaryName
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
 	return filepath.Join(home, ".local", "share", "simplerouter", codexSimpleRouterBundleName, "bin", name)
+}
+
+func codexSimpleRouterBundlePaths(home string) []string {
+	canonical := codexSimpleRouterBundlePath(home)
+	legacyName := codexSimpleRouterBinaryName
+	if runtime.GOOS == "windows" {
+		legacyName += ".exe"
+	}
+	legacy := filepath.Join(home, ".local", "share", "simplerouter", codexSimpleRouterBundleName, "bin", legacyName)
+	return []string{canonical, legacy}
+}
+
+func codexArgsWithBrowserBridge(codexPath string, args []string) []string {
+	bridgeArgs := codexBrowserBridgeArgs(codexPath, runtime.GOOS)
+	if len(bridgeArgs) == 0 {
+		return args
+	}
+	return append(bridgeArgs, args...)
+}
+
+func codexBrowserBridgeArgs(codexPath, goos string) []string {
+	if goos != "darwin" {
+		return nil
+	}
+	bridgePath := filepath.Join(filepath.Dir(codexPath), codexBrowserBridgeBinaryName)
+	info, err := os.Stat(bridgePath)
+	if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+		return nil
+	}
+	return []string{
+		"-c",
+		"mcp_servers.node_repl.command=" + tomlString(bridgePath),
+	}
 }
 
 // prepareCodexModelCatalog derives a one-model catalog from the installed
@@ -187,6 +223,11 @@ func buildCodexModelCatalog(raw []byte, model Model, supportsReasoning bool) ([]
 	routed["max_context_window"] = contextWindow
 	routed["apply_patch_tool_type"] = "freeform"
 	routed["supports_parallel_tool_calls"] = true
+	// Routed third-party providers expose ordinary function tools, but do not
+	// implement Codex's specialized deferred tool_search protocol. Advertising
+	// support here causes Codex to hide MCP tools such as mcp__node_repl__js
+	// behind a discovery mechanism the routed model cannot invoke.
+	routed["supports_search_tool"] = false
 	routed["tool_mode"] = nil
 	routed["multi_agent_version"] = "v2"
 	routed["use_responses_lite"] = false

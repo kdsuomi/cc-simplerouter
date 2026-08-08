@@ -1,7 +1,7 @@
 # Patched Codex companion
 
-The companion binary is OpenAI Codex `rust-v0.145.0` plus the ordered patch
-series in `patches/0.145.0`. Those patch files—not a generated Codex checkout—
+The companion binary is OpenAI Codex `rust-v0.147.0` plus the ordered patch
+series in `patches/0.147.0`. Those patch files—not a generated Codex checkout—
 are the source of truth committed to this repository.
 
 Prepare a clean checkout and verify its exact resulting Git tree:
@@ -22,6 +22,19 @@ On macOS/Linux, after preparing the same verified source tree, run:
 ```sh
 sh ./scripts/build_install_codex_companion.sh
 ```
+
+The installer stages the canonical Codex package layout: `bin/codex`,
+`bin/codex-code-mode-host`, `codex-path/rg`, the platform resources,
+`codex-package.json`, and the root `codex` entrypoint. During fast iteration it
+reuses the signed code-mode host and resource binaries from the installed
+official package when available; only the patched main CLI needs rebuilding.
+
+On macOS, Chrome's native host rejects browser-protocol clients whose
+`node_repl` process does not have an OpenAI-signed Codex parent. The package
+therefore also installs `bin/node-repl-signed-parent`, and SimpleRouter injects
+that launcher for Codex sessions. Its outer `:danger-full-access` selection
+means "do not add a second sandbox"; `node_repl` still creates its normal
+per-call sandbox for the JavaScript kernel.
 
 Cargo outputs live separately in `.build/codex-target`, so refreshing the
 upstream checkout does not discard incremental build artifacts. Pass
@@ -48,7 +61,7 @@ For direct Cargo builds on macOS/Linux, run this from the generated
 
 ```sh
 cargo build --locked --profile dev-small \
-  --target-dir ../codex-target \
+  --target-dir ../../codex-target \
   --package codex-cli --bin codex
 ```
 
@@ -61,9 +74,9 @@ requests it:
 
 ```sh
 cargo test --locked --package codex-tui simplerouter_streams_reasoning_live_by_default \
-  --target-dir ../codex-target
+  --target-dir ../../codex-target
 cargo build --locked --profile release \
-  --target-dir ../codex-target \
+  --target-dir ../../codex-target \
   --package codex-cli --bin codex
 ```
 
@@ -92,7 +105,7 @@ migration, recreate the generated checkout with `-RefreshSource`; do not edit,
 delete, or rewrite the user's `state_*.sqlite` migration ledger.
 
 When changing the companion, commit the work in the generated checkout, export
-the complete series from `rust-v0.145.0` with `git format-patch --no-signature`,
-replace the files in `patches/0.145.0`, and update the expected tree in
+the complete series from `rust-v0.147.0` with `git format-patch --no-signature`,
+replace the files in `patches/0.147.0`, and update the expected tree in
 `prepare_codex_companion.ps1`. A clean preparation must reproduce that tree
 before the root repository is committed.
