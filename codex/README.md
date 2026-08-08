@@ -11,16 +11,68 @@ powershell -ExecutionPolicy Bypass -File .\scripts\prepare_codex_companion.ps1
 ```
 
 The checkout lives under ignored `.build/`. Build and install the companion
-bundle with:
+bundle on Windows with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build_install_codex_companion.ps1
+```
+
+On macOS/Linux, after preparing the same verified source tree, run:
+
+```sh
+sh ./scripts/build_install_codex_companion.sh
 ```
 
 Cargo outputs live separately in `.build/codex-target`, so refreshing the
 upstream checkout does not discard incremental build artifacts. Pass
 `-SkipBuild` to reinstall existing outputs or `-RefreshSource` to recreate and
 repatch the generated checkout.
+
+## Fast iteration builds
+
+Agents must use the existing `dev-small` profile for ordinary requests such as
+"build," "rebuild," "install on this machine," or similar. Only use the
+`release` profile when the user explicitly requests a release, production, or
+fully optimized build. If the request is ambiguous, default to `dev-small`.
+
+Codex is a large workspace, and even with release LTO disabled, optimizing and
+linking the final CLI can take substantially longer than compiling the changed
+code. The companion PowerShell script therefore defaults to `dev-small`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_install_codex_companion.ps1 -Profile dev-small
+```
+
+For direct Cargo builds on macOS/Linux, run this from the generated
+`codex-rs` checkout and keep the target directory outside that checkout:
+
+```sh
+cargo build --locked --profile dev-small \
+  --target-dir ../codex-target \
+  --package codex-cli --bin codex
+```
+
+Keep reusing the same source checkout, Cargo home, and target directory. Do not
+run `cargo clean` or disable incremental compilation during normal iteration.
+Refreshing the generated source checkout is safe because `.build/codex-target`
+is separate and remains reusable. Run focused `codex-tui` tests against that
+same target directory. Make a `release` build only after the user explicitly
+requests it:
+
+```sh
+cargo test --locked --package codex-tui simplerouter_streams_reasoning_live_by_default \
+  --target-dir ../codex-target
+cargo build --locked --profile release \
+  --target-dir ../codex-target \
+  --package codex-cli --bin codex
+```
+
+The pinned Codex workspace already tunes `release` for build throughput with
+LTO disabled, incremental compilation enabled, and 16 codegen units. Preserve
+those settings unless runtime benchmarks justify a different final profile.
+An explicitly requested final release companion can be built and installed
+with `sh ./scripts/build_install_codex_companion.sh release` or PowerShell's
+`-Profile release` option.
 
 ## Windows migration line endings
 

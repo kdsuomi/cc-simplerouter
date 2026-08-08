@@ -3,7 +3,7 @@ param(
     [string]$CargoTarget = "",
     [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath("UserProfile")) ".local\share\simplerouter\simplerouter-codex"),
     [ValidateSet("dev-small", "release")]
-    [string]$Profile = "release",
+    [string]$Profile = "dev-small",
     [switch]$SkipBuild,
     [switch]$RefreshSource
 )
