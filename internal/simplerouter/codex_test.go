@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -297,6 +298,10 @@ func TestFindCodexPrefersSimpleRouterBinary(t *testing.T) {
 }
 
 func TestCodexBrowserBridgeArgsUsesExecutableMacOSCompanion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not report POSIX executable mode bits")
+	}
+
 	binDir := t.TempDir()
 	codexPath := filepath.Join(binDir, "codex")
 	bridgePath := filepath.Join(binDir, codexBrowserBridgeBinaryName)
