@@ -1,0 +1,21 @@
+{
+  "name": "cc-simplerouter",
+  "version": "1.0.0",
+  "description": "`simplerouter` launches an installed [OpenAI Codex CLI](https://developers.openai.com/codex)\r with an existing Codex subscription or against OpenRouter, Google AI Studio, OpenAI,\r DeepSeek, Z.AI, or Meta Model API.\r It supplies Codex with one session-scoped Responses provider and a model descriptor\r derived from the installed Codex release, preserving Codex features such as freeform\r `apply_patch`, namespaced tools, parallel tool calls, reasoning, and multi-agent support.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kdsuomi/cc-simplerouter.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/kdsuomi/cc-simplerouter/issues"
+  },
+  "homepage": "https://github.com/kdsuomi/cc-simplerouter#readme"
+}
