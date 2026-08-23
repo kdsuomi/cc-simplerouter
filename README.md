@@ -2,7 +2,7 @@
 
 `simplerouter` launches an installed [OpenAI Codex CLI](https://developers.openai.com/codex)
 with an existing Codex subscription or against OpenRouter, Google AI Studio, OpenAI,
-DeepSeek, Z.AI, or Meta Model API.
+xAI, DeepSeek, Z.AI, Meta Model API, or a local LM Studio server.
 It supplies Codex with one session-scoped Responses provider and a model descriptor
 derived from the installed Codex release, preserving Codex features such as freeform
 `apply_patch`, namespaced tools, parallel tool calls, reasoning, and multi-agent support.
@@ -24,6 +24,7 @@ simplerouter --provider xai --model grok-4.5       # Grok CLI login or XAI_API_K
 simplerouter --provider deepseek --model deepseek-v4-flash
 simplerouter --provider zai --model glm-5.2
 simplerouter --provider meta --model muse-spark-1.2
+simplerouter --provider lmstudio                    # models from localhost:1234
 simplerouter --provider codex .                    # existing ChatGPT sign-in, standard routing
 simplerouter . -- --full-auto                     # pass an option through to Codex
 ```
@@ -107,6 +108,7 @@ uses a different protocol.
 | DeepSeek | `POST https://api.deepseek.com/chat/completions` | Loopback Responses-to-Chat translator |
 | Z.AI | `POST https://api.z.ai/api/paas/v4/chat/completions` | Loopback Responses-to-Chat translator |
 | Meta Model API | `POST https://api.meta.ai/v1/responses` | Loopback Responses compatibility proxy |
+| LM Studio | `POST http://127.0.0.1:1234/v1/responses` | Loopback Responses compatibility proxy |
 | Codex subscription | Standard Codex backend | Direct; no provider or endpoint overrides |
 
 The loopback servers bind to `127.0.0.1`, forward the selected session key, and
@@ -196,6 +198,14 @@ models; their supported summary control is preserved. Default Grok 4.5 effort is
 adapter also removes Codex's serialization-only `content: null` while preserving
 xAI's opaque encrypted reasoning state verbatim.
 
+The LM Studio adapter discovers installed LLMs from the server on the default
+`127.0.0.1:1234` port and uses the active instance's context length, tool-use
+capability, and reasoning levels for Codex's temporary model catalog. It merges
+Codex developer messages into the leading instructions block for chat templates
+that require the system prompt first, removes unsupported cache/encrypted-content
+hints, preserves disabled reasoning as Responses `none`, and presents custom and
+namespaced Codex tools as ordinary function tools. No API key is required.
+
 ## Model selection
 
 Run `simplerouter` or `simplerouter --select-model` to open the provider and
@@ -208,11 +218,12 @@ model pickers.
 - `Tab`: choose an OpenRouter inference endpoint
 - `Esc`: return to provider selection
 
-OpenRouter and Gemini catalogs are fetched from their live model endpoints.
+OpenRouter, Gemini, and LM Studio catalogs are fetched from their live model endpoints.
 The OpenRouter list keeps the provider's popularity order with recommended
 coding models pinned at the top. The Gemini list is restricted to usable text
-generation models. OpenAI, xAI, DeepSeek, Z.AI, and Meta use small, documented
-curated lists.
+generation models. LM Studio lists installed LLMs and uses loaded-instance
+metadata when available. OpenAI, xAI, DeepSeek, Z.AI, and Meta use small,
+documented curated lists.
 
 xAI's curated list starts with `grok-4.5` (500k context, default high reasoning),
 then `grok-4.3`, `grok-build-0.1`, and the Grok 4.20 reasoning / non-reasoning /
@@ -235,7 +246,7 @@ simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key
 ```
 
 - `--model MODEL`: model ID, display name, or unique suffix
-- `--provider PROVIDER`: `openrouter`, `gemini`, `openai`, `xai` (alias `grok`), `deepseek`, `zai`, `meta`, or `codex`
+- `--provider PROVIDER`: `openrouter`, `gemini`, `openai`, `xai` (alias `grok`), `deepseek`, `zai`, `meta`, `lmstudio`, or `codex`
 - `--select-model`: open the provider/model picker even when a choice is saved
 - `--reset-key`: clear every saved provider key before selection
 - `--disable-thinking`: disable Codex reasoning and the provider's thinking mode
@@ -260,6 +271,7 @@ Environment variables take precedence over saved values:
 | DeepSeek | `DEEPSEEK_API_KEY` |
 | Z.AI | `ZAI_API_KEY`, `BIGMODEL_API_KEY` |
 | Meta | `META_API_KEY`, `MODEL_API_KEY` |
+| LM Studio | None; the local server is used directly |
 
 If no environment value is present, the launcher validates a saved key where
 the provider exposes a suitable endpoint, or prompts without echoing in an
@@ -268,6 +280,10 @@ automatically and refreshed via OIDC when expired; that session token is not
 copied into SimpleRouter's config. Selected keys and models are stored in
 `~/.simplerouter/config.json`; `--reset-key` removes the stored keys without
 discarding model choices.
+
+For LM Studio, start the Local Server before selecting the provider. SimpleRouter
+connects to `http://127.0.0.1:1234/v1`, shows the installed LLMs, and remembers
+the last local model without storing credentials.
 
 The temporary Codex provider reads the selected key from the private
 `SIMPLEROUTER_CODEX_API_KEY` environment variable. Existing environment entries
@@ -328,3 +344,4 @@ Protocol references used by this implementation:
 - [xAI Responses API](https://docs.x.ai/developers/model-capabilities/text/generate-text)
 - [xAI Reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning)
 - [Grok Build authentication](https://docs.x.ai/build/enterprise#authentication)
+- [LM Studio developer documentation](https://lmstudio.ai/docs/developer)

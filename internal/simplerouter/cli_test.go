@@ -22,6 +22,7 @@ func withTestHome(t *testing.T) string {
 	oldStartResponsesPassthroughProxy := startResponsesPassthroughProxyFn
 	oldStartMetaResponsesProxy := startMetaResponsesProxyFn
 	oldStartXAIResponsesProxy := startXAIResponsesProxyFn
+	oldStartLMStudioResponsesProxy := startLMStudioResponsesProxyFn
 	oldLoadGrokCLISession := loadGrokCLISessionTokenFn
 	userHomeDir = func() (string, error) { return dir, nil }
 	findCodexFn = func() (string, error) { return filepath.Join(dir, "codex-test"), nil }
@@ -37,6 +38,9 @@ func withTestHome(t *testing.T) string {
 	startXAIResponsesProxyFn = func(upstreamBase, _ string, _ *http.Client) (string, func(), error) {
 		return upstreamBase, func() {}, nil
 	}
+	startLMStudioResponsesProxyFn = func(upstreamBase, _ string, _ *http.Client) (string, func(), error) {
+		return upstreamBase, func() {}, nil
+	}
 	// Default: no Grok CLI session so unit tests do not touch the real machine login.
 	loadGrokCLISessionTokenFn = func(context.Context, *http.Client) (string, error) {
 		return "", nil
@@ -48,6 +52,7 @@ func withTestHome(t *testing.T) string {
 		startResponsesPassthroughProxyFn = oldStartResponsesPassthroughProxy
 		startMetaResponsesProxyFn = oldStartMetaResponsesProxy
 		startXAIResponsesProxyFn = oldStartXAIResponsesProxy
+		startLMStudioResponsesProxyFn = oldStartLMStudioResponsesProxy
 		loadGrokCLISessionTokenFn = oldLoadGrokCLISession
 	})
 	return dir
@@ -617,6 +622,7 @@ func TestResetSavedKeyClearsBothKeys(t *testing.T) {
 		LastZAIModel:      "glm-5.2",
 		LastMetaModel:     "muse-spark-1.1",
 		LastGrokModel:     "grok-4.5",
+		LastLMStudioModel: "qwen/qwen3.8-27b",
 	}
 	if err := saveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -631,7 +637,7 @@ func TestResetSavedKeyClearsBothKeys(t *testing.T) {
 	if got.OpenRouterAPIKey != "" || got.GeminiAPIKey != "" || got.OpenAIAPIKey != "" || got.DeepSeekAPIKey != "" || got.ZAIAPIKey != "" || got.MetaAPIKey != "" || got.XAIAPIKey != "" {
 		t.Fatalf("keys not cleared: %+v", got)
 	}
-	if got.Provider != providerGemini || got.LastModel != cfg.LastModel || got.LastGeminiModel != cfg.LastGeminiModel || got.LastOpenAIModel != cfg.LastOpenAIModel || got.LastDeepSeekModel != cfg.LastDeepSeekModel || got.LastZAIModel != cfg.LastZAIModel || got.LastMetaModel != cfg.LastMetaModel || got.LastGrokModel != cfg.LastGrokModel {
+	if got.Provider != providerGemini || got.LastModel != cfg.LastModel || got.LastGeminiModel != cfg.LastGeminiModel || got.LastOpenAIModel != cfg.LastOpenAIModel || got.LastDeepSeekModel != cfg.LastDeepSeekModel || got.LastZAIModel != cfg.LastZAIModel || got.LastMetaModel != cfg.LastMetaModel || got.LastGrokModel != cfg.LastGrokModel || got.LastLMStudioModel != cfg.LastLMStudioModel {
 		t.Fatalf("non-key fields changed: %+v", got)
 	}
 }
@@ -661,6 +667,14 @@ func TestCanonicalProviderGrokAliases(t *testing.T) {
 	for _, input := range []string{"xai", "grok", "XAI", "x-ai", "x.ai"} {
 		if got := canonicalProvider(input); got != providerXAI {
 			t.Errorf("canonicalProvider(%q) = %q, want %q", input, got, providerXAI)
+		}
+	}
+}
+
+func TestCanonicalProviderLMStudioAliases(t *testing.T) {
+	for _, input := range []string{"lmstudio", "LM Studio", "lm-studio", "lm_studio", "local"} {
+		if got := canonicalProvider(input); got != providerLMStudio {
+			t.Errorf("canonicalProvider(%q) = %q, want %q", input, got, providerLMStudio)
 		}
 	}
 }
@@ -1052,6 +1066,75 @@ func TestXAILaunchesThroughResponsesCompatibilityProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Provider != providerXAI || cfg.XAIAPIKey != "xai-test" || cfg.LastGrokModel != "grok-4.5" {
+		t.Fatalf("config = %+v", cfg)
+	}
+}
+
+func TestLMStudioLaunchesThroughResponsesCompatibilityProxy(t *testing.T) {
+	home := withTestHome(t)
+	if err := saveConfig(Config{Provider: providerLMStudio, LastLMStudioModel: "qwen/qwen3.8-27b"}); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"models":[{"type":"llm","key":"qwen/qwen3.8-27b","display_name":"Qwen3.8 27B","max_context_length":262144,"capabilities":{"trained_for_tool_use":true,"reasoning":{"allowed_options":["off","low","medium","xhigh","on"],"default":"xhigh"}},"loaded_instances":[{"config":{"context_length":162048}}]}]}`)
+	}))
+	defer server.Close()
+
+	var proxyBase, proxyModel string
+	startLMStudioResponsesProxyFn = func(upstreamBase, model string, _ *http.Client) (string, func(), error) {
+		proxyBase, proxyModel = upstreamBase, model
+		return "http://127.0.0.1:9595/v1", func() {}, nil
+	}
+
+	var spec launchSpec
+	stderr := &strings.Builder{}
+	a := &app{
+		stdin:           strings.NewReader("\n\n"),
+		stdout:          &strings.Builder{},
+		stderr:          stderr,
+		httpClient:      server.Client(),
+		lmStudioAPIBase: server.URL + "/v1",
+		runCommand: func(s launchSpec) error {
+			spec = s
+			return nil
+		},
+	}
+	if err := a.run(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if proxyBase != server.URL+"/v1" || proxyModel != "qwen/qwen3.8-27b" {
+		t.Fatalf("LM Studio proxy got (%q, %q)", proxyBase, proxyModel)
+	}
+	model := Model{
+		ID:                        "qwen/qwen3.8-27b",
+		Name:                      "Qwen3.8 27B",
+		ContextLength:             162048,
+		SupportedParameters:       []string{"tools", "reasoning"},
+		SupportedReasoningEfforts: []string{"none", "low", "medium", "xhigh"},
+		DefaultReasoningEffort:    "xhigh",
+		DefaultReasoningSummary:   "auto",
+		AutoCompactTokenLimit:     129638,
+	}
+	wantArgs := reasoningAwareCodexArgs(model, "http://127.0.0.1:9595/v1", filepath.Join(home, "models.json"), false, nil, nil)
+	if !slices.Equal(spec.Args, wantArgs) {
+		t.Fatalf("Args = %v, want %v", spec.Args, wantArgs)
+	}
+	if envMap(spec.Env)[codexAPIKeyEnv] != lmStudioSessionKey {
+		t.Fatalf("local session key = %q", envMap(spec.Env)[codexAPIKeyEnv])
+	}
+	if !strings.Contains(stderr.String(), "reasoning xhigh") || !strings.Contains(stderr.String(), "provider LM Studio") {
+		t.Fatalf("launch summary missing LM Studio metadata: %q", stderr.String())
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != providerLMStudio || cfg.LastLMStudioModel != "qwen/qwen3.8-27b" {
 		t.Fatalf("config = %+v", cfg)
 	}
 }

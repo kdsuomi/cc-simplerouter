@@ -59,6 +59,7 @@ func loadConfig() (Config, error) {
 	cfg.LastZAIModel = strings.TrimSpace(cfg.LastZAIModel)
 	cfg.LastMetaModel = strings.TrimSpace(cfg.LastMetaModel)
 	cfg.LastGrokModel = strings.TrimSpace(cfg.LastGrokModel)
+	cfg.LastLMStudioModel = strings.TrimSpace(cfg.LastLMStudioModel)
 	// A hand-edited unknown provider must not break launch: fall back to the
 	// default (OpenRouter) rather than erroring.
 	cfg.Provider = strings.ToLower(strings.TrimSpace(cfg.Provider))

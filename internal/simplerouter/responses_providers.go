@@ -50,6 +50,23 @@ func startXAIResponsesProxy(upstreamBase, model string, httpClient *http.Client)
 	return startResponsesPassthroughProxy(upstreamBase, model, httpClient, xaiResponsesOptions(model))
 }
 
+func startLMStudioResponsesProxy(upstreamBase, model string, httpClient *http.Client) (string, func(), error) {
+	return startResponsesPassthroughProxy(upstreamBase, model, httpClient, lmStudioResponsesOptions())
+}
+
+func lmStudioResponsesOptions() responsesPassthroughOptions {
+	return responsesPassthroughOptions{
+		Label:                         "LM Studio",
+		ReasoningEffortMap:            map[string]string{"max": "xhigh", "ultra": "xhigh"},
+		TranslateCustomTools:          true,
+		FlattenNamespaces:             true,
+		AllowedToolTypes:              []string{"function"},
+		CoalesceDeveloperMessages:     true,
+		OmitPromptCacheKey:            true,
+		OmitEncryptedReasoningInclude: true,
+	}
+}
+
 func metaResponsesOptions() responsesPassthroughOptions {
 	return responsesPassthroughOptions{
 		Label:                "Meta",

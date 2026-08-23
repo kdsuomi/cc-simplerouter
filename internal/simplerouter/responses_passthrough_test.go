@@ -6,9 +6,91 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestLMStudioPassthroughNormalizesCodexRequest(t *testing.T) {
+	captured := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(upstream.URL, "qwen/qwen3.8-27b", upstream.Client(), lmStudioResponsesOptions()))
+	defer proxy.Close()
+
+	requestBody := `{
+	  "model":"ignored",
+	  "instructions":"Base instructions",
+	  "input":[
+	    {"type":"message","role":"developer","content":[{"type":"input_text","text":"First developer block"}]},
+	    {"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+	    {"type":"message","role":"developer","content":"Second developer block"}
+	  ],
+	  "prompt_cache_key":"cache-me",
+	  "include":["reasoning.encrypted_content","other.detail"],
+	  "reasoning":{"effort":"none"},
+	  "tools":[
+	    {"type":"custom","name":"apply_patch","description":"Apply patch","format":{"type":"grammar","syntax":"lark","definition":"start: PATCH"}},
+	    {"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"list_agents","parameters":{"type":"object","properties":{}}}]},
+	    {"type":"tool_search","execution":"client"}
+	  ],
+	  "stream":true
+	}`
+	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	responseBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d: %s", resp.StatusCode, responseBody)
+	}
+
+	request := <-captured
+	if request["model"] != "qwen/qwen3.8-27b" {
+		t.Fatalf("model = %#v", request["model"])
+	}
+	if request["instructions"] != "Base instructions\n\nFirst developer block\n\nSecond developer block" {
+		t.Fatalf("instructions = %#v", request["instructions"])
+	}
+	input := request["input"].([]any)
+	if len(input) != 1 || input[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("input = %#v", input)
+	}
+	if _, found := request["prompt_cache_key"]; found {
+		t.Fatalf("prompt_cache_key reached LM Studio: %#v", request)
+	}
+	include := request["include"].([]any)
+	if len(include) != 1 || include[0] != "other.detail" {
+		t.Fatalf("include = %#v", include)
+	}
+	if request["reasoning"].(map[string]any)["effort"] != "none" {
+		t.Fatalf("reasoning = %#v", request["reasoning"])
+	}
+	tools := request["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("tools = %#v", tools)
+	}
+	names := []string{tools[0].(map[string]any)["name"].(string), tools[1].(map[string]any)["name"].(string)}
+	if !slices.Contains(names, "apply_patch") || !slices.Contains(names, "collaboration__list_agents") {
+		t.Fatalf("function tools = %#v", tools)
+	}
+	for _, raw := range tools {
+		if raw.(map[string]any)["type"] != "function" {
+			t.Fatalf("non-function tool reached LM Studio: %#v", raw)
+		}
+	}
+}
 
 func TestXAIPassthroughFlattensNamespacesAndDropsUnsupportedTools(t *testing.T) {
 	captured := make(chan map[string]any, 1)

@@ -68,7 +68,7 @@ func TestPickOneLineMode(t *testing.T) {
 	}
 
 	// Junk input warns and re-prompts; then a valid pick works.
-	a, out = newApp("9\n1\n")
+	a, out = newApp("99\n1\n")
 	opt, err = a.pickOne("Select a provider", providerOptions(), "")
 	if err != nil {
 		t.Fatal(err)

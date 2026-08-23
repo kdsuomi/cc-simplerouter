@@ -16,6 +16,7 @@ type Config struct {
 	LastZAIModel      string `json:"last_zai_model,omitempty"`
 	LastMetaModel     string `json:"last_meta_model,omitempty"`
 	LastGrokModel     string `json:"last_grok_model,omitempty"`
+	LastLMStudioModel string `json:"last_lmstudio_model,omitempty"`
 }
 
 type Model struct {

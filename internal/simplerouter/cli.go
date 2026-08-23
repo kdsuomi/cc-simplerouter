@@ -26,7 +26,9 @@ const (
 	providerZAI        = "zai"
 	providerMeta       = "meta"
 	providerXAI        = "xai"
+	providerLMStudio   = "lmstudio"
 	providerCodex      = "codex"
+	lmStudioSessionKey = "lmstudio"
 )
 
 type app struct {
@@ -41,6 +43,7 @@ type app struct {
 	zaiAPIBase      string // Z.AI API base override (tests)
 	metaAPIBase     string // Meta API base override (tests)
 	xaiAPIBase      string // xAI API base override (tests)
+	lmStudioAPIBase string // LM Studio API base override (tests)
 	lineReader      *bufio.Reader
 	runCommand      func(spec launchSpec) error
 }
@@ -54,6 +57,7 @@ var startDeepSeekResponsesProxyFn = startDeepSeekResponsesProxy
 var startZAIResponsesProxyFn = startZAIResponsesProxy
 var startMetaResponsesProxyFn = startMetaResponsesProxy
 var startXAIResponsesProxyFn = startXAIResponsesProxy
+var startLMStudioResponsesProxyFn = startLMStudioResponsesProxy
 var startResponsesPassthroughProxyFn = startResponsesPassthroughProxy
 var loadGrokCLISessionTokenFn = loadGrokCLISessionToken
 
@@ -83,7 +87,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("simplerouter", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
 	fs.StringVar(&modelFlag, "model", "", "Model id, name, or unique suffix")
-	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "xai", "deepseek", "zai", "meta", or "codex"`)
+	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "xai", "deepseek", "zai", "meta", "lmstudio", or "codex"`)
 	fs.BoolVar(&selectModel, "select-model", false, "Select a provider and model interactively")
 	fs.BoolVar(&resetKey, "reset-key", false, "Forget the saved API keys before launching")
 	fs.BoolVar(&disableThinking, "disable-thinking", false, "Disable model reasoning for provider compatibility")
@@ -110,7 +114,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 		return err
 	}
 	style := newTerminalStyle(a.stderr)
-	firstRun := modelFlag == "" && cfg.Provider == "" && cfg.LastModel == "" && cfg.LastGeminiModel == "" && cfg.LastOpenAIModel == "" && cfg.LastDeepSeekModel == "" && cfg.LastZAIModel == "" && cfg.LastMetaModel == "" && cfg.LastGrokModel == ""
+	firstRun := modelFlag == "" && cfg.Provider == "" && cfg.LastModel == "" && cfg.LastGeminiModel == "" && cfg.LastOpenAIModel == "" && cfg.LastDeepSeekModel == "" && cfg.LastZAIModel == "" && cfg.LastMetaModel == "" && cfg.LastGrokModel == "" && cfg.LastLMStudioModel == ""
 	if firstRun {
 		printSetupBanner(a.stderr, style)
 		fmt.Fprintln(a.stderr)
@@ -165,6 +169,8 @@ func (a *app) run(ctx context.Context, args []string) error {
 			key, res, err = a.selectMeta(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		case providerXAI:
 			key, persistKey, res, err = a.selectXAI(ctx, cfg, modelFlag, selectModel, firstRun, style)
+		case providerLMStudio:
+			key, res, err = a.selectLMStudio(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		default:
 			key, res, err = a.selectOpenRouter(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		}
@@ -206,6 +212,8 @@ func (a *app) run(ctx context.Context, args []string) error {
 			cfg.XAIAPIKey = key
 		}
 		cfg.LastGrokModel = modelID
+	case providerLMStudio:
+		cfg.LastLMStudioModel = modelID
 	default:
 		cfg.OpenRouterAPIKey = key
 		cfg.LastModel = modelID
@@ -259,6 +267,13 @@ func (a *app) run(ctx context.Context, args []string) error {
 		}
 		defer stop()
 		baseURL = proxyURL
+	case provider == providerLMStudio:
+		proxyURL, stop, perr := startLMStudioResponsesProxyFn(a.lmStudioBase(), modelID, a.httpClient)
+		if perr != nil {
+			return fmt.Errorf("start LM Studio Responses proxy: %w", perr)
+		}
+		defer stop()
+		baseURL = proxyURL
 	default:
 		baseURL = a.openRouterBase()
 		proxyURL, stop, perr := startResponsesPassthroughProxyFn(baseURL, modelID, a.httpClient, responsesPassthroughOptions{
@@ -281,7 +296,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	thinkingMode := launchThinkingMode(provider, selected, disableThinking)
 	a.printLaunchSummary(modelID, selected.ContextLength, thinkingMode, dir, launchProviderLabel(provider, res))
 	launchArgs := codexArgs(modelID, baseURL, catalogPath, disableThinking, codexPositionals, passthrough)
-	if provider == providerMeta || provider == providerXAI {
+	if provider == providerMeta || provider == providerXAI || provider == providerLMStudio {
 		launchArgs = reasoningAwareCodexArgs(selected, baseURL, catalogPath, disableThinking, codexPositionals, passthrough)
 	}
 	launchArgs = codexArgsWithBrowserBridge(codexPath, launchArgs)
@@ -366,6 +381,8 @@ func canonicalProvider(input string) string {
 		return providerZAI
 	case "grok", "x-ai", "x.ai", "spacexai":
 		return providerXAI
+	case "lm studio", "lm-studio", "lm_studio", "local":
+		return providerLMStudio
 	default:
 		return p
 	}
@@ -373,7 +390,7 @@ func canonicalProvider(input string) string {
 
 func isKnownProvider(provider string) bool {
 	switch provider {
-	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta, providerXAI, providerCodex:
+	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta, providerXAI, providerLMStudio, providerCodex:
 		return true
 	default:
 		return false
@@ -381,7 +398,7 @@ func isKnownProvider(provider string) bool {
 }
 
 func providerNames() []string {
-	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerXAI, providerDeepSeek, providerZAI, providerMeta, providerCodex}
+	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerXAI, providerDeepSeek, providerZAI, providerMeta, providerLMStudio, providerCodex}
 }
 
 func (a *app) openRouterBase() string {
@@ -434,6 +451,13 @@ func (a *app) xaiBase() string {
 	return defaultXAIAPIBase
 }
 
+func (a *app) lmStudioBase() string {
+	if strings.TrimSpace(a.lmStudioAPIBase) != "" {
+		return a.lmStudioAPIBase
+	}
+	return defaultLMStudioAPIBase
+}
+
 func launchProviderLabel(provider string, res pickResult) string {
 	switch provider {
 	case providerGemini:
@@ -448,6 +472,8 @@ func launchProviderLabel(provider string, res pickResult) string {
 		return "Meta"
 	case providerXAI:
 		return "xAI"
+	case providerLMStudio:
+		return "LM Studio"
 	}
 	return res.ProviderName // pinned OpenRouter endpoint, or ""
 }
@@ -462,7 +488,7 @@ func launchThinkingMode(provider string, model Model, disableThinking bool) stri
 		}
 		return "disabled"
 	}
-	if provider == providerMeta || provider == providerXAI {
+	if provider == providerMeta || provider == providerXAI || provider == providerLMStudio {
 		if !modelSupportsReasoning(model) {
 			return "disabled"
 		}
@@ -839,6 +865,27 @@ func (a *app) selectXAI(ctx context.Context, cfg Config, modelFlag string, selec
 	}
 	key, res, err := a.selectStaticModel(providerXAI, "xAI", key, cfg.LastGrokModel, modelFlag, selectModel, firstRun, style)
 	return key, persist, res, err
+}
+
+func (a *app) selectLMStudio(ctx context.Context, cfg Config, modelFlag string, selectModel, firstRun bool, style terminalStyle) (string, pickResult, error) {
+	modelID := strings.TrimSpace(modelFlag)
+	if firstRun {
+		fmt.Fprintln(a.stderr, style.paint(clrDim, "Fetching installed LM Studio models..."))
+	}
+	models, err := lmStudioModels(ctx, a.httpClient, a.lmStudioBase())
+	if err != nil {
+		return "", pickResult{}, err
+	}
+	if selectModel || modelID == "" {
+		current := cfg.LastLMStudioModel
+		if modelID != "" {
+			current = modelID
+		}
+		res, err := a.pickModel("Select an LM Studio model", models, current, nil)
+		return lmStudioSessionKey, res, err
+	}
+	res, err := a.resolveStaticModel("LM Studio", models, modelID)
+	return lmStudioSessionKey, res, err
 }
 
 func (a *app) selectStaticModel(provider, label, key, lastModel, modelFlag string, selectModel, firstRun bool, style terminalStyle) (string, pickResult, error) {

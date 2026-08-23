@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,6 +21,9 @@ type responsesPassthroughOptions struct {
 	OmitReasoningControls             bool
 	TranslateCustomTools              bool
 	OmitNullEncryptedReasoningContent bool
+	CoalesceDeveloperMessages         bool
+	OmitPromptCacheKey                bool
+	OmitEncryptedReasoningInclude     bool
 	// FlattenNamespaces rewrites Codex multi-agent namespace tools into top-level
 	// function tools (namespace__name). Required for providers such as xAI that
 	// reject the Responses "namespace" tool variant.
@@ -89,6 +93,21 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 	}
 	model, _ := json.Marshal(p.model)
 	request["model"] = model
+	if p.options.CoalesceDeveloperMessages {
+		if err := coalesceResponsesDeveloperMessages(request); err != nil {
+			writeResponsesError(w, http.StatusInternalServerError, "api_error", "normalize developer messages: "+err.Error())
+			return
+		}
+	}
+	if p.options.OmitPromptCacheKey {
+		delete(request, "prompt_cache_key")
+	}
+	if p.options.OmitEncryptedReasoningInclude {
+		if err := omitEncryptedReasoningInclude(request); err != nil {
+			writeResponsesError(w, http.StatusInternalServerError, "api_error", "normalize include: "+err.Error())
+			return
+		}
+	}
 	if p.options.OmitReasoningControls {
 		delete(request, "reasoning")
 	} else if p.options.OmitReasoningEffort {
@@ -145,6 +164,126 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 	}
 
 	p.forwardResponsesPayload(w, r, request, payload, toolTranslation)
+}
+
+// coalesceResponsesDeveloperMessages works around local chat templates that
+// map Responses developer messages to system messages but require the system
+// prompt to be the first message. Codex's top-level instructions and all
+// textual developer messages become one leading instructions value.
+func coalesceResponsesDeveloperMessages(request map[string]json.RawMessage) error {
+	var input []json.RawMessage
+	if err := json.Unmarshal(request["input"], &input); err != nil {
+		return nil
+	}
+	var instructions string
+	if raw := request["instructions"]; len(bytes.TrimSpace(raw)) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		if err := json.Unmarshal(raw, &instructions); err != nil {
+			return fmt.Errorf("instructions must be a string: %w", err)
+		}
+	}
+
+	sections := make([]string, 0, 1)
+	if text := strings.TrimSpace(instructions); text != "" {
+		sections = append(sections, text)
+	}
+	kept := make([]json.RawMessage, 0, len(input))
+	changed := false
+	for _, raw := range input {
+		var item map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &item); err != nil {
+			kept = append(kept, raw)
+			continue
+		}
+		var role string
+		if json.Unmarshal(item["role"], &role) != nil || role != "developer" {
+			kept = append(kept, raw)
+			continue
+		}
+		text, ok, err := responsesDeveloperText(item["content"])
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("developer message contains unsupported non-text content")
+		}
+		if text = strings.TrimSpace(text); text != "" {
+			sections = append(sections, text)
+		}
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	encodedInput, err := json.Marshal(kept)
+	if err != nil {
+		return err
+	}
+	request["input"] = encodedInput
+	if len(sections) > 0 {
+		request["instructions"], err = json.Marshal(strings.Join(sections, "\n\n"))
+		return err
+	}
+	delete(request, "instructions")
+	return nil
+}
+
+func responsesDeveloperText(content json.RawMessage) (string, bool, error) {
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", true, nil
+	}
+	var direct string
+	if err := json.Unmarshal(trimmed, &direct); err == nil {
+		return direct, true, nil
+	}
+	var parts []map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &parts); err != nil {
+		return "", false, nil
+	}
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		var text string
+		if raw, found := part["text"]; found {
+			if err := json.Unmarshal(raw, &text); err != nil {
+				return "", false, fmt.Errorf("developer text content: %w", err)
+			}
+			texts = append(texts, text)
+			continue
+		}
+		if len(part) > 0 {
+			return "", false, nil
+		}
+	}
+	return strings.Join(texts, "\n"), true, nil
+}
+
+func omitEncryptedReasoningInclude(request map[string]json.RawMessage) error {
+	var include []string
+	if err := json.Unmarshal(request["include"], &include); err != nil {
+		return nil
+	}
+	kept := include[:0]
+	changed := false
+	for _, value := range include {
+		if value == "reasoning.encrypted_content" {
+			changed = true
+			continue
+		}
+		kept = append(kept, value)
+	}
+	if !changed {
+		return nil
+	}
+	if len(kept) == 0 {
+		delete(request, "include")
+		return nil
+	}
+	encoded, err := json.Marshal(kept)
+	if err != nil {
+		return err
+	}
+	request["include"] = encoded
+	return nil
 }
 
 func omitResponsesReasoningEffort(request map[string]json.RawMessage) error {
