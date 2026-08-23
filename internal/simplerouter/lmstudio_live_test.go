@@ -50,6 +50,7 @@ func TestLiveLMStudioCodexCompatibility(t *testing.T) {
 		"prompt_cache_key": "live-compatibility-test",
 		"include":          []string{"reasoning.encrypted_content"},
 		"reasoning":        map[string]any{"effort": "none"},
+		"text":             map[string]any{"verbosity": "medium"},
 		"tools": []any{
 			map[string]any{"type": "custom", "name": "apply_patch", "description": "Apply a patch", "format": map[string]any{"type": "grammar", "syntax": "lark", "definition": "start: PATCH"}},
 			map[string]any{"type": "tool_search", "execution": "client"},

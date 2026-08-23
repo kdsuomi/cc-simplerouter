@@ -39,6 +39,7 @@ func TestLMStudioPassthroughNormalizesCodexRequest(t *testing.T) {
 	  "prompt_cache_key":"cache-me",
 	  "include":["reasoning.encrypted_content","other.detail"],
 	  "reasoning":{"effort":"none"},
+	  "text":{"verbosity":"medium"},
 	  "tools":[
 	    {"type":"custom","name":"apply_patch","description":"Apply patch","format":{"type":"grammar","syntax":"lark","definition":"start: PATCH"}},
 	    {"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"list_agents","parameters":{"type":"object","properties":{}}}]},
@@ -76,6 +77,10 @@ func TestLMStudioPassthroughNormalizesCodexRequest(t *testing.T) {
 	}
 	if request["reasoning"].(map[string]any)["effort"] != "none" {
 		t.Fatalf("reasoning = %#v", request["reasoning"])
+	}
+	textControls := request["text"].(map[string]any)
+	if textControls["verbosity"] != "medium" || textControls["format"].(map[string]any)["type"] != "text" {
+		t.Fatalf("text controls = %#v", textControls)
 	}
 	tools := request["tools"].([]any)
 	if len(tools) != 2 {

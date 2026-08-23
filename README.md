@@ -203,8 +203,9 @@ The LM Studio adapter discovers installed LLMs from the server on the default
 capability, and reasoning levels for Codex's temporary model catalog. It merges
 Codex developer messages into the leading instructions block for chat templates
 that require the system prompt first, removes unsupported cache/encrypted-content
-hints, preserves disabled reasoning as Responses `none`, and presents custom and
-namespaced Codex tools as ordinary function tools. No API key is required.
+hints, fills LM Studio's required plain-text response format when Codex only
+sends verbosity, preserves disabled reasoning as Responses `none`, and presents
+custom and namespaced Codex tools as ordinary function tools. No API key is required.
 
 ## Model selection
 

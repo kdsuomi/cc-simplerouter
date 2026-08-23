@@ -24,6 +24,7 @@ type responsesPassthroughOptions struct {
 	CoalesceDeveloperMessages         bool
 	OmitPromptCacheKey                bool
 	OmitEncryptedReasoningInclude     bool
+	EnsureTextFormat                  bool
 	// FlattenNamespaces rewrites Codex multi-agent namespace tools into top-level
 	// function tools (namespace__name). Required for providers such as xAI that
 	// reject the Responses "namespace" tool variant.
@@ -105,6 +106,12 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 	if p.options.OmitEncryptedReasoningInclude {
 		if err := omitEncryptedReasoningInclude(request); err != nil {
 			writeResponsesError(w, http.StatusInternalServerError, "api_error", "normalize include: "+err.Error())
+			return
+		}
+	}
+	if p.options.EnsureTextFormat {
+		if err := ensureResponsesTextFormat(request); err != nil {
+			writeResponsesError(w, http.StatusInternalServerError, "api_error", "normalize text format: "+err.Error())
 			return
 		}
 	}
@@ -283,6 +290,27 @@ func omitEncryptedReasoningInclude(request map[string]json.RawMessage) error {
 		return err
 	}
 	request["include"] = encoded
+	return nil
+}
+
+func ensureResponsesTextFormat(request map[string]json.RawMessage) error {
+	raw, found := request["text"]
+	if !found || len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil
+	}
+	var textControls map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &textControls); err != nil || textControls == nil {
+		return nil
+	}
+	if format, found := textControls["format"]; found && len(bytes.TrimSpace(format)) > 0 && !bytes.Equal(bytes.TrimSpace(format), []byte("null")) {
+		return nil
+	}
+	textControls["format"] = json.RawMessage(`{"type":"text"}`)
+	encoded, err := json.Marshal(textControls)
+	if err != nil {
+		return err
+	}
+	request["text"] = encoded
 	return nil
 }
 

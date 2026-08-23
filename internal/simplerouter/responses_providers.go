@@ -64,6 +64,7 @@ func lmStudioResponsesOptions() responsesPassthroughOptions {
 		CoalesceDeveloperMessages:     true,
 		OmitPromptCacheKey:            true,
 		OmitEncryptedReasoningInclude: true,
+		EnsureTextFormat:              true,
 	}
 }
 
