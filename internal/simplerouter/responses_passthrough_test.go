@@ -596,12 +596,24 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	    },
 	    {
 	      "type":"namespace",
-	      "name":"collaboration",
+	      "name":"mcp__codex_apps__gmail",
 	      "tools":[{
 	        "type":"function",
-	        "name":"list_agents",
+	        "name":"_send_email",
 	        "strict":true,
-	        "parameters":{"type":"object","properties":{"limit":{"type":"integer"}}}
+	        "parameters":{
+	          "type":"object",
+	          "properties":{"payload":{"$ref":"#/$defs/GmailMessagePartRequest"}},
+	          "$defs":{
+	            "GmailMessagePartRequest":{
+	              "type":"object",
+	              "properties":{
+	                "body":{"type":"string"},
+	                "parts":{"type":"array","items":{"$ref":"#/$defs/GmailMessagePartRequest"}}
+	              }
+	            }
+	          }
+	        }
 	      }]
 	    },
 	    {
@@ -666,6 +678,17 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	child := namespace["tools"].([]any)[0].(map[string]any)
 	if child["strict"] != false {
 		t.Fatalf("strict namespace function was not relaxed for Meta: %#v", child)
+	}
+	childParameters := child["parameters"].(map[string]any)
+	payload := childParameters["properties"].(map[string]any)["payload"].(map[string]any)
+	if payload["$ref"] != "#/$defs/GmailMessagePartRequest" {
+		t.Fatalf("Meta rewrite removed useful non-recursive schema ref: %#v", childParameters)
+	}
+	messagePart := childParameters["$defs"].(map[string]any)["GmailMessagePartRequest"].(map[string]any)
+	parts := messagePart["properties"].(map[string]any)["parts"].(map[string]any)
+	items := parts["items"].(map[string]any)
+	if _, found := items["$ref"]; found || len(items) != 0 {
+		t.Fatalf("Meta rewrite retained recursive schema ref: %#v", childParameters)
 	}
 	toolSearch := tools[3].(map[string]any)
 	toolSearchParameters := toolSearch["parameters"].(map[string]any)

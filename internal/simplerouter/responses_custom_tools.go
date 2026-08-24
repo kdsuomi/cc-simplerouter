@@ -3,6 +3,8 @@ package simplerouter
 import (
 	"bytes"
 	"encoding/json"
+	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -324,11 +326,13 @@ func normalizeMetaResponsesTool(tool map[string]json.RawMessage) bool {
 	}
 	switch toolType {
 	case "function":
+		changed := false
 		var strict bool
 		if json.Unmarshal(tool["strict"], &strict) == nil && strict {
 			tool["strict"] = json.RawMessage(`false`)
-			return true
+			changed = true
 		}
+		return removeRecursiveMetaFunctionSchemaRefs(tool) || changed
 	case "namespace":
 		var children []json.RawMessage
 		if json.Unmarshal(tool["tools"], &children) != nil {
@@ -360,6 +364,99 @@ func normalizeMetaResponsesTool(tool map[string]json.RawMessage) bool {
 		}
 	}
 	return false
+}
+
+// removeRecursiveMetaFunctionSchemaRefs cuts only local $ref edges that close
+// a cycle. Meta accepts referenced function schemas, but rejects recursive
+// schemas such as the Gmail app's nested MIME-part declaration. Keeping the
+// first reference and replacing the back-edge with an unconstrained schema
+// preserves useful argument guidance without dropping the tool.
+func removeRecursiveMetaFunctionSchemaRefs(tool map[string]json.RawMessage) bool {
+	var schema any
+	if err := json.Unmarshal(tool["parameters"], &schema); err != nil || schema == nil {
+		return false
+	}
+	if !cutRecursiveLocalSchemaRefs(schema) {
+		return false
+	}
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return false
+	}
+	tool["parameters"] = encoded
+	return true
+}
+
+func cutRecursiveLocalSchemaRefs(root any) bool {
+	visited := map[string]bool{}
+	var walk func(any, map[string]bool) bool
+	walk = func(node any, active map[string]bool) bool {
+		changed := false
+		switch value := node.(type) {
+		case map[string]any:
+			if ref, ok := value["$ref"].(string); ok {
+				if active[ref] {
+					// An empty schema accepts the recursive value while preventing
+					// the provider from following the cycle again.
+					delete(value, "$ref")
+					changed = true
+				} else if !visited[ref] {
+					if target, found := resolveLocalSchemaRef(root, ref); found {
+						active[ref] = true
+						changed = walk(target, active) || changed
+						delete(active, ref)
+						visited[ref] = true
+					}
+				}
+			}
+			for key, child := range value {
+				if key == "$ref" {
+					continue
+				}
+				changed = walk(child, active) || changed
+			}
+		case []any:
+			for _, child := range value {
+				changed = walk(child, active) || changed
+			}
+		}
+		return changed
+	}
+	return walk(root, map[string]bool{})
+}
+
+func resolveLocalSchemaRef(root any, ref string) (any, bool) {
+	if ref == "#" {
+		return root, true
+	}
+	if !strings.HasPrefix(ref, "#/") {
+		return nil, false
+	}
+	path, err := url.PathUnescape(strings.TrimPrefix(ref, "#"))
+	if err != nil {
+		return nil, false
+	}
+	current := root
+	for _, encoded := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
+		part := strings.ReplaceAll(strings.ReplaceAll(encoded, "~1", "/"), "~0", "~")
+		switch value := current.(type) {
+		case map[string]any:
+			var found bool
+			current, found = value[part]
+			if !found {
+				return nil, false
+			}
+		case []any:
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(value) {
+				return nil, false
+			}
+			current = value[index]
+		default:
+			return nil, false
+		}
+	}
+	return current, true
 }
 
 func omitOptionalToolSearchParameters(tool map[string]json.RawMessage) bool {

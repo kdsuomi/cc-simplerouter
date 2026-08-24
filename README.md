@@ -180,6 +180,9 @@ on function declarations whose optional parameters Meta would otherwise reject,
 and omits Codex's optional `tool_search.limit` field so Meta can validate that
 built-in tool's required-only schema. Codex's unsupported
 `web_search.search_content_types` hint is removed while web search remains enabled.
+Recursive app-tool schemas are made finite by relaxing only cycle-closing local
+`$ref` edges, allowing tools such as Gmail's nested MIME-part inputs to remain
+available on Meta.
 
 The xAI (Grok) adapter also preserves the native Responses protocol against
 `https://api.x.ai/v1`. It rewrites Codex freeform `custom` tools (for example
