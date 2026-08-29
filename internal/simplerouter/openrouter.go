@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -110,8 +111,8 @@ func (c *openRouterClient) models(ctx context.Context, key string) ([]Model, err
 	return models, nil
 }
 
-// endpoints lists the provider endpoints currently serving a model, in the
-// order OpenRouter returns them (best/most-popular first).
+// endpoints lists the provider endpoints currently serving a model, fastest
+// measured throughput first.
 func (c *openRouterClient) endpoints(ctx context.Context, key, modelID string) ([]Endpoint, error) {
 	author, slug, ok := strings.Cut(strings.TrimSpace(modelID), "/")
 	if !ok || author == "" || slug == "" {
@@ -155,6 +156,9 @@ func (c *openRouterClient) endpoints(ctx context.Context, key, modelID string) (
 			Privacy:       endpointPrivacy(modelID, tag, zdr),
 		})
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].ThroughputP50 > out[j].ThroughputP50
+	})
 	return out, nil
 }
 

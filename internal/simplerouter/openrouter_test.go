@@ -28,6 +28,14 @@ func TestOpenRouterEndpointsThroughputP50(t *testing.T) {
 					"context_length": 64000,
 					"pricing": {"prompt": "0.000001", "completion": "0.000001"},
 					"throughput_last_30m": {"p50": null}
+				},
+				{
+					"provider_name": "Provider C",
+					"tag": "vendor/model-c",
+					"quantization": "fp8",
+					"context_length": 128000,
+					"pricing": {"prompt": "0.000001", "completion": "0.000002"},
+					"throughput_last_30m": {"p50": 84.2, "p75": 70.1}
 				}
 			]}}`)
 		case "/endpoints/zdr":
@@ -42,19 +50,22 @@ func TestOpenRouterEndpointsThroughputP50(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(endpoints) != 2 {
+	if len(endpoints) != 3 {
 		t.Fatalf("endpoints = %+v", endpoints)
 	}
-	if endpoints[0].ThroughputP50 != 42.5 {
-		t.Errorf("throughput p50 = %v, want 42.5", endpoints[0].ThroughputP50)
+	if endpoints[0].ProviderName != "Provider C" {
+		t.Errorf("fastest provider = %q, want Provider C", endpoints[0].ProviderName)
 	}
-	if endpoints[1].ThroughputP50 != 0 {
-		t.Errorf("missing throughput p50 = %v, want 0", endpoints[1].ThroughputP50)
+	if endpoints[1].ProviderName != "Provider A" {
+		t.Errorf("second provider = %q, want Provider A", endpoints[1].ProviderName)
 	}
-	if got := formatThroughput(endpoints[0].ThroughputP50); got != "43 tps" {
+	if endpoints[2].ThroughputP50 != 0 {
+		t.Errorf("missing throughput p50 = %v, want 0", endpoints[2].ThroughputP50)
+	}
+	if got := formatThroughput(endpoints[1].ThroughputP50); got != "43 tps" {
 		t.Errorf("formatThroughput = %q, want %q", got, "43 tps")
 	}
-	if got := formatThroughput(endpoints[1].ThroughputP50); got != "-" {
+	if got := formatThroughput(endpoints[2].ThroughputP50); got != "-" {
 		t.Errorf("formatThroughput missing = %q, want %q", got, "-")
 	}
 }
