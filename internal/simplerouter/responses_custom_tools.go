@@ -599,7 +599,16 @@ func (t *responsesToolStreamTranslator) needsTranslation() bool {
 }
 
 func (t *responsesToolStreamTranslator) processBlock(block []byte) [][]byte {
-	if !t.needsTranslation() {
+	needsTranslation := t.needsTranslation()
+	// Argument-delta metric forwarding must not depend on whether any tool
+	// required schema translation: on plain routes ordinary function-call
+	// argument deltas would otherwise pass through as native events that
+	// Codex's parser ignores, leaving their generation invisible to the live
+	// stream rate. A byte-level prefilter keeps the streaming hot path (the
+	// flood of ordinary text deltas) free of JSON parsing when no
+	// translation is active.
+	if !needsTranslation &&
+		!bytes.Contains(block, []byte("response.function_call_arguments.delta")) {
 		return [][]byte{block}
 	}
 	payload, ok := ssePayload(block)
@@ -614,21 +623,11 @@ func (t *responsesToolStreamTranslator) processBlock(block []byte) [][]byte {
 	if json.Unmarshal(fields["type"], &eventType) != nil {
 		return [][]byte{block}
 	}
-	switch eventType {
-	case "response.output_item.added", "response.output_item.done":
-		item, changed, itemID, callID := t.translateFunctionCallItem(fields["item"])
-		if !changed {
-			return [][]byte{block}
-		}
-		if itemID != "" {
-			t.itemIDs[itemID] = struct{}{}
-		}
-		if callID != "" {
-			t.callIDs[callID] = struct{}{}
-		}
-		fields["item"] = item
-		return [][]byte{rebuildDataBlock(block, fields)}
-	case "response.function_call_arguments.delta":
+	// Runs before the translation gate. The metric-only copy is safe only
+	// against the pinned Codex 0.147 parser, which ignores native
+	// function_call_arguments.delta events; if a future parser starts
+	// consuming them, appending this copy would double-count.
+	if eventType == "response.function_call_arguments.delta" {
 		if t.isCustomEvent(fields) {
 			// Suppressed custom-tool deltas still represent live generation:
 			// forward them under a synthetic id so the client counts their
@@ -645,6 +644,24 @@ func (t *responsesToolStreamTranslator) processBlock(block []byte) [][]byte {
 		// parser; append a metric-only copy so their generation is visible to
 		// the rate display too.
 		return append(blocks, t.metricOnlyArgumentDelta(block, fields, /*markStreamed*/ false)...)
+	}
+	if !needsTranslation {
+		return [][]byte{block}
+	}
+	switch eventType {
+	case "response.output_item.added", "response.output_item.done":
+		item, changed, itemID, callID := t.translateFunctionCallItem(fields["item"])
+		if !changed {
+			return [][]byte{block}
+		}
+		if itemID != "" {
+			t.itemIDs[itemID] = struct{}{}
+		}
+		if callID != "" {
+			t.callIDs[callID] = struct{}{}
+		}
+		fields["item"] = item
+		return [][]byte{rebuildDataBlock(block, fields)}
 	case "response.function_call_arguments.done":
 		if t.isCustomEvent(fields) {
 			if _, streamed := t.metricStreamed[t.argumentEventKey(fields)]; streamed {
