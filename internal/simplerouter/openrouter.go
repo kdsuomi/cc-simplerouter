@@ -102,19 +102,12 @@ func (c *openRouterClient) models(ctx context.Context, key string) ([]Model, err
 			ContextLength:       m.ContextLength,
 			PromptPrice:         strings.TrimSpace(m.Pricing.Prompt),
 			OutputPrice:         strings.TrimSpace(m.Pricing.Completion),
-			Privacy:             openRouterModelPrivacy(id),
+			Privacy:             "non-zdr",
 			SupportedParameters: cleanSupportedParameters(m.SupportedParameters),
 		})
 	}
 	// Preserve OpenRouter's most-popular ordering from the query above.
 	return models, nil
-}
-
-func openRouterModelPrivacy(modelID string) string {
-	if strings.HasSuffix(modelID, ":free") {
-		return "training"
-	}
-	return "retained"
 }
 
 // endpoints lists the provider endpoints currently serving a model, in the
@@ -206,9 +199,9 @@ func (c *openRouterClient) zdrPolicy(ctx context.Context, key string) (map[strin
 
 func endpointPrivacy(modelID, tag string, zdr map[string]bool) string {
 	if zdr[modelID+"\x00"+tag] {
-		return "clean"
+		return "zdr"
 	}
-	return openRouterModelPrivacy(modelID)
+	return "non-zdr"
 }
 
 func cleanSupportedParameters(params []string) []string {

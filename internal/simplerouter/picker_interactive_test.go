@@ -224,9 +224,8 @@ func TestPickerPrivacyColors(t *testing.T) {
 		privacy string
 		want    string
 	}{
-		{"clean", clrPrivacyClean},
-		{"retained", clrPrivacyRetained},
-		{"training", clrPrivacyTraining},
+		{"zdr", clrPrivacyZDR},
+		{"non-zdr", clrPrivacyNonZDR},
 	} {
 		if got := privacyCell(style, tt.privacy); !strings.Contains(got, "\x1b["+tt.want+"m") {
 			t.Errorf("privacyCell(%q) = %q, want color %q", tt.privacy, got, tt.want)

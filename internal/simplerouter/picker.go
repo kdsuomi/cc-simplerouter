@@ -37,9 +37,8 @@ const (
 	clrCtxBig  = "38;2;120;201;140" // >= 100k
 	clrCtxSm   = "38;2;120;122;136" // smaller
 
-	clrPrivacyClean    = "38;2;105;208;124"
-	clrPrivacyRetained = "38;2;222;176;43"
-	clrPrivacyTraining = "38;2;227;84;84"
+	clrPrivacyZDR    = "38;2;105;208;124"
+	clrPrivacyNonZDR = "38;2;222;176;43"
 )
 
 type terminalStyle struct {
@@ -313,14 +312,12 @@ func privacyCell(style terminalStyle, privacy string) string {
 func privacyDisplay(privacy string) (string, string) {
 	privacy = strings.ToLower(strings.TrimSpace(privacy))
 	switch privacy {
-	case "clean":
-		return "clean", clrPrivacyClean
-	case "training":
-		return "training", clrPrivacyTraining
+	case "zdr":
+		return "zdr", clrPrivacyZDR
 	case "":
 		return "-", clrDim
 	default:
-		return "retained", clrPrivacyRetained
+		return "non-zdr", clrPrivacyNonZDR
 	}
 }
 

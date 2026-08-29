@@ -512,14 +512,14 @@ func TestPickerRecommendedColumnsAndEnterDefault(t *testing.T) {
 		stderr: stderr,
 	}
 	res, err := a.pickModel("Select an OpenRouter model", []Model{
-		{ID: "vendor/other:free", Name: "Other Model", ContextLength: 8192, Privacy: "training"},
+		{ID: "vendor/other:free", Name: "Other Model", ContextLength: 8192, Privacy: "non-zdr"},
 		{
 			ID:                  "z-ai/glm-5.2",
 			Name:                "Z.ai: GLM 5.2",
 			ContextLength:       1_048_576,
 			PromptPrice:         "0.00000095",
 			OutputPrice:         "0.000003",
-			Privacy:             "clean",
+			Privacy:             "zdr",
 			SupportedParameters: []string{"tools", "reasoning"},
 		},
 	}, "", nil)
@@ -530,7 +530,7 @@ func TestPickerRecommendedColumnsAndEnterDefault(t *testing.T) {
 		t.Fatalf("selected = %s", res.Model.ID)
 	}
 	out := stderr.String()
-	for _, want := range []string{"MODEL", "NAME", "CTX", "PRICE/M", "PRIVACY", "1,048,576", "$0.95/$3", "clean", "training"} {
+	for _, want := range []string{"MODEL", "NAME", "CTX", "PRICE/M", "PRIVACY", "1,048,576", "$0.95/$3", "zdr", "non-zdr"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("picker output missing %q: %q", want, out)
 		}

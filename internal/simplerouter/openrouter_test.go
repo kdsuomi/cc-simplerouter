@@ -82,25 +82,10 @@ func TestOpenRouterEndpointPrivacy(t *testing.T) {
 	if len(endpoints) != 2 {
 		t.Fatalf("endpoints = %+v", endpoints)
 	}
-	if endpoints[0].Privacy != "clean" {
-		t.Errorf("ZDR endpoint privacy = %q, want clean", endpoints[0].Privacy)
+	if endpoints[0].Privacy != "zdr" {
+		t.Errorf("ZDR endpoint privacy = %q, want zdr", endpoints[0].Privacy)
 	}
-	if endpoints[1].Privacy != "retained" {
-		t.Errorf("standard endpoint privacy = %q, want retained", endpoints[1].Privacy)
-	}
-}
-
-func TestOpenRouterModelPrivacy(t *testing.T) {
-	tests := []struct {
-		modelID string
-		want    string
-	}{
-		{"vendor/model", "retained"},
-		{"vendor/model:free", "training"},
-	}
-	for _, tt := range tests {
-		if got := openRouterModelPrivacy(tt.modelID); got != tt.want {
-			t.Errorf("openRouterModelPrivacy(%q) = %q, want %q", tt.modelID, got, tt.want)
-		}
+	if endpoints[1].Privacy != "non-zdr" {
+		t.Errorf("standard endpoint privacy = %q, want non-zdr", endpoints[1].Privacy)
 	}
 }
