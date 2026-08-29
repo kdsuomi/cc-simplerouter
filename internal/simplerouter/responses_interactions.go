@@ -746,7 +746,13 @@ func (t *geminiInteractionsResponsesTranslator) startStep(index int, raw json.Ra
 			t.emitModelText(state, text)
 		}
 	case "function_call":
-		state.arguments.WriteString(interactionArgumentsString(step["arguments"]))
+		// Leave start-time arguments in raw form only. Gemini 3.5 announces a
+		// function call with an empty placeholder ({"arguments":{}}) and
+		// streams the real arguments via arguments_delta; seeding the
+		// accumulator with the stringified placeholder would prepend "{}" to
+		// the accumulated deltas and make the arguments unparseable.
+		// emitFunctionCall falls back to the raw arguments when no deltas
+		// arrive (models that send complete arguments in step.start).
 	}
 	return nil
 }
