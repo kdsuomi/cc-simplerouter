@@ -141,6 +141,7 @@ func (c *openRouterClient) endpoints(ctx context.Context, key, modelID string) (
 			ContextLength: e.ContextLength,
 			PromptPrice:   strings.TrimSpace(e.Pricing.Prompt),
 			OutputPrice:   strings.TrimSpace(e.Pricing.Completion),
+			ThroughputP50: e.ThroughputLast30m.P50,
 		})
 	}
 	return out, nil

@@ -2,6 +2,7 @@ package simplerouter
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -318,6 +319,20 @@ func formatContextLength(n int) string {
 
 func formatPricePerMillion(prompt, output string) string {
 	return fmt.Sprintf("%s/%s", formatOneMillionPrice(prompt), formatOneMillionPrice(output))
+}
+
+func formatThroughput(tokensPerSecond float64) string {
+	if tokensPerSecond <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%d tps", int(math.Round(tokensPerSecond)))
+}
+
+func speedColor(tokensPerSecond float64) string {
+	if tokensPerSecond <= 0 {
+		return clrDim
+	}
+	return clrModelHi
 }
 
 func formatOneMillionPrice(s string) string {

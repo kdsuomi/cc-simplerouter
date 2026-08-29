@@ -39,6 +39,7 @@ type Endpoint struct {
 	ContextLength int
 	PromptPrice   string
 	OutputPrice   string
+	ThroughputP50 float64
 }
 
 type openRouterEndpointsResponse struct {
@@ -52,6 +53,9 @@ type openRouterEndpointsResponse struct {
 				Prompt     string `json:"prompt"`
 				Completion string `json:"completion"`
 			} `json:"pricing"`
+			ThroughputLast30m struct {
+				P50 float64 `json:"p50"`
+			} `json:"throughput_last_30m"`
 		} `json:"endpoints"`
 	} `json:"data"`
 }

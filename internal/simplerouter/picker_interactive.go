@@ -576,6 +576,7 @@ func (a *app) renderModelView(st *pickerState, style terminalStyle) (lines []str
 const (
 	wProvider = 22
 	wQuant    = 12
+	wSpeed    = 10
 	wPCtx     = 15
 )
 
@@ -603,6 +604,7 @@ func (a *app) renderProviderView(p *providerState, style terminalStyle) []string
 		padRight("PROVIDER", wProvider),
 		padRight("QUANTIZATION", wQuant),
 		padRight("PRICE/M", wPrice),
+		padRight("SPEED", wSpeed),
 		padRight("CONTEXT WINDOW", wPCtx),
 	)
 	lines = append(lines, style.paint(clrDim, headerPlain))
@@ -633,6 +635,7 @@ func (a *app) renderProviderView(p *providerState, style terminalStyle) []string
 				style.cell(displayNames[start+i], wProvider, nameCode),
 				style.cell(quant, wQuant, clrName),
 				style.cell(formatPricePerMillion(ep.PromptPrice, ep.OutputPrice), wPrice, priceColor(Model{OutputPrice: ep.OutputPrice})),
+				style.cell(formatThroughput(ep.ThroughputP50), wSpeed, speedColor(ep.ThroughputP50)),
 				style.cell(formatContextLength(ep.ContextLength), wPCtx, ctxColor(ep.ContextLength)),
 			))
 		}
