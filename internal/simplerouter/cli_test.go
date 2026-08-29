@@ -295,7 +295,7 @@ func TestOpenRouterLaunchUsesResponsesPassthrough(t *testing.T) {
 	if gotUpstreamBase != srv.URL || gotModel != "z-ai/glm-5.2" {
 		t.Fatalf("passthrough route = %q model %q", gotUpstreamBase, gotModel)
 	}
-	if gotOptions.Label != "OpenRouter" || gotOptions.ProviderTag != "" {
+	if gotOptions.Label != "OpenRouter" || gotOptions.ProviderTag != "" || gotOptions.TranslateCustomTools {
 		t.Fatalf("passthrough options = %#v", gotOptions)
 	}
 	wantArgs := codexArgs("z-ai/glm-5.2", "http://127.0.0.1:43210/v1", filepath.Join(home, "models.json"), false, nil, nil)

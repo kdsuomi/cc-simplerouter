@@ -50,6 +50,27 @@ func startXAIResponsesProxy(upstreamBase, model string, httpClient *http.Client)
 	return startResponsesPassthroughProxy(upstreamBase, model, httpClient, xaiResponsesOptions(model))
 }
 
+// openRouterResponsesOptions configures the Responses passthrough for
+// OpenRouter. Routes served by Meta's own endpoint hit the same API limits as
+// the direct Meta provider (no custom tools, no recursive schemas), so they
+// reuse the Meta tool translation.
+func openRouterResponsesOptions(model, providerTag string) responsesPassthroughOptions {
+	return responsesPassthroughOptions{
+		Label:                "OpenRouter",
+		ProviderTag:          providerTag,
+		TranslateCustomTools: openRouterRouteTargetsMeta(model, providerTag),
+	}
+}
+
+func openRouterRouteTargetsMeta(model, providerTag string) bool {
+	if strings.EqualFold(strings.TrimSpace(providerTag), "meta") {
+		return true
+	}
+	// Models authored by Meta (meta/…) are served only by Meta's endpoint;
+	// open-weight Llama models use the distinct meta-llama/… author.
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "meta/")
+}
+
 func metaResponsesOptions() responsesPassthroughOptions {
 	return responsesPassthroughOptions{
 		Label:                "Meta",
