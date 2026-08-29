@@ -185,6 +185,7 @@ func TestChatResponsesStreamTranslatorPreservesToolsReasoningAndUsage(t *testing
 	var completed map[string]any
 	var replay chatReplayState
 	var sawLiveReasoning bool
+	var sawLiveToolDelta bool
 	for _, event := range decoded {
 		switch event["type"] {
 		case "response.reasoning_summary_text.done":
@@ -207,6 +208,8 @@ func TestChatResponsesStreamTranslatorPreservesToolsReasoningAndUsage(t *testing
 			}
 		case "response.completed":
 			completed = event["response"].(map[string]any)
+		case "response.custom_tool_call_input.delta":
+			sawLiveToolDelta = event["delta"] == `{"input":"*** Begin Patch\n*** End Patch"}`
 		}
 	}
 	if !sawLiveReasoning {
@@ -217,6 +220,9 @@ func TestChatResponsesStreamTranslatorPreservesToolsReasoningAndUsage(t *testing
 	}
 	if customItem["name"] != "apply_patch" || customItem["input"] != "*** Begin Patch\n*** End Patch" {
 		t.Fatalf("custom tool item = %#v", customItem)
+	}
+	if !sawLiveToolDelta {
+		t.Fatalf("tool arguments were not emitted progressively:\n%s", output.String())
 	}
 	if completed["end_turn"] != false {
 		t.Fatalf("completed end_turn = %#v, want false for a tool turn", completed["end_turn"])

@@ -578,6 +578,7 @@ type geminiInteractionStepState struct {
 	raw         map[string]any
 	stopped     bool
 	arguments   strings.Builder
+	itemID      string
 	reasoningID string
 	messageID   string
 	outputIndex int
@@ -766,6 +767,17 @@ func (t *geminiInteractionsResponsesTranslator) deltaStep(index int, raw json.Ra
 	if argumentDelta != "" {
 		value := argumentDelta
 		state.arguments.WriteString(value)
+		if state.kind == "function_call" {
+			if state.itemID == "" {
+				state.itemID = newToolUseID()
+			}
+			t.out.event("response.custom_tool_call_input.delta", map[string]any{
+				"type":    "response.custom_tool_call_input.delta",
+				"item_id": state.itemID,
+				"call_id": state.itemID,
+				"delta":   value,
+			})
+		}
 	}
 	kind, _ := delta["type"].(string)
 	switch kind {
@@ -962,6 +974,7 @@ func (t *geminiInteractionsResponsesTranslator) emitFunctionCall(state *geminiIn
 	}
 	item := map[string]any{
 		"type":      "function_call",
+		"id":        state.itemID,
 		"call_id":   callID,
 		"name":      identity.Name,
 		"arguments": arguments,
@@ -971,6 +984,7 @@ func (t *geminiInteractionsResponsesTranslator) emitFunctionCall(state *geminiIn
 	}
 	if identity.Custom {
 		item["type"] = "custom_tool_call"
+		delete(item, "id")
 		delete(item, "arguments")
 		item["input"] = customToolInput(arguments)
 	}

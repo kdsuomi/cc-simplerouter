@@ -238,6 +238,7 @@ func TestGeminiInteractionsStreamTranslatorPreservesStepsAndCodexItems(t *testin
 	var sawThought, sawSearch bool
 	var message, custom, completed map[string]any
 	var replay geminiInteractionReplayState
+	toolDeltas := 0
 	for _, event := range decoded {
 		switch event["type"] {
 		case "response.reasoning_summary_text.done":
@@ -260,6 +261,8 @@ func TestGeminiInteractionsStreamTranslatorPreservesStepsAndCodexItems(t *testin
 			}
 		case "response.completed":
 			completed = event["response"].(map[string]any)
+		case "response.custom_tool_call_input.delta":
+			toolDeltas++
 		}
 	}
 	if !sawThought || !sawSearch {
@@ -271,6 +274,9 @@ func TestGeminiInteractionsStreamTranslatorPreservesStepsAndCodexItems(t *testin
 	}
 	if custom["name"] != "apply_patch" || custom["input"] != "patch" {
 		t.Fatalf("custom call = %#v", custom)
+	}
+	if toolDeltas != 1 {
+		t.Fatalf("tool argument deltas = %d, want 1:\n%s", toolDeltas, output.String())
 	}
 	if len(replay.Steps) != 5 {
 		t.Fatalf("replay steps = %d, want 5: %#v", len(replay.Steps), replay)
