@@ -662,8 +662,11 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 			`event: response.output_item.done`,
 			`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_shell","call_id":"call_shell","name":"shell_command","arguments":"{\"command\":\"pwd\"}","status":"completed"}}`,
 			``,
+			`event: response.output_item.done`,
+			`data: {"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","id":"fc_email","call_id":"call_email","name":"mcp__codex_apps__gmail___send_email","arguments":"{\"payload\":{\"body\":\"hi\"}}","status":"completed"}}`,
+			``,
 			`event: response.completed`,
-			`data: {"type":"response.completed","response":{"id":"resp_meta","output":[{"type":"function_call","id":"fc_patch","call_id":"call_patch","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\"}","status":"completed"},{"type":"function_call","id":"fc_shell","call_id":"call_shell","name":"shell_command","arguments":"{\"command\":\"pwd\"}","status":"completed"}],"tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}},{"type":"function","name":"shell_command","parameters":{"type":"object"}}]}}`,
+			`data: {"type":"response.completed","response":{"id":"resp_meta","output":[{"type":"function_call","id":"fc_patch","call_id":"call_patch","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\"}","status":"completed"},{"type":"function_call","id":"fc_shell","call_id":"call_shell","name":"shell_command","arguments":"{\"command\":\"pwd\"}","status":"completed"},{"type":"function_call","id":"fc_email","call_id":"call_email","name":"mcp__codex_apps__gmail___send_email","arguments":"{\"payload\":{\"body\":\"hi\"}}","status":"completed"}],"tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}},{"type":"function","name":"shell_command","parameters":{"type":"object"}}]}}`,
 			``,
 			`data: [DONE]`,
 			``,
@@ -696,6 +699,14 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	      "name":"apply_patch",
 	      "output":"Done",
 	      "internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}
+	    },
+	    {
+	      "type":"function_call",
+	      "id":"fc_ns_prior",
+	      "call_id":"call_ns_prior",
+	      "name":"_send_email",
+	      "namespace":"mcp__codex_apps__gmail",
+	      "arguments":"{}"
 	    }
 	  ],
 	  "stream":true,
@@ -795,12 +806,13 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	if function["strict"] != false {
 		t.Fatalf("strict function was not relaxed for Meta: %#v", function)
 	}
-	namespace := tools[2].(map[string]any)
-	child := namespace["tools"].([]any)[0].(map[string]any)
-	if child["strict"] != false {
-		t.Fatalf("strict namespace function was not relaxed for Meta: %#v", child)
+	// Meta returns namespaced calls as dot-joined names Codex cannot parse, so
+	// the namespace group must reach Meta as a flat function tool.
+	flattened := tools[2].(map[string]any)
+	if flattened["type"] != "function" || flattened["name"] != "mcp__codex_apps__gmail___send_email" || flattened["strict"] != false {
+		t.Fatalf("namespace tool was not flattened for Meta: %#v", flattened)
 	}
-	childParameters := child["parameters"].(map[string]any)
+	childParameters := flattened["parameters"].(map[string]any)
 	payload := childParameters["properties"].(map[string]any)["payload"].(map[string]any)
 	if payload["$ref"] != "#/$defs/GmailMessagePartRequest" {
 		t.Fatalf("Meta rewrite removed useful non-recursive schema ref: %#v", childParameters)
@@ -840,6 +852,13 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	if _, found := priorOutput["name"]; found {
 		t.Fatalf("prior output retained custom tool name: %#v", priorOutput)
 	}
+	priorNamespaced := input[2].(map[string]any)
+	if priorNamespaced["name"] != "mcp__codex_apps__gmail___send_email" {
+		t.Fatalf("prior namespaced call not flattened for Meta: %#v", priorNamespaced)
+	}
+	if _, found := priorNamespaced["namespace"]; found {
+		t.Fatalf("prior namespaced call retained namespace field: %#v", priorNamespaced)
+	}
 
 	stream := string(responseBody)
 	for _, want := range []string{
@@ -853,10 +872,16 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 		`"call_id":"metrics_fc_patch"`,
 		// Plain function-call deltas gain a metric-only copy too.
 		`"call_id":"metrics_fc_shell"`,
+		// Flattened namespace calls are restored to the Codex identity.
+		`"namespace":"mcp__codex_apps__gmail"`,
+		`"name":"_send_email"`,
 	} {
 		if !strings.Contains(stream, want) {
 			t.Fatalf("translated stream missing %q:\n%s", want, stream)
 		}
+	}
+	if strings.Contains(stream, "mcp__codex_apps__gmail___send_email") {
+		t.Fatalf("flattened namespace name leaked back to Codex:\n%s", stream)
 	}
 	if strings.Contains(stream, `"item_id":"fc_patch","output_index":0,"delta":"{\"input\"`) {
 		t.Fatalf("custom function argument envelope leaked downstream:\n%s", stream)

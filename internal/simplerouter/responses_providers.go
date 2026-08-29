@@ -52,13 +52,15 @@ func startXAIResponsesProxy(upstreamBase, model string, httpClient *http.Client)
 
 // openRouterResponsesOptions configures the Responses passthrough for
 // OpenRouter. Routes served by Meta's own endpoint hit the same API limits as
-// the direct Meta provider (no custom tools, no recursive schemas), so they
-// reuse the Meta tool translation.
+// the direct Meta provider (no custom tools, no recursive schemas, dot-joined
+// namespace calls), so they reuse the Meta tool translation.
 func openRouterResponsesOptions(model, providerTag string) responsesPassthroughOptions {
+	targetsMeta := openRouterRouteTargetsMeta(model, providerTag)
 	return responsesPassthroughOptions{
 		Label:                "OpenRouter",
 		ProviderTag:          providerTag,
-		TranslateCustomTools: openRouterRouteTargetsMeta(model, providerTag),
+		TranslateCustomTools: targetsMeta,
+		FlattenNamespaces:    targetsMeta,
 	}
 }
 
@@ -76,6 +78,11 @@ func metaResponsesOptions() responsesPassthroughOptions {
 		Label:                "Meta",
 		ReasoningEffortMap:   map[string]string{"max": "xhigh", "ultra": "xhigh"},
 		TranslateCustomTools: true,
+		// Meta accepts Codex namespace tool groups but returns calls as a single
+		// dot-joined name with no namespace field, which Codex rejects as an
+		// unsupported call. Flatten namespaces to plain function names and let
+		// the registry restore the Codex identity on the response stream.
+		FlattenNamespaces: true,
 	}
 }
 

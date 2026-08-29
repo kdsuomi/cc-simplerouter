@@ -47,33 +47,34 @@ func TestZAIResponsesOptions(t *testing.T) {
 
 func TestOpenRouterResponsesOptions(t *testing.T) {
 	got := openRouterResponsesOptions("z-ai/glm-5.2", "")
-	if got.Label != "OpenRouter" || got.ProviderTag != "" || got.TranslateCustomTools {
+	if got.Label != "OpenRouter" || got.ProviderTag != "" || got.TranslateCustomTools || got.FlattenNamespaces {
 		t.Fatalf("OpenRouter options = %+v", got)
 	}
 	pinned := openRouterResponsesOptions("z-ai/glm-5.2", "z-ai")
-	if pinned.ProviderTag != "z-ai" || pinned.TranslateCustomTools {
+	if pinned.ProviderTag != "z-ai" || pinned.TranslateCustomTools || pinned.FlattenNamespaces {
 		t.Fatalf("OpenRouter pinned options = %+v", pinned)
 	}
 	// Routes served by Meta's own endpoint reject custom tools and recursive
-	// schemas, so they must reuse the Meta tool translation.
+	// schemas and return namespaced calls as dot-joined names, so they must
+	// reuse the Meta tool translation.
 	for _, route := range []struct{ model, tag string }{
 		{"meta/muse-spark-1.2-contributor", "Meta"},
 		{"meta/muse-spark-1.2-contributor", ""},
 		{"some/other-model", "meta"},
 	} {
 		got := openRouterResponsesOptions(route.model, route.tag)
-		if !got.TranslateCustomTools || got.ProviderTag != route.tag {
+		if !got.TranslateCustomTools || !got.FlattenNamespaces || got.ProviderTag != route.tag {
 			t.Fatalf("OpenRouter Meta route %+v options = %+v", route, got)
 		}
 	}
-	if opts := openRouterResponsesOptions("meta-llama/llama-3.3-70b-instruct", ""); opts.TranslateCustomTools {
+	if opts := openRouterResponsesOptions("meta-llama/llama-3.3-70b-instruct", ""); opts.TranslateCustomTools || opts.FlattenNamespaces {
 		t.Fatalf("open-weight Llama route should stay passthrough: %+v", opts)
 	}
 }
 
 func TestMetaResponsesOptions(t *testing.T) {
 	got := metaResponsesOptions()
-	if got.Label != "Meta" || !got.TranslateCustomTools {
+	if got.Label != "Meta" || !got.TranslateCustomTools || !got.FlattenNamespaces {
 		t.Fatalf("Meta options = %+v", got)
 	}
 	if got.ReasoningEffortMap["max"] != "xhigh" || got.ReasoningEffortMap["ultra"] != "xhigh" {
