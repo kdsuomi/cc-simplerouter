@@ -22,6 +22,10 @@ type responsesToolTranslation struct {
 	// Registry maps flattened function names (namespace__child) back to Codex
 	// identities when FlattenNamespaces is enabled.
 	Registry *responseToolRegistry
+	// WebSearchSubstituted marks that Codex web_search tools were replaced with
+	// openrouter:web_search, so matching stream items must be renamed back to
+	// web_search_call for Codex.
+	WebSearchSubstituted bool
 }
 
 func translateResponsesTools(request map[string]json.RawMessage, options responsesPassthroughOptions) (responsesToolTranslation, error) {
@@ -43,12 +47,68 @@ func translateResponsesTools(request map[string]json.RawMessage, options respons
 			return out, err
 		}
 	}
+	if options.SubstituteOpenRouterWebSearch {
+		substituted, err := substituteOpenRouterWebSearchTools(request)
+		if err != nil {
+			return out, err
+		}
+		out.WebSearchSubstituted = substituted
+	}
 	if len(options.AllowedToolTypes) > 0 {
 		if err := filterResponsesToolsByType(request, options.AllowedToolTypes); err != nil {
 			return out, err
 		}
 	}
 	return out, nil
+}
+
+// substituteOpenRouterWebSearchTools replaces Codex web_search tools with
+// OpenRouter's server-side search tool on the Exa engine. Exa's default auto
+// mode balances latency and depth; domain filters carry over, while Codex-only
+// fields (external_web_access, search_content_types, user_location) are
+// dropped. Returns whether any tool was replaced.
+func substituteOpenRouterWebSearchTools(request map[string]json.RawMessage) (bool, error) {
+	var tools []json.RawMessage
+	if err := json.Unmarshal(request["tools"], &tools); err != nil {
+		return false, nil
+	}
+	changed := false
+	for index, raw := range tools {
+		var tool map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &tool); err != nil {
+			continue
+		}
+		var toolType string
+		if json.Unmarshal(tool["type"], &toolType) != nil ||
+			(toolType != "web_search" && toolType != "web_search_preview") {
+			continue
+		}
+		parameters := map[string]any{"engine": "exa", "mode": "auto"}
+		var filters struct {
+			AllowedDomains []string `json:"allowed_domains"`
+		}
+		if json.Unmarshal(tool["filters"], &filters) == nil && len(filters.AllowedDomains) > 0 {
+			parameters["allowed_domains"] = filters.AllowedDomains
+		}
+		encoded, err := json.Marshal(map[string]any{
+			"type":       "openrouter:web_search",
+			"parameters": parameters,
+		})
+		if err != nil {
+			return false, err
+		}
+		tools[index] = encoded
+		changed = true
+	}
+	if !changed {
+		return false, nil
+	}
+	encoded, err := json.Marshal(tools)
+	if err != nil {
+		return false, err
+	}
+	request["tools"] = encoded
+	return true, nil
 }
 
 func translateResponsesCustomTools(request map[string]json.RawMessage) (map[string]struct{}, error) {
@@ -577,25 +637,29 @@ func translateResponsesCustomToolInput(request map[string]json.RawMessage) error
 }
 
 type responsesToolStreamTranslator struct {
-	customTools    map[string]struct{}
-	registry       *responseToolRegistry
-	itemIDs        map[string]struct{}
-	callIDs        map[string]struct{}
-	metricStreamed map[string]struct{}
+	customTools          map[string]struct{}
+	registry             *responseToolRegistry
+	webSearchSubstituted bool
+	itemIDs              map[string]struct{}
+	callIDs              map[string]struct{}
+	metricStreamed       map[string]struct{}
 }
 
 func newResponsesToolStreamTranslator(translation responsesToolTranslation) *responsesToolStreamTranslator {
 	return &responsesToolStreamTranslator{
-		customTools:    translation.CustomTools,
-		registry:       translation.Registry,
-		itemIDs:        map[string]struct{}{},
-		callIDs:        map[string]struct{}{},
-		metricStreamed: map[string]struct{}{},
+		customTools:          translation.CustomTools,
+		registry:             translation.Registry,
+		webSearchSubstituted: translation.WebSearchSubstituted,
+		itemIDs:              map[string]struct{}{},
+		callIDs:              map[string]struct{}{},
+		metricStreamed:       map[string]struct{}{},
 	}
 }
 
 func (t *responsesToolStreamTranslator) needsTranslation() bool {
-	return len(t.customTools) > 0 || (t.registry != nil && len(t.registry.byChatName) > 0)
+	return len(t.customTools) > 0 ||
+		(t.registry != nil && len(t.registry.byChatName) > 0) ||
+		t.webSearchSubstituted
 }
 
 func (t *responsesToolStreamTranslator) processBlock(block []byte) [][]byte {
@@ -780,8 +844,20 @@ func (t *responsesToolStreamTranslator) translateFunctionCallItem(raw json.RawMe
 		return raw, false, "", ""
 	}
 	var itemType, name string
-	if json.Unmarshal(item["type"], &itemType) != nil || itemType != "function_call" ||
-		json.Unmarshal(item["name"], &name) != nil {
+	if json.Unmarshal(item["type"], &itemType) != nil {
+		return raw, false, "", ""
+	}
+	// Substituted server-side searches stream back as openrouter:web_search
+	// items; rename them to the native web_search_call type Codex renders.
+	if itemType == "openrouter:web_search" && t.webSearchSubstituted {
+		item["type"] = json.RawMessage(`"web_search_call"`)
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			return raw, false, "", ""
+		}
+		return encoded, true, "", ""
+	}
+	if itemType != "function_call" || json.Unmarshal(item["name"], &name) != nil {
 		return raw, false, "", ""
 	}
 	var itemID, callID string

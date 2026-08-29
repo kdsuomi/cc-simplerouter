@@ -27,6 +27,12 @@ type responsesPassthroughOptions struct {
 	// AllowedToolTypes, when non-empty, drops any tool whose type is not listed
 	// after translation (e.g. Codex tool_search on xAI).
 	AllowedToolTypes []string
+	// SubstituteOpenRouterWebSearch replaces Codex web_search tools with
+	// OpenRouter's server-side openrouter:web_search tool (Exa engine) and
+	// renames the resulting stream items back to web_search_call for Codex.
+	// Used on OpenRouter routes pinned to Google AI Studio, whose native
+	// grounding lane rejects shared-pool web_search requests with 429s.
+	SubstituteOpenRouterWebSearch bool
 }
 
 type responsesPassthroughProxy struct {
@@ -116,7 +122,8 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 		}
 	}
 	var toolTranslation responsesToolTranslation
-	if p.options.TranslateCustomTools || p.options.FlattenNamespaces || len(p.options.AllowedToolTypes) > 0 {
+	if p.options.TranslateCustomTools || p.options.FlattenNamespaces ||
+		len(p.options.AllowedToolTypes) > 0 || p.options.SubstituteOpenRouterWebSearch {
 		toolTranslation, err = translateResponsesTools(request, p.options)
 		if err != nil {
 			writeResponsesError(w, http.StatusInternalServerError, "api_error", "translate tools: "+err.Error())

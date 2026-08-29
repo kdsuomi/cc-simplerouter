@@ -52,16 +52,25 @@ func startXAIResponsesProxy(upstreamBase, model string, httpClient *http.Client)
 
 // openRouterResponsesOptions configures the Responses passthrough for
 // OpenRouter. Routes served by Meta's own endpoint hit the same API limits as
-// the direct Meta provider (no custom tools, no recursive schemas, dot-joined
-// namespace calls), so they reuse the Meta tool translation.
+// the direct Meta provider (no custom tools, no recursive schemas), so they
+// reuse the Meta tool translation. OpenRouter's Responses schema rejects Codex
+// multi-agent namespace tool groups outright (400 invalid_prompt), so every
+// route flattens them. Routes pinned to Google AI Studio swap Codex web_search
+// for OpenRouter's server-side search: the pinned native grounding lane runs on
+// OpenRouter's shared upstream pool, which rejects it with instant 429s.
 func openRouterResponsesOptions(model, providerTag string) responsesPassthroughOptions {
-	targetsMeta := openRouterRouteTargetsMeta(model, providerTag)
 	return responsesPassthroughOptions{
-		Label:                "OpenRouter",
-		ProviderTag:          providerTag,
-		TranslateCustomTools: targetsMeta,
-		FlattenNamespaces:    targetsMeta,
+		Label:                         "OpenRouter",
+		ProviderTag:                   providerTag,
+		TranslateCustomTools:          openRouterRouteTargetsMeta(model, providerTag),
+		FlattenNamespaces:             true,
+		SubstituteOpenRouterWebSearch: openRouterRouteTargetsAIStudio(providerTag),
 	}
+}
+
+func openRouterRouteTargetsAIStudio(providerTag string) bool {
+	tag := strings.ToLower(strings.TrimSpace(providerTag))
+	return tag == "google-ai-studio" || strings.HasPrefix(tag, "google-ai-studio/")
 }
 
 func openRouterRouteTargetsMeta(model, providerTag string) bool {

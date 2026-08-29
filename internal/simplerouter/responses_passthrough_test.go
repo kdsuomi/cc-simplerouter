@@ -154,6 +154,137 @@ func TestXAIPassthroughFlattensNamespacesAndDropsUnsupportedTools(t *testing.T) 
 	}
 }
 
+func TestOpenRouterAIStudioPinSubstitutesWebSearchAndFlattensNamespaces(t *testing.T) {
+	captured := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		// The server-tools wrapper streams substituted searches as
+		// openrouter:web_search items; the proxy must rename them for Codex.
+		fmt.Fprint(w, strings.Join([]string{
+			`event: response.output_item.added`,
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"st_1","type":"openrouter:web_search","status":"in_progress"}}`,
+			``,
+			`event: response.output_item.done`,
+			`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"st_1","type":"openrouter:web_search","status":"completed","action":{"type":"search","query":"latest go version","sources":[{"type":"url","url":"https://go.dev/dl/"}]}}}`,
+			``,
+			`event: response.completed`,
+			`data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"st_1","type":"openrouter:web_search","status":"completed","action":{"type":"search","query":"latest go version"}},{"type":"function_call","name":"mcp__node_repl__js","call_id":"call_js","arguments":"{\"code\":\"1\"}"}]}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n"))
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(
+		upstream.URL,
+		"google/gemini-3.7-flash",
+		upstream.Client(),
+		openRouterResponsesOptions("google/gemini-3.7-flash", "google-ai-studio"),
+	))
+	defer proxy.Close()
+
+	requestBody := `{
+	  "model":"wrong",
+	  "input":[
+	    {"type":"web_search_call","id":"ws_prior","status":"completed","action":{"type":"search","query":"prior search"}}
+	  ],
+	  "stream":true,
+	  "tools":[
+	    {
+	      "type":"web_search",
+	      "external_web_access":false,
+	      "search_content_types":["text"],
+	      "filters":{"allowed_domains":["go.dev"]}
+	    },
+	    {
+	      "type":"namespace",
+	      "name":"mcp__node_repl",
+	      "tools":[{
+	        "type":"function",
+	        "name":"js",
+	        "parameters":{"type":"object","properties":{"code":{"type":"string"}}}
+	      }]
+	    }
+	  ]
+	}`
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/responses", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("proxy status = %d %s", resp.StatusCode, responseBody)
+	}
+
+	request := <-captured
+	provider := request["provider"].(map[string]any)
+	if provider["only"].([]any)[0] != "google-ai-studio" || provider["allow_fallbacks"] != false {
+		t.Fatalf("provider pin = %#v", provider)
+	}
+	tools := request["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("upstream tools = %#v", tools)
+	}
+	search := tools[0].(map[string]any)
+	if search["type"] != "openrouter:web_search" {
+		t.Fatalf("web_search was not substituted: %#v", search)
+	}
+	parameters := search["parameters"].(map[string]any)
+	if parameters["engine"] != "exa" || parameters["mode"] != "auto" {
+		t.Fatalf("substituted search parameters = %#v", parameters)
+	}
+	if parameters["allowed_domains"].([]any)[0] != "go.dev" {
+		t.Fatalf("domain filter was not carried over: %#v", parameters)
+	}
+	for _, key := range []string{"external_web_access", "search_content_types", "filters"} {
+		if _, found := search[key]; found {
+			t.Fatalf("substituted search retained Codex-only field %q: %#v", key, search)
+		}
+	}
+	flattened := tools[1].(map[string]any)
+	if flattened["type"] != "function" || flattened["name"] != "mcp__node_repl__js" {
+		t.Fatalf("namespace tool was not flattened for OpenRouter: %#v", flattened)
+	}
+	// Codex replays prior web_search_call items verbatim; OpenRouter accepts
+	// them, so they must pass through unchanged.
+	prior := request["input"].([]any)[0].(map[string]any)
+	if prior["type"] != "web_search_call" {
+		t.Fatalf("prior web_search_call was rewritten: %#v", prior)
+	}
+
+	stream := string(responseBody)
+	for _, want := range []string{
+		`"type":"web_search_call"`,
+		`"query":"latest go version"`,
+		`"namespace":"mcp__node_repl"`,
+		`"name":"js"`,
+	} {
+		if !strings.Contains(stream, want) {
+			t.Fatalf("translated stream missing %q:\n%s", want, stream)
+		}
+	}
+	for _, leak := range []string{"openrouter:web_search", "mcp__node_repl__js"} {
+		if strings.Contains(stream, leak) {
+			t.Fatalf("upstream form %q leaked back to Codex:\n%s", leak, stream)
+		}
+	}
+}
+
 func TestXAIPassthroughOmitsCodexNullContentFromEncryptedReasoning(t *testing.T) {
 	captured := make(chan map[string]any, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

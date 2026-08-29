@@ -46,17 +46,19 @@ func TestZAIResponsesOptions(t *testing.T) {
 }
 
 func TestOpenRouterResponsesOptions(t *testing.T) {
+	// OpenRouter's Responses schema rejects namespace tool groups on every
+	// route, so all routes flatten them.
 	got := openRouterResponsesOptions("z-ai/glm-5.2", "")
-	if got.Label != "OpenRouter" || got.ProviderTag != "" || got.TranslateCustomTools || got.FlattenNamespaces {
+	if got.Label != "OpenRouter" || got.ProviderTag != "" || got.TranslateCustomTools ||
+		!got.FlattenNamespaces || got.SubstituteOpenRouterWebSearch {
 		t.Fatalf("OpenRouter options = %+v", got)
 	}
 	pinned := openRouterResponsesOptions("z-ai/glm-5.2", "z-ai")
-	if pinned.ProviderTag != "z-ai" || pinned.TranslateCustomTools || pinned.FlattenNamespaces {
+	if pinned.ProviderTag != "z-ai" || pinned.TranslateCustomTools || !pinned.FlattenNamespaces {
 		t.Fatalf("OpenRouter pinned options = %+v", pinned)
 	}
 	// Routes served by Meta's own endpoint reject custom tools and recursive
-	// schemas and return namespaced calls as dot-joined names, so they must
-	// reuse the Meta tool translation.
+	// schemas, so they must reuse the Meta tool translation.
 	for _, route := range []struct{ model, tag string }{
 		{"meta/muse-spark-1.2-contributor", "Meta"},
 		{"meta/muse-spark-1.2-contributor", ""},
@@ -67,8 +69,22 @@ func TestOpenRouterResponsesOptions(t *testing.T) {
 			t.Fatalf("OpenRouter Meta route %+v options = %+v", route, got)
 		}
 	}
-	if opts := openRouterResponsesOptions("meta-llama/llama-3.3-70b-instruct", ""); opts.TranslateCustomTools || opts.FlattenNamespaces {
-		t.Fatalf("open-weight Llama route should stay passthrough: %+v", opts)
+	if opts := openRouterResponsesOptions("meta-llama/llama-3.3-70b-instruct", ""); opts.TranslateCustomTools {
+		t.Fatalf("open-weight Llama route should not use Meta tool translation: %+v", opts)
+	}
+	// Google AI Studio pins swap Codex web_search for OpenRouter's server-side
+	// search; the pinned native grounding lane 429s on the shared pool.
+	for _, tag := range []string{"google-ai-studio", "google-ai-studio/flex", "Google-AI-Studio/priority"} {
+		opts := openRouterResponsesOptions("google/gemini-3.7-flash", tag)
+		if !opts.SubstituteOpenRouterWebSearch {
+			t.Fatalf("AI Studio pin %q should substitute web search: %+v", tag, opts)
+		}
+	}
+	for _, tag := range []string{"", "google-vertex/global", "meta"} {
+		opts := openRouterResponsesOptions("google/gemini-3.7-flash", tag)
+		if opts.SubstituteOpenRouterWebSearch {
+			t.Fatalf("tag %q should not substitute web search: %+v", tag, opts)
+		}
 	}
 }
 

@@ -151,6 +151,16 @@ output compatibility: if an endpoint rejects `json_schema` but supports
 `json_object`, the request is retried once and that capability is remembered
 for later automatic reviews in the same session.
 
+OpenRouter's Responses schema rejects Codex multi-agent `namespace` tool
+groups, so every OpenRouter route flattens them into `namespace__tool`
+functions and restores the original name + `namespace` on the return stream.
+Routes pinned to a Google AI Studio endpoint additionally swap Codex's
+`web_search` tool for OpenRouter's server-side `openrouter:web_search` (Exa
+engine, `auto` mode): the pinned native grounding lane runs on OpenRouter's
+shared upstream pool, which rejects any request carrying `web_search` with an
+instant 429. Substituted searches stream back renamed to Codex's native
+`web_search_call` items, and prior-turn search items replay unchanged.
+
 OpenRouter model and provider tables include a `Privacy` column. Provider
 endpoints in OpenRouter's zero-data-retention list are marked `zdr`; all others
 are marked `non-zdr`.
