@@ -972,6 +972,9 @@ func (t *geminiInteractionsResponsesTranslator) emitFunctionCall(state *geminiIn
 	if strings.TrimSpace(arguments) == "" {
 		arguments = "{}"
 	}
+	if state.itemID == "" {
+		state.itemID = newToolUseID()
+	}
 	item := map[string]any{
 		"type":      "function_call",
 		"id":        state.itemID,

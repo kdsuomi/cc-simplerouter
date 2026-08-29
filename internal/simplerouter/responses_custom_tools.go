@@ -577,18 +577,20 @@ func translateResponsesCustomToolInput(request map[string]json.RawMessage) error
 }
 
 type responsesToolStreamTranslator struct {
-	customTools map[string]struct{}
-	registry    *responseToolRegistry
-	itemIDs     map[string]struct{}
-	callIDs     map[string]struct{}
+	customTools    map[string]struct{}
+	registry       *responseToolRegistry
+	itemIDs        map[string]struct{}
+	callIDs        map[string]struct{}
+	metricStreamed map[string]struct{}
 }
 
 func newResponsesToolStreamTranslator(translation responsesToolTranslation) *responsesToolStreamTranslator {
 	return &responsesToolStreamTranslator{
-		customTools: translation.CustomTools,
-		registry:    translation.Registry,
-		itemIDs:     map[string]struct{}{},
-		callIDs:     map[string]struct{}{},
+		customTools:    translation.CustomTools,
+		registry:       translation.Registry,
+		itemIDs:        map[string]struct{}{},
+		callIDs:        map[string]struct{}{},
+		metricStreamed: map[string]struct{}{},
 	}
 }
 
@@ -628,14 +630,29 @@ func (t *responsesToolStreamTranslator) processBlock(block []byte) [][]byte {
 		return [][]byte{rebuildDataBlock(block, fields)}
 	case "response.function_call_arguments.delta":
 		if t.isCustomEvent(fields) {
-			return nil
+			// Suppressed custom-tool deltas still represent live generation:
+			// forward them under a synthetic id so the client counts their
+			// characters for the rate display without any consumer matching
+			// the real call. The actual input arrives via output_item.done.
+			return t.metricOnlyArgumentDelta(block, fields, /*markStreamed*/ true)
 		}
+		blocks := [][]byte{block}
 		if name, ok := t.restoreEventName(fields); ok {
 			fields["name"] = name
-			return [][]byte{rebuildDataBlock(block, fields)}
+			blocks = [][]byte{rebuildDataBlock(block, fields)}
 		}
+		// Plain function-call argument deltas are ignored by the client's SSE
+		// parser; append a metric-only copy so their generation is visible to
+		// the rate display too.
+		return append(blocks, t.metricOnlyArgumentDelta(block, fields, /*markStreamed*/ false)...)
 	case "response.function_call_arguments.done":
 		if t.isCustomEvent(fields) {
+			if _, streamed := t.metricStreamed[t.argumentEventKey(fields)]; streamed {
+				// The argument characters were already counted through the
+				// live metric deltas; a terminal blob here would count them
+				// twice.
+				return nil
+			}
 			var arguments string
 			if json.Unmarshal(fields["arguments"], &arguments) != nil {
 				return nil
@@ -670,6 +687,55 @@ func (t *responsesToolStreamTranslator) isCustomEvent(fields map[string]json.Raw
 	_, itemFound := t.itemIDs[itemID]
 	_, callFound := t.callIDs[callID]
 	return itemFound || callFound
+}
+
+// argumentEventKey identifies the tool call an argument event belongs to,
+// preferring an id the translator already tracks as custom.
+func (t *responsesToolStreamTranslator) argumentEventKey(fields map[string]json.RawMessage) string {
+	var itemID, callID string
+	_ = json.Unmarshal(fields["item_id"], &itemID)
+	_ = json.Unmarshal(fields["call_id"], &callID)
+	if _, ok := t.itemIDs[itemID]; ok {
+		return itemID
+	}
+	if _, ok := t.callIDs[callID]; ok {
+		return callID
+	}
+	if itemID != "" {
+		return itemID
+	}
+	return callID
+}
+
+// metricOnlyArgumentDelta rewrites a function-call argument delta into a
+// custom_tool_call_input.delta under a synthetic id. The client counts the
+// delta's characters for the live generation rate, but the synthetic id
+// matches no real item or call, so no content consumer ever sees it.
+func (t *responsesToolStreamTranslator) metricOnlyArgumentDelta(
+	block []byte,
+	fields map[string]json.RawMessage,
+	markStreamed bool,
+) [][]byte {
+	var delta string
+	if json.Unmarshal(fields["delta"], &delta) != nil || delta == "" {
+		return nil
+	}
+	key := t.argumentEventKey(fields)
+	if key == "" {
+		return nil
+	}
+	if markStreamed {
+		t.metricStreamed[key] = struct{}{}
+	}
+	syntheticID, err := json.Marshal("metrics_" + key)
+	if err != nil {
+		return nil
+	}
+	fields["type"] = json.RawMessage(`"response.custom_tool_call_input.delta"`)
+	fields["item_id"] = syntheticID
+	fields["call_id"] = syntheticID
+	delete(fields, "name")
+	return [][]byte{rebuildSSEEventBlock(block, "response.custom_tool_call_input.delta", fields)}
 }
 
 func (t *responsesToolStreamTranslator) restoreEventName(fields map[string]json.RawMessage) (json.RawMessage, bool) {

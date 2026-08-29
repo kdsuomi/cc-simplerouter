@@ -727,6 +727,11 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 		`"input":"*** Begin Patch\n*** End Patch"`,
 		`"name":"shell_command"`,
 		`event: response.function_call_arguments.delta`,
+		// Suppressed custom-tool argument deltas surface as metric-only
+		// events under a synthetic id so live tok/s covers patch generation.
+		`"call_id":"metrics_fc_patch"`,
+		// Plain function-call deltas gain a metric-only copy too.
+		`"call_id":"metrics_fc_shell"`,
 	} {
 		if !strings.Contains(stream, want) {
 			t.Fatalf("translated stream missing %q:\n%s", want, stream)
@@ -734,5 +739,8 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	}
 	if strings.Contains(stream, `"item_id":"fc_patch","output_index":0,"delta":"{\"input\"`) {
 		t.Fatalf("custom function argument envelope leaked downstream:\n%s", stream)
+	}
+	if strings.Contains(stream, `"delta":"*** Begin Patch`) {
+		t.Fatalf("terminal argument blob was emitted despite live metric deltas (double count):\n%s", stream)
 	}
 }
