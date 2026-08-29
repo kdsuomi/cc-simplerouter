@@ -506,6 +506,127 @@ func TestResponsesPassthroughRetriesJSONSchemaAsJSONObjectAndRemembersCapability
 	}
 }
 
+func TestResponsesPassthroughRetriesWithoutImagesAndRemembersRejection(t *testing.T) {
+	requests := make(chan string, 3)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requests <- string(body)
+		if strings.Contains(string(body), `"input_image"`) {
+			// Verbatim OpenRouter rejection for a text-only model.
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":{"message":"No endpoints found that support image input","code":404}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\"}}\n\n")
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(
+		upstream.URL,
+		"z-ai/glm-5.3",
+		upstream.Client(),
+		responsesPassthroughOptions{Label: "OpenRouter"},
+	))
+	defer proxy.Close()
+
+	requestBody := `{
+	  "model":"wrong",
+	  "stream":true,
+	  "input":[
+	    {"type":"message","role":"user","content":[
+	      {"type":"input_text","text":"What is in this screenshot?"},
+	      {"type":"input_image","image_url":"data:image/png;base64,AAAA"}
+	    ]},
+	    {"type":"function_call_output","call_id":"call_1","output":[
+	      {"type":"input_image","image_url":"data:image/png;base64,BBBB"}
+	    ]}
+	  ]
+	}`
+	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(responseBody), `"id":"resp_2"`) {
+		t.Fatalf("response = %d %s", resp.StatusCode, responseBody)
+	}
+
+	first := <-requests
+	second := <-requests
+	if !strings.Contains(first, `"input_image"`) {
+		t.Fatalf("first attempt lost the image: %s", first)
+	}
+	if strings.Contains(second, `"input_image"`) {
+		t.Fatalf("retry still carries an image: %s", second)
+	}
+	if strings.Count(second, imageOmittedNotice) != 2 {
+		t.Fatalf("retry should replace both images with notes: %s", second)
+	}
+	if !strings.Contains(second, "What is in this screenshot?") {
+		t.Fatalf("retry lost the surrounding text: %s", second)
+	}
+
+	secondResp, err := http.Post(proxy.URL+"/v1/responses", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondResp.Body.Close()
+	if _, err := io.Copy(io.Discard, secondResp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if secondResp.StatusCode != http.StatusOK {
+		t.Fatalf("second response status = %d", secondResp.StatusCode)
+	}
+	third := <-requests
+	if strings.Contains(third, `"input_image"`) {
+		t.Fatalf("remembered rejection still sent an image: %s", third)
+	}
+	select {
+	case extra := <-requests:
+		t.Fatalf("remembered rejection unexpectedly probed with an image again: %s", extra)
+	default:
+	}
+}
+
+func TestResponsesPassthroughRelaysUnrelatedNotFoundErrors(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":{"message":"Model not found","code":404}}`)
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(
+		upstream.URL,
+		"z-ai/glm-5.3",
+		upstream.Client(),
+		responsesPassthroughOptions{Label: "OpenRouter"},
+	))
+	defer proxy.Close()
+
+	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"wrong","stream":true,"input":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(string(body), "Model not found") {
+		t.Fatalf("unrelated 404 was not relayed: %d %s", resp.StatusCode, body)
+	}
+}
+
 func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	captured := make(chan map[string]any, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

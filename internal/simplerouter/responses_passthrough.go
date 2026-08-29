@@ -30,11 +30,12 @@ type responsesPassthroughOptions struct {
 }
 
 type responsesPassthroughProxy struct {
-	upstreamBase   string
-	model          string
-	httpClient     *http.Client
-	options        responsesPassthroughOptions
-	jsonObjectOnly atomic.Bool
+	upstreamBase    string
+	model           string
+	httpClient      *http.Client
+	options         responsesPassthroughOptions
+	jsonObjectOnly  atomic.Bool
+	stripImageInput atomic.Bool
 }
 
 func startResponsesPassthroughProxy(upstreamBase, model string, httpClient *http.Client, options responsesPassthroughOptions) (baseURL string, stop func(), err error) {
@@ -105,6 +106,12 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 	if p.options.OmitNullEncryptedReasoningContent {
 		if err := omitNullEncryptedReasoningContent(request); err != nil {
 			writeResponsesError(w, http.StatusInternalServerError, "api_error", "normalize encrypted reasoning: "+err.Error())
+			return
+		}
+	}
+	if p.stripImageInput.Load() {
+		if _, _, err := stripImageInputPayload(request); err != nil {
+			writeResponsesError(w, http.StatusInternalServerError, "api_error", "strip image input: "+err.Error())
 			return
 		}
 	}
@@ -238,24 +245,32 @@ func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWrite
 		writeResponsesError(w, http.StatusBadGateway, "api_error", p.options.Label+" request failed: "+err.Error())
 		return
 	}
-	if resp.StatusCode == http.StatusBadRequest {
+	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotFound {
 		errorBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		_ = resp.Body.Close()
-		if readErr == nil && rejectsJSONSchemaButSupportsJSONObject(errorBody) {
+		var fallbackName string
+		var fallbackPayload []byte
+		var changed bool
+		var fallbackErr error
+		switch {
+		case readErr == nil && rejectsJSONSchemaButSupportsJSONObject(errorBody):
 			p.jsonObjectOnly.Store(true)
-			fallbackPayload, changed, fallbackErr := jsonObjectFallbackPayload(request)
-			if fallbackErr != nil {
-				writeResponsesError(w, http.StatusInternalServerError, "api_error", "encode JSON-object fallback: "+fallbackErr.Error())
+			fallbackName = "JSON-object"
+			fallbackPayload, changed, fallbackErr = jsonObjectFallbackPayload(request)
+		case readErr == nil && rejectsImageInput(errorBody):
+			p.stripImageInput.Store(true)
+			fallbackName = "image-free"
+			fallbackPayload, changed, fallbackErr = stripImageInputPayload(request)
+		}
+		if fallbackErr != nil {
+			writeResponsesError(w, http.StatusInternalServerError, "api_error", "encode "+fallbackName+" fallback: "+fallbackErr.Error())
+			return
+		}
+		if changed {
+			resp, err = p.sendResponsesRequest(r, fallbackPayload)
+			if err != nil {
+				writeResponsesError(w, http.StatusBadGateway, "api_error", p.options.Label+" request failed: "+err.Error())
 				return
-			}
-			if changed {
-				resp, err = p.sendResponsesRequest(r, fallbackPayload)
-				if err != nil {
-					writeResponsesError(w, http.StatusBadGateway, "api_error", p.options.Label+" request failed: "+err.Error())
-					return
-				}
-			} else {
-				resp.Body = io.NopCloser(bytes.NewReader(errorBody))
 			}
 		} else {
 			resp.Body = io.NopCloser(bytes.NewReader(errorBody))
@@ -284,6 +299,94 @@ func (p *responsesPassthroughProxy) sendResponsesRequest(r *http.Request, payloa
 	upReq.Header.Set("X-Title", "simplerouter")
 
 	return p.httpClient.Do(upReq)
+}
+
+// rejectsImageInput matches upstream rejections of image content, e.g.
+// OpenRouter's 404 {"error":{"message":"No endpoints found that support image
+// input"}} when the model (or its pinned provider endpoint) is text-only.
+func rejectsImageInput(body []byte) bool {
+	message := strings.ToLower(string(body))
+	return strings.Contains(message, "support image input") ||
+		strings.Contains(message, "image input is not supported") ||
+		strings.Contains(message, "does not support image") ||
+		strings.Contains(message, "unsupported image")
+}
+
+const imageOmittedNotice = "[image omitted: the selected model does not accept image input]"
+
+// stripImageInputPayload replaces every image content part in the request
+// input with a short text note, in place. Dropping the image keeps the
+// conversation alive — Codex retains the image in its thread history, so
+// without this every subsequent request would fail the same way — while the
+// note tells the model an image existed. Message `content` and
+// function_call_output `output` arrays both carry input_* parts, so the same
+// replacement works in either.
+func stripImageInputPayload(request map[string]json.RawMessage) ([]byte, bool, error) {
+	var input []json.RawMessage
+	if err := json.Unmarshal(request["input"], &input); err != nil {
+		return nil, false, nil
+	}
+	changed := false
+	for index, rawItem := range input {
+		var item map[string]json.RawMessage
+		if err := json.Unmarshal(rawItem, &item); err != nil {
+			continue
+		}
+		itemChanged := false
+		for _, field := range []string{"content", "output"} {
+			raw, found := item[field]
+			if !found {
+				continue
+			}
+			var parts []json.RawMessage
+			if err := json.Unmarshal(raw, &parts); err != nil {
+				continue
+			}
+			fieldChanged := false
+			for partIndex, rawPart := range parts {
+				var part struct {
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal(rawPart, &part); err != nil || part.Type != "input_image" {
+					continue
+				}
+				replacement, err := json.Marshal(map[string]string{"type": "input_text", "text": imageOmittedNotice})
+				if err != nil {
+					return nil, false, err
+				}
+				parts[partIndex] = replacement
+				fieldChanged = true
+			}
+			if !fieldChanged {
+				continue
+			}
+			encoded, err := json.Marshal(parts)
+			if err != nil {
+				return nil, false, err
+			}
+			item[field] = encoded
+			itemChanged = true
+		}
+		if !itemChanged {
+			continue
+		}
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			return nil, false, err
+		}
+		input[index] = encoded
+		changed = true
+	}
+	if !changed {
+		return nil, false, nil
+	}
+	encodedInput, err := json.Marshal(input)
+	if err != nil {
+		return nil, false, err
+	}
+	request["input"] = encodedInput
+	payload, err := json.Marshal(request)
+	return payload, true, err
 }
 
 func rejectsJSONSchemaButSupportsJSONObject(body []byte) bool {
