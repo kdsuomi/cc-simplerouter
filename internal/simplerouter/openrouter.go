@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // errOpenRouterKeyRejected signals that OpenRouter explicitly rejected the
@@ -21,8 +22,11 @@ const (
 )
 
 type openRouterClient struct {
-	httpClient *http.Client
-	apiBase    string
+	httpClient  *http.Client
+	apiBase     string
+	zdrOnce     sync.Once
+	zdrPolicies map[string]bool
+	zdrErr      error
 }
 
 func newOpenRouterClient(httpClient *http.Client, apiBase string) *openRouterClient {
@@ -98,11 +102,19 @@ func (c *openRouterClient) models(ctx context.Context, key string) ([]Model, err
 			ContextLength:       m.ContextLength,
 			PromptPrice:         strings.TrimSpace(m.Pricing.Prompt),
 			OutputPrice:         strings.TrimSpace(m.Pricing.Completion),
+			Privacy:             openRouterModelPrivacy(id),
 			SupportedParameters: cleanSupportedParameters(m.SupportedParameters),
 		})
 	}
 	// Preserve OpenRouter's most-popular ordering from the query above.
 	return models, nil
+}
+
+func openRouterModelPrivacy(modelID string) string {
+	if strings.HasSuffix(modelID, ":free") {
+		return "training"
+	}
+	return "retained"
 }
 
 // endpoints lists the provider endpoints currently serving a model, in the
@@ -132,19 +144,71 @@ func (c *openRouterClient) endpoints(ctx context.Context, key, modelID string) (
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decode endpoints: %w", err)
 	}
+	zdr, err := c.zdrPolicy(ctx, key)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Endpoint, 0, len(raw.Data.Endpoints))
 	for _, e := range raw.Data.Endpoints {
+		tag := strings.TrimSpace(e.Tag)
 		out = append(out, Endpoint{
 			ProviderName:  strings.TrimSpace(e.ProviderName),
-			Tag:           strings.TrimSpace(e.Tag),
+			Tag:           tag,
 			Quantization:  strings.TrimSpace(e.Quantization),
 			ContextLength: e.ContextLength,
 			PromptPrice:   strings.TrimSpace(e.Pricing.Prompt),
 			OutputPrice:   strings.TrimSpace(e.Pricing.Completion),
 			ThroughputP50: e.ThroughputLast30m.P50,
+			Privacy:       endpointPrivacy(modelID, tag, zdr),
 		})
 	}
 	return out, nil
+}
+
+func (c *openRouterClient) zdrPolicy(ctx context.Context, key string) (map[string]bool, error) {
+	c.zdrOnce.Do(func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase+"/endpoints/zdr", nil)
+		if err != nil {
+			c.zdrErr = err
+			return
+		}
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			c.zdrErr = fmt.Errorf("fetch zero-data-retention endpoints: %w", err)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			c.zdrErr = fmt.Errorf("fetch zero-data-retention endpoints: HTTP %d", resp.StatusCode)
+			return
+		}
+		var raw openRouterZDRResponse
+		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+			c.zdrErr = fmt.Errorf("decode zero-data-retention endpoints: %w", err)
+			return
+		}
+		policies := make(map[string]bool, len(raw.Data))
+		for _, endpoint := range raw.Data {
+			modelID := strings.TrimSpace(endpoint.ModelID)
+			tag := strings.TrimSpace(endpoint.Tag)
+			if modelID == "" || tag == "" {
+				continue
+			}
+			policies[modelID+"\x00"+tag] = true
+		}
+		c.zdrPolicies = policies
+	})
+	return c.zdrPolicies, c.zdrErr
+}
+
+func endpointPrivacy(modelID, tag string, zdr map[string]bool) string {
+	if zdr[modelID+"\x00"+tag] {
+		return "clean"
+	}
+	return openRouterModelPrivacy(modelID)
 }
 
 func cleanSupportedParameters(params []string) []string {

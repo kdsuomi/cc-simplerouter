@@ -151,6 +151,11 @@ output compatibility: if an endpoint rejects `json_schema` but supports
 `json_object`, the request is retried once and that capability is remembered
 for later automatic reviews in the same session.
 
+OpenRouter model and provider tables include a `Privacy` column. `clean` marks an
+endpoint from OpenRouter's zero-data-retention list, `retained` marks a standard
+endpoint, and `training` marks OpenRouter's free model variants, which may use
+prompts and completions for training.
+
 ### Protocol translation
 
 The Gemini adapter uses the stable V1 Interactions API with `store: false`. It

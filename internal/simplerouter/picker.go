@@ -36,6 +36,10 @@ const (
 	clrCtxHuge = "38;2;96;200;214"  // >= 1M context
 	clrCtxBig  = "38;2;120;201;140" // >= 100k
 	clrCtxSm   = "38;2;120;122;136" // smaller
+
+	clrPrivacyClean    = "38;2;105;208;124"
+	clrPrivacyRetained = "38;2;222;176;43"
+	clrPrivacyTraining = "38;2;227;84;84"
 )
 
 type terminalStyle struct {
@@ -243,11 +247,12 @@ func pageCount(total, pageSize int) int {
 
 // Column widths for the model table.
 const (
-	wGutter = 4 // marker + space + 2-digit number
-	wModel  = 30
-	wName   = 22
-	wCtx    = 11
-	wPrice  = 14
+	wGutter  = 4 // marker + space + 2-digit number
+	wModel   = 30
+	wName    = 22
+	wCtx     = 11
+	wPrice   = 14
+	wPrivacy = 11
 )
 
 func (a *app) printModelPage(title string, filtered, visible []Model, filter string, page, totalPages int, style terminalStyle) {
@@ -278,6 +283,7 @@ func (a *app) printModelPage(title string, filtered, visible []Model, filter str
 		padRight("NAME", wName),
 		padRight("CTX", wCtx),
 		padRight("PRICE/M", wPrice),
+		padRight("PRIVACY", wPrivacy),
 	)
 	fmt.Fprintln(a.stderr, style.paint(clrDim, headerPlain))
 	fmt.Fprintln(a.stderr, style.paint(clrFaint, strings.Repeat("─", len(strings.TrimRight(headerPlain, " "))+2)))
@@ -290,12 +296,32 @@ func (a *app) printModelPage(title string, filtered, visible []Model, filter str
 			style.cell(displayModelName(model), wName, clrName),
 			style.cell(formatContextLength(model.ContextLength), wCtx, ctxColor(model.ContextLength)),
 			style.cell(formatPricePerMillion(model.PromptPrice, model.OutputPrice), wPrice, priceColor(model)),
+			privacyCell(style, model.Privacy),
 		))
 	}
 
 	fmt.Fprintln(a.stderr)
 	a.printHint(style)
 	fmt.Fprint(a.stderr, style.paint(clrAccentBold, "  ❯ "))
+}
+
+func privacyCell(style terminalStyle, privacy string) string {
+	label, code := privacyDisplay(privacy)
+	return style.cell(label, wPrivacy, code)
+}
+
+func privacyDisplay(privacy string) (string, string) {
+	privacy = strings.ToLower(strings.TrimSpace(privacy))
+	switch privacy {
+	case "clean":
+		return "clean", clrPrivacyClean
+	case "training":
+		return "training", clrPrivacyTraining
+	case "":
+		return "-", clrDim
+	default:
+		return "retained", clrPrivacyRetained
+	}
 }
 
 func rowLine(gutter string, cells ...string) string {
@@ -414,6 +440,8 @@ func (a *app) printModelDetails(model Model, style terminalStyle) {
 	field("Name", displayModelName(model), clrName)
 	field("Context", formatContextLength(model.ContextLength)+" tokens", ctxColor(model.ContextLength))
 	field("Price/M", formatPricePerMillion(model.PromptPrice, model.OutputPrice), priceColor(model))
+	label, code := privacyDisplay(model.Privacy)
+	field("Privacy", label, code)
 	field("Tags", strings.Join(modelTags(model), ", "), clrModel)
 	if len(model.SupportedParameters) > 0 {
 		fmt.Fprintf(a.stderr, "  %s %s\n", style.paint(clrDim, padRight("Params", 9)), style.paint(clrName, strings.Join(model.SupportedParameters, ", ")))
