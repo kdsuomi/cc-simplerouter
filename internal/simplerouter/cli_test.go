@@ -300,7 +300,7 @@ func TestOpenRouterLaunchUsesResponsesPassthrough(t *testing.T) {
 	if gotUpstreamBase != srv.URL || gotModel != "z-ai/glm-5.2" {
 		t.Fatalf("passthrough route = %q model %q", gotUpstreamBase, gotModel)
 	}
-	if gotOptions.Label != "OpenRouter" || gotOptions.ProviderTag != "" {
+	if gotOptions.Label != "OpenRouter" || gotOptions.ProviderTag != "" || gotOptions.TranslateCustomTools {
 		t.Fatalf("passthrough options = %#v", gotOptions)
 	}
 	wantArgs := codexArgs("z-ai/glm-5.2", "http://127.0.0.1:43210/v1", filepath.Join(home, "models.json"), false, nil, nil)
@@ -517,13 +517,14 @@ func TestPickerRecommendedColumnsAndEnterDefault(t *testing.T) {
 		stderr: stderr,
 	}
 	res, err := a.pickModel("Select an OpenRouter model", []Model{
-		{ID: "vendor/other", Name: "Other Model", ContextLength: 8192},
+		{ID: "vendor/other:free", Name: "Other Model", ContextLength: 8192, Privacy: "non-zdr"},
 		{
 			ID:                  "z-ai/glm-5.2",
 			Name:                "Z.ai: GLM 5.2",
 			ContextLength:       1_048_576,
 			PromptPrice:         "0.00000095",
 			OutputPrice:         "0.000003",
+			Privacy:             "zdr",
 			SupportedParameters: []string{"tools", "reasoning"},
 		},
 	}, "", nil)
@@ -534,7 +535,7 @@ func TestPickerRecommendedColumnsAndEnterDefault(t *testing.T) {
 		t.Fatalf("selected = %s", res.Model.ID)
 	}
 	out := stderr.String()
-	for _, want := range []string{"MODEL", "NAME", "CTX", "PRICE/M", "1,048,576", "$0.95/$3"} {
+	for _, want := range []string{"MODEL", "NAME", "CTX", "PRICE/M", "PRIVACY", "1,048,576", "$0.95/$3", "zdr", "non-zdr"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("picker output missing %q: %q", want, out)
 		}

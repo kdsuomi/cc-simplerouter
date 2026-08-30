@@ -3,6 +3,7 @@ package simplerouter
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -214,5 +215,20 @@ func TestRenderInteractiveHasConstantHeight(t *testing.T) {
 	}, nil), style)
 	if len(pv) != len(full) {
 		t.Fatalf("provider view height %d != model view height %d", len(pv), len(full))
+	}
+}
+
+func TestPickerPrivacyColors(t *testing.T) {
+	style := terminalStyle{enabled: true}
+	for _, tt := range []struct {
+		privacy string
+		want    string
+	}{
+		{"zdr", clrPrivacyZDR},
+		{"non-zdr", clrPrivacyNonZDR},
+	} {
+		if got := privacyCell(style, tt.privacy); !strings.Contains(got, "\x1b["+tt.want+"m") {
+			t.Errorf("privacyCell(%q) = %q, want color %q", tt.privacy, got, tt.want)
+		}
 	}
 }

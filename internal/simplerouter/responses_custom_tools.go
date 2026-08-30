@@ -3,6 +3,8 @@ package simplerouter
 import (
 	"bytes"
 	"encoding/json"
+	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +22,10 @@ type responsesToolTranslation struct {
 	// Registry maps flattened function names (namespace__child) back to Codex
 	// identities when FlattenNamespaces is enabled.
 	Registry *responseToolRegistry
+	// WebSearchSubstituted marks that Codex web_search tools were replaced with
+	// openrouter:web_search, so matching stream items must be renamed back to
+	// web_search_call for Codex.
+	WebSearchSubstituted bool
 }
 
 func translateResponsesTools(request map[string]json.RawMessage, options responsesPassthroughOptions) (responsesToolTranslation, error) {
@@ -41,12 +47,68 @@ func translateResponsesTools(request map[string]json.RawMessage, options respons
 			return out, err
 		}
 	}
+	if options.SubstituteOpenRouterWebSearch {
+		substituted, err := substituteOpenRouterWebSearchTools(request)
+		if err != nil {
+			return out, err
+		}
+		out.WebSearchSubstituted = substituted
+	}
 	if len(options.AllowedToolTypes) > 0 {
 		if err := filterResponsesToolsByType(request, options.AllowedToolTypes); err != nil {
 			return out, err
 		}
 	}
 	return out, nil
+}
+
+// substituteOpenRouterWebSearchTools replaces Codex web_search tools with
+// OpenRouter's server-side search tool on the Exa engine. Exa's default auto
+// mode balances latency and depth; domain filters carry over, while Codex-only
+// fields (external_web_access, search_content_types, user_location) are
+// dropped. Returns whether any tool was replaced.
+func substituteOpenRouterWebSearchTools(request map[string]json.RawMessage) (bool, error) {
+	var tools []json.RawMessage
+	if err := json.Unmarshal(request["tools"], &tools); err != nil {
+		return false, nil
+	}
+	changed := false
+	for index, raw := range tools {
+		var tool map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &tool); err != nil {
+			continue
+		}
+		var toolType string
+		if json.Unmarshal(tool["type"], &toolType) != nil ||
+			(toolType != "web_search" && toolType != "web_search_preview") {
+			continue
+		}
+		parameters := map[string]any{"engine": "exa", "mode": "auto"}
+		var filters struct {
+			AllowedDomains []string `json:"allowed_domains"`
+		}
+		if json.Unmarshal(tool["filters"], &filters) == nil && len(filters.AllowedDomains) > 0 {
+			parameters["allowed_domains"] = filters.AllowedDomains
+		}
+		encoded, err := json.Marshal(map[string]any{
+			"type":       "openrouter:web_search",
+			"parameters": parameters,
+		})
+		if err != nil {
+			return false, err
+		}
+		tools[index] = encoded
+		changed = true
+	}
+	if !changed {
+		return false, nil
+	}
+	encoded, err := json.Marshal(tools)
+	if err != nil {
+		return false, err
+	}
+	request["tools"] = encoded
+	return true, nil
 }
 
 func translateResponsesCustomTools(request map[string]json.RawMessage) (map[string]struct{}, error) {
@@ -324,11 +386,13 @@ func normalizeMetaResponsesTool(tool map[string]json.RawMessage) bool {
 	}
 	switch toolType {
 	case "function":
+		changed := false
 		var strict bool
 		if json.Unmarshal(tool["strict"], &strict) == nil && strict {
 			tool["strict"] = json.RawMessage(`false`)
-			return true
+			changed = true
 		}
+		return removeRecursiveMetaFunctionSchemaRefs(tool) || changed
 	case "namespace":
 		var children []json.RawMessage
 		if json.Unmarshal(tool["tools"], &children) != nil {
@@ -360,6 +424,99 @@ func normalizeMetaResponsesTool(tool map[string]json.RawMessage) bool {
 		}
 	}
 	return false
+}
+
+// removeRecursiveMetaFunctionSchemaRefs cuts only local $ref edges that close
+// a cycle. Meta accepts referenced function schemas, but rejects recursive
+// schemas such as the Gmail app's nested MIME-part declaration. Keeping the
+// first reference and replacing the back-edge with an unconstrained schema
+// preserves useful argument guidance without dropping the tool.
+func removeRecursiveMetaFunctionSchemaRefs(tool map[string]json.RawMessage) bool {
+	var schema any
+	if err := json.Unmarshal(tool["parameters"], &schema); err != nil || schema == nil {
+		return false
+	}
+	if !cutRecursiveLocalSchemaRefs(schema) {
+		return false
+	}
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return false
+	}
+	tool["parameters"] = encoded
+	return true
+}
+
+func cutRecursiveLocalSchemaRefs(root any) bool {
+	visited := map[string]bool{}
+	var walk func(any, map[string]bool) bool
+	walk = func(node any, active map[string]bool) bool {
+		changed := false
+		switch value := node.(type) {
+		case map[string]any:
+			if ref, ok := value["$ref"].(string); ok {
+				if active[ref] {
+					// An empty schema accepts the recursive value while preventing
+					// the provider from following the cycle again.
+					delete(value, "$ref")
+					changed = true
+				} else if !visited[ref] {
+					if target, found := resolveLocalSchemaRef(root, ref); found {
+						active[ref] = true
+						changed = walk(target, active) || changed
+						delete(active, ref)
+						visited[ref] = true
+					}
+				}
+			}
+			for key, child := range value {
+				if key == "$ref" {
+					continue
+				}
+				changed = walk(child, active) || changed
+			}
+		case []any:
+			for _, child := range value {
+				changed = walk(child, active) || changed
+			}
+		}
+		return changed
+	}
+	return walk(root, map[string]bool{})
+}
+
+func resolveLocalSchemaRef(root any, ref string) (any, bool) {
+	if ref == "#" {
+		return root, true
+	}
+	if !strings.HasPrefix(ref, "#/") {
+		return nil, false
+	}
+	path, err := url.PathUnescape(strings.TrimPrefix(ref, "#"))
+	if err != nil {
+		return nil, false
+	}
+	current := root
+	for _, encoded := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
+		part := strings.ReplaceAll(strings.ReplaceAll(encoded, "~1", "/"), "~0", "~")
+		switch value := current.(type) {
+		case map[string]any:
+			var found bool
+			current, found = value[part]
+			if !found {
+				return nil, false
+			}
+		case []any:
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(value) {
+				return nil, false
+			}
+			current = value[index]
+		default:
+			return nil, false
+		}
+	}
+	return current, true
 }
 
 func omitOptionalToolSearchParameters(tool map[string]json.RawMessage) bool {
@@ -480,27 +637,42 @@ func translateResponsesCustomToolInput(request map[string]json.RawMessage) error
 }
 
 type responsesToolStreamTranslator struct {
-	customTools map[string]struct{}
-	registry    *responseToolRegistry
-	itemIDs     map[string]struct{}
-	callIDs     map[string]struct{}
+	customTools          map[string]struct{}
+	registry             *responseToolRegistry
+	webSearchSubstituted bool
+	itemIDs              map[string]struct{}
+	callIDs              map[string]struct{}
+	metricStreamed       map[string]struct{}
 }
 
 func newResponsesToolStreamTranslator(translation responsesToolTranslation) *responsesToolStreamTranslator {
 	return &responsesToolStreamTranslator{
-		customTools: translation.CustomTools,
-		registry:    translation.Registry,
-		itemIDs:     map[string]struct{}{},
-		callIDs:     map[string]struct{}{},
+		customTools:          translation.CustomTools,
+		registry:             translation.Registry,
+		webSearchSubstituted: translation.WebSearchSubstituted,
+		itemIDs:              map[string]struct{}{},
+		callIDs:              map[string]struct{}{},
+		metricStreamed:       map[string]struct{}{},
 	}
 }
 
 func (t *responsesToolStreamTranslator) needsTranslation() bool {
-	return len(t.customTools) > 0 || (t.registry != nil && len(t.registry.byChatName) > 0)
+	return len(t.customTools) > 0 ||
+		(t.registry != nil && len(t.registry.byChatName) > 0) ||
+		t.webSearchSubstituted
 }
 
 func (t *responsesToolStreamTranslator) processBlock(block []byte) [][]byte {
-	if !t.needsTranslation() {
+	needsTranslation := t.needsTranslation()
+	// Argument-delta metric forwarding must not depend on whether any tool
+	// required schema translation: on plain routes ordinary function-call
+	// argument deltas would otherwise pass through as native events that
+	// Codex's parser ignores, leaving their generation invisible to the live
+	// stream rate. A byte-level prefilter keeps the streaming hot path (the
+	// flood of ordinary text deltas) free of JSON parsing when no
+	// translation is active.
+	if !needsTranslation &&
+		!bytes.Contains(block, []byte("response.function_call_arguments.delta")) {
 		return [][]byte{block}
 	}
 	payload, ok := ssePayload(block)
@@ -513,6 +685,31 @@ func (t *responsesToolStreamTranslator) processBlock(block []byte) [][]byte {
 	}
 	var eventType string
 	if json.Unmarshal(fields["type"], &eventType) != nil {
+		return [][]byte{block}
+	}
+	// Runs before the translation gate. The metric-only copy is safe only
+	// against the pinned Codex 0.147 parser, which ignores native
+	// function_call_arguments.delta events; if a future parser starts
+	// consuming them, appending this copy would double-count.
+	if eventType == "response.function_call_arguments.delta" {
+		if t.isCustomEvent(fields) {
+			// Suppressed custom-tool deltas still represent live generation:
+			// forward them under a synthetic id so the client counts their
+			// characters for the rate display without any consumer matching
+			// the real call. The actual input arrives via output_item.done.
+			return t.metricOnlyArgumentDelta(block, fields, /*markStreamed*/ true)
+		}
+		blocks := [][]byte{block}
+		if name, ok := t.restoreEventName(fields); ok {
+			fields["name"] = name
+			blocks = [][]byte{rebuildDataBlock(block, fields)}
+		}
+		// Plain function-call argument deltas are ignored by the client's SSE
+		// parser; append a metric-only copy so their generation is visible to
+		// the rate display too.
+		return append(blocks, t.metricOnlyArgumentDelta(block, fields, /*markStreamed*/ false)...)
+	}
+	if !needsTranslation {
 		return [][]byte{block}
 	}
 	switch eventType {
@@ -529,16 +726,14 @@ func (t *responsesToolStreamTranslator) processBlock(block []byte) [][]byte {
 		}
 		fields["item"] = item
 		return [][]byte{rebuildDataBlock(block, fields)}
-	case "response.function_call_arguments.delta":
-		if t.isCustomEvent(fields) {
-			return nil
-		}
-		if name, ok := t.restoreEventName(fields); ok {
-			fields["name"] = name
-			return [][]byte{rebuildDataBlock(block, fields)}
-		}
 	case "response.function_call_arguments.done":
 		if t.isCustomEvent(fields) {
+			if _, streamed := t.metricStreamed[t.argumentEventKey(fields)]; streamed {
+				// The argument characters were already counted through the
+				// live metric deltas; a terminal blob here would count them
+				// twice.
+				return nil
+			}
 			var arguments string
 			if json.Unmarshal(fields["arguments"], &arguments) != nil {
 				return nil
@@ -575,6 +770,55 @@ func (t *responsesToolStreamTranslator) isCustomEvent(fields map[string]json.Raw
 	return itemFound || callFound
 }
 
+// argumentEventKey identifies the tool call an argument event belongs to,
+// preferring an id the translator already tracks as custom.
+func (t *responsesToolStreamTranslator) argumentEventKey(fields map[string]json.RawMessage) string {
+	var itemID, callID string
+	_ = json.Unmarshal(fields["item_id"], &itemID)
+	_ = json.Unmarshal(fields["call_id"], &callID)
+	if _, ok := t.itemIDs[itemID]; ok {
+		return itemID
+	}
+	if _, ok := t.callIDs[callID]; ok {
+		return callID
+	}
+	if itemID != "" {
+		return itemID
+	}
+	return callID
+}
+
+// metricOnlyArgumentDelta rewrites a function-call argument delta into a
+// custom_tool_call_input.delta under a synthetic id. The client counts the
+// delta's characters for the live generation rate, but the synthetic id
+// matches no real item or call, so no content consumer ever sees it.
+func (t *responsesToolStreamTranslator) metricOnlyArgumentDelta(
+	block []byte,
+	fields map[string]json.RawMessage,
+	markStreamed bool,
+) [][]byte {
+	var delta string
+	if json.Unmarshal(fields["delta"], &delta) != nil || delta == "" {
+		return nil
+	}
+	key := t.argumentEventKey(fields)
+	if key == "" {
+		return nil
+	}
+	if markStreamed {
+		t.metricStreamed[key] = struct{}{}
+	}
+	syntheticID, err := json.Marshal("metrics_" + key)
+	if err != nil {
+		return nil
+	}
+	fields["type"] = json.RawMessage(`"response.custom_tool_call_input.delta"`)
+	fields["item_id"] = syntheticID
+	fields["call_id"] = syntheticID
+	delete(fields, "name")
+	return [][]byte{rebuildSSEEventBlock(block, "response.custom_tool_call_input.delta", fields)}
+}
+
 func (t *responsesToolStreamTranslator) restoreEventName(fields map[string]json.RawMessage) (json.RawMessage, bool) {
 	if t.registry == nil {
 		return nil, false
@@ -600,8 +844,20 @@ func (t *responsesToolStreamTranslator) translateFunctionCallItem(raw json.RawMe
 		return raw, false, "", ""
 	}
 	var itemType, name string
-	if json.Unmarshal(item["type"], &itemType) != nil || itemType != "function_call" ||
-		json.Unmarshal(item["name"], &name) != nil {
+	if json.Unmarshal(item["type"], &itemType) != nil {
+		return raw, false, "", ""
+	}
+	// Substituted server-side searches stream back as openrouter:web_search
+	// items; rename them to the native web_search_call type Codex renders.
+	if itemType == "openrouter:web_search" && t.webSearchSubstituted {
+		item["type"] = json.RawMessage(`"web_search_call"`)
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			return raw, false, "", ""
+		}
+		return encoded, true, "", ""
+	}
+	if itemType != "function_call" || json.Unmarshal(item["name"], &name) != nil {
 		return raw, false, "", ""
 	}
 	var itemID, callID string

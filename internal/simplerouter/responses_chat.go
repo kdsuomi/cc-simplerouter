@@ -774,6 +774,7 @@ type chatCompletionUsage struct {
 type chatResponsesToolState struct {
 	index        int
 	id           string
+	itemID       string
 	chatName     string
 	arguments    strings.Builder
 	extraContent json.RawMessage
@@ -986,6 +987,9 @@ func (t *chatResponsesStreamTranslator) onToolCall(call chatStreamCall) {
 		state = &chatResponsesToolState{index: call.Index}
 		t.tools[call.Index] = state
 	}
+	if state.itemID == "" {
+		state.itemID = newToolUseID()
+	}
 	if call.ID != "" {
 		state.id = call.ID
 	}
@@ -994,6 +998,12 @@ func (t *chatResponsesStreamTranslator) onToolCall(call chatStreamCall) {
 	}
 	if call.Function.Arguments != "" {
 		state.arguments.WriteString(string(call.Function.Arguments))
+		t.out.event("response.custom_tool_call_input.delta", map[string]any{
+			"type":    "response.custom_tool_call_input.delta",
+			"item_id": state.itemID,
+			"call_id": state.itemID,
+			"delta":   call.Function.Arguments,
+		})
 	}
 	if len(call.ExtraContent) > 0 && string(call.ExtraContent) != "null" {
 		state.extraContent = mergeRawJSON(state.extraContent, call.ExtraContent)
@@ -1122,6 +1132,9 @@ func (t *chatResponsesStreamTranslator) emitTools(firstOutputIndex int) int {
 		if tool.id == "" {
 			tool.id = newToolUseID()
 		}
+		if tool.itemID == "" {
+			tool.itemID = newToolUseID()
+		}
 		identity, ok := t.registry.byChatName[tool.chatName]
 		if !ok {
 			identity = responseToolIdentity{Name: tool.chatName}
@@ -1132,6 +1145,7 @@ func (t *chatResponsesStreamTranslator) emitTools(firstOutputIndex int) int {
 		}
 		item := map[string]any{
 			"type":      "function_call",
+			"id":        tool.itemID,
 			"call_id":   tool.id,
 			"name":      identity.Name,
 			"arguments": arguments,
@@ -1141,6 +1155,7 @@ func (t *chatResponsesStreamTranslator) emitTools(firstOutputIndex int) int {
 		}
 		if identity.Custom {
 			item["type"] = "custom_tool_call"
+			delete(item, "id")
 			delete(item, "arguments")
 			item["input"] = customToolInput(arguments)
 		}

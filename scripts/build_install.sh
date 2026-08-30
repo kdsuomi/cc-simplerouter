@@ -17,8 +17,21 @@ mkdir -p "$bin_dir" "$install_dir"
     go build -buildvcs=false -o "$bin_dir/simplerouter" ./cmd/simplerouter
 )
 
-cp "$bin_dir/simplerouter" "$install_dir/simplerouter"
-chmod +x "$install_dir/simplerouter"
+install_tmp="$install_dir/.simplerouter.install.$$"
+trap 'rm -f "$install_tmp"' 0 HUP INT TERM
+
+cp "$bin_dir/simplerouter" "$install_tmp"
+chmod +x "$install_tmp"
+
+# Re-sign the copied binary on macOS, then replace the installed executable by
+# rename. Overwriting an existing Mach-O in place can leave the kernel with
+# stale code-signing state and cause an immediate SIGKILL on the next launch.
+if [ "$(uname -s)" = Darwin ] && command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - --identifier simplerouter "$install_tmp"
+fi
+
+mv -f "$install_tmp" "$install_dir/simplerouter"
+trap - 0 HUP INT TERM
 
 case ":$PATH:" in
     *":$install_dir:"*) ;;

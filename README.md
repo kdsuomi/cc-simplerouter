@@ -153,6 +153,20 @@ output compatibility: if an endpoint rejects `json_schema` but supports
 `json_object`, the request is retried once and that capability is remembered
 for later automatic reviews in the same session.
 
+OpenRouter's Responses schema rejects Codex multi-agent `namespace` tool
+groups, so every OpenRouter route flattens them into `namespace__tool`
+functions and restores the original name + `namespace` on the return stream.
+Routes pinned to a Google AI Studio endpoint additionally swap Codex's
+`web_search` tool for OpenRouter's server-side `openrouter:web_search` (Exa
+engine, `auto` mode): the pinned native grounding lane runs on OpenRouter's
+shared upstream pool, which rejects any request carrying `web_search` with an
+instant 429. Substituted searches stream back renamed to Codex's native
+`web_search_call` items, and prior-turn search items replay unchanged.
+
+OpenRouter model and provider tables include a `Privacy` column. Provider
+endpoints in OpenRouter's zero-data-retention list are marked `zdr`; all others
+are marked `non-zdr`.
+
 ### Protocol translation
 
 The Gemini adapter uses the stable V1 Interactions API with `store: false`. It
@@ -182,6 +196,13 @@ on function declarations whose optional parameters Meta would otherwise reject,
 and omits Codex's optional `tool_search.limit` field so Meta can validate that
 built-in tool's required-only schema. Codex's unsupported
 `web_search.search_content_types` hint is removed while web search remains enabled.
+Recursive app-tool schemas are made finite by relaxing only cycle-closing local
+`$ref` edges, allowing tools such as Gmail's nested MIME-part inputs to remain
+available on Meta. Multi-agent `namespace` groups (such as the Node REPL's
+`mcp__node_repl` `js` tool) are flattened into `namespace__tool` functions
+because Meta returns namespaced calls as a single dot-joined name Codex cannot
+parse; the original name + `namespace` are restored on the return stream. The
+same tool translation applies to OpenRouter routes served by Meta's endpoint.
 
 The xAI (Grok) adapter also preserves the native Responses protocol against
 `https://api.x.ai/v1`. It rewrites Codex freeform `custom` tools (for example

@@ -276,10 +276,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 		baseURL = proxyURL
 	default:
 		baseURL = a.openRouterBase()
-		proxyURL, stop, perr := startResponsesPassthroughProxyFn(baseURL, modelID, a.httpClient, responsesPassthroughOptions{
-			Label:       "OpenRouter",
-			ProviderTag: res.ProviderTag,
-		})
+		proxyURL, stop, perr := startResponsesPassthroughProxyFn(baseURL, modelID, a.httpClient, openRouterResponsesOptions(modelID, res.ProviderTag))
 		if perr != nil {
 			return fmt.Errorf("start OpenRouter Responses proxy: %w", perr)
 		}

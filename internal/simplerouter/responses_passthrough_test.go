@@ -241,6 +241,137 @@ func TestXAIPassthroughFlattensNamespacesAndDropsUnsupportedTools(t *testing.T) 
 	}
 }
 
+func TestOpenRouterAIStudioPinSubstitutesWebSearchAndFlattensNamespaces(t *testing.T) {
+	captured := make(chan map[string]any, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		// The server-tools wrapper streams substituted searches as
+		// openrouter:web_search items; the proxy must rename them for Codex.
+		fmt.Fprint(w, strings.Join([]string{
+			`event: response.output_item.added`,
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"st_1","type":"openrouter:web_search","status":"in_progress"}}`,
+			``,
+			`event: response.output_item.done`,
+			`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"st_1","type":"openrouter:web_search","status":"completed","action":{"type":"search","query":"latest go version","sources":[{"type":"url","url":"https://go.dev/dl/"}]}}}`,
+			``,
+			`event: response.completed`,
+			`data: {"type":"response.completed","response":{"status":"completed","output":[{"id":"st_1","type":"openrouter:web_search","status":"completed","action":{"type":"search","query":"latest go version"}},{"type":"function_call","name":"mcp__node_repl__js","call_id":"call_js","arguments":"{\"code\":\"1\"}"}]}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n"))
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(
+		upstream.URL,
+		"google/gemini-3.7-flash",
+		upstream.Client(),
+		openRouterResponsesOptions("google/gemini-3.7-flash", "google-ai-studio"),
+	))
+	defer proxy.Close()
+
+	requestBody := `{
+	  "model":"wrong",
+	  "input":[
+	    {"type":"web_search_call","id":"ws_prior","status":"completed","action":{"type":"search","query":"prior search"}}
+	  ],
+	  "stream":true,
+	  "tools":[
+	    {
+	      "type":"web_search",
+	      "external_web_access":false,
+	      "search_content_types":["text"],
+	      "filters":{"allowed_domains":["go.dev"]}
+	    },
+	    {
+	      "type":"namespace",
+	      "name":"mcp__node_repl",
+	      "tools":[{
+	        "type":"function",
+	        "name":"js",
+	        "parameters":{"type":"object","properties":{"code":{"type":"string"}}}
+	      }]
+	    }
+	  ]
+	}`
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/responses", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("proxy status = %d %s", resp.StatusCode, responseBody)
+	}
+
+	request := <-captured
+	provider := request["provider"].(map[string]any)
+	if provider["only"].([]any)[0] != "google-ai-studio" || provider["allow_fallbacks"] != false {
+		t.Fatalf("provider pin = %#v", provider)
+	}
+	tools := request["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("upstream tools = %#v", tools)
+	}
+	search := tools[0].(map[string]any)
+	if search["type"] != "openrouter:web_search" {
+		t.Fatalf("web_search was not substituted: %#v", search)
+	}
+	parameters := search["parameters"].(map[string]any)
+	if parameters["engine"] != "exa" || parameters["mode"] != "auto" {
+		t.Fatalf("substituted search parameters = %#v", parameters)
+	}
+	if parameters["allowed_domains"].([]any)[0] != "go.dev" {
+		t.Fatalf("domain filter was not carried over: %#v", parameters)
+	}
+	for _, key := range []string{"external_web_access", "search_content_types", "filters"} {
+		if _, found := search[key]; found {
+			t.Fatalf("substituted search retained Codex-only field %q: %#v", key, search)
+		}
+	}
+	flattened := tools[1].(map[string]any)
+	if flattened["type"] != "function" || flattened["name"] != "mcp__node_repl__js" {
+		t.Fatalf("namespace tool was not flattened for OpenRouter: %#v", flattened)
+	}
+	// Codex replays prior web_search_call items verbatim; OpenRouter accepts
+	// them, so they must pass through unchanged.
+	prior := request["input"].([]any)[0].(map[string]any)
+	if prior["type"] != "web_search_call" {
+		t.Fatalf("prior web_search_call was rewritten: %#v", prior)
+	}
+
+	stream := string(responseBody)
+	for _, want := range []string{
+		`"type":"web_search_call"`,
+		`"query":"latest go version"`,
+		`"namespace":"mcp__node_repl"`,
+		`"name":"js"`,
+	} {
+		if !strings.Contains(stream, want) {
+			t.Fatalf("translated stream missing %q:\n%s", want, stream)
+		}
+	}
+	for _, leak := range []string{"openrouter:web_search", "mcp__node_repl__js"} {
+		if strings.Contains(stream, leak) {
+			t.Fatalf("upstream form %q leaked back to Codex:\n%s", leak, stream)
+		}
+	}
+}
+
 func TestXAIPassthroughOmitsCodexNullContentFromEncryptedReasoning(t *testing.T) {
 	captured := make(chan map[string]any, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -593,6 +724,127 @@ func TestResponsesPassthroughRetriesJSONSchemaAsJSONObjectAndRemembersCapability
 	}
 }
 
+func TestResponsesPassthroughRetriesWithoutImagesAndRemembersRejection(t *testing.T) {
+	requests := make(chan string, 3)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requests <- string(body)
+		if strings.Contains(string(body), `"input_image"`) {
+			// Verbatim OpenRouter rejection for a text-only model.
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":{"message":"No endpoints found that support image input","code":404}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\"}}\n\n")
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(
+		upstream.URL,
+		"z-ai/glm-5.3",
+		upstream.Client(),
+		responsesPassthroughOptions{Label: "OpenRouter"},
+	))
+	defer proxy.Close()
+
+	requestBody := `{
+	  "model":"wrong",
+	  "stream":true,
+	  "input":[
+	    {"type":"message","role":"user","content":[
+	      {"type":"input_text","text":"What is in this screenshot?"},
+	      {"type":"input_image","image_url":"data:image/png;base64,AAAA"}
+	    ]},
+	    {"type":"function_call_output","call_id":"call_1","output":[
+	      {"type":"input_image","image_url":"data:image/png;base64,BBBB"}
+	    ]}
+	  ]
+	}`
+	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(responseBody), `"id":"resp_2"`) {
+		t.Fatalf("response = %d %s", resp.StatusCode, responseBody)
+	}
+
+	first := <-requests
+	second := <-requests
+	if !strings.Contains(first, `"input_image"`) {
+		t.Fatalf("first attempt lost the image: %s", first)
+	}
+	if strings.Contains(second, `"input_image"`) {
+		t.Fatalf("retry still carries an image: %s", second)
+	}
+	if strings.Count(second, imageOmittedNotice) != 2 {
+		t.Fatalf("retry should replace both images with notes: %s", second)
+	}
+	if !strings.Contains(second, "What is in this screenshot?") {
+		t.Fatalf("retry lost the surrounding text: %s", second)
+	}
+
+	secondResp, err := http.Post(proxy.URL+"/v1/responses", "application/json", strings.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondResp.Body.Close()
+	if _, err := io.Copy(io.Discard, secondResp.Body); err != nil {
+		t.Fatal(err)
+	}
+	if secondResp.StatusCode != http.StatusOK {
+		t.Fatalf("second response status = %d", secondResp.StatusCode)
+	}
+	third := <-requests
+	if strings.Contains(third, `"input_image"`) {
+		t.Fatalf("remembered rejection still sent an image: %s", third)
+	}
+	select {
+	case extra := <-requests:
+		t.Fatalf("remembered rejection unexpectedly probed with an image again: %s", extra)
+	default:
+	}
+}
+
+func TestResponsesPassthroughRelaysUnrelatedNotFoundErrors(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":{"message":"Model not found","code":404}}`)
+	}))
+	defer upstream.Close()
+
+	proxy := httptest.NewServer(newResponsesPassthroughProxy(
+		upstream.URL,
+		"z-ai/glm-5.3",
+		upstream.Client(),
+		responsesPassthroughOptions{Label: "OpenRouter"},
+	))
+	defer proxy.Close()
+
+	resp, err := http.Post(proxy.URL+"/v1/responses", "application/json",
+		strings.NewReader(`{"model":"wrong","stream":true,"input":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(string(body), "Model not found") {
+		t.Fatalf("unrelated 404 was not relayed: %d %s", resp.StatusCode, body)
+	}
+}
+
 func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	captured := make(chan map[string]any, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -628,8 +880,11 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 			`event: response.output_item.done`,
 			`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_shell","call_id":"call_shell","name":"shell_command","arguments":"{\"command\":\"pwd\"}","status":"completed"}}`,
 			``,
+			`event: response.output_item.done`,
+			`data: {"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","id":"fc_email","call_id":"call_email","name":"mcp__codex_apps__gmail___send_email","arguments":"{\"payload\":{\"body\":\"hi\"}}","status":"completed"}}`,
+			``,
 			`event: response.completed`,
-			`data: {"type":"response.completed","response":{"id":"resp_meta","output":[{"type":"function_call","id":"fc_patch","call_id":"call_patch","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\"}","status":"completed"},{"type":"function_call","id":"fc_shell","call_id":"call_shell","name":"shell_command","arguments":"{\"command\":\"pwd\"}","status":"completed"}],"tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}},{"type":"function","name":"shell_command","parameters":{"type":"object"}}]}}`,
+			`data: {"type":"response.completed","response":{"id":"resp_meta","output":[{"type":"function_call","id":"fc_patch","call_id":"call_patch","name":"apply_patch","arguments":"{\"input\":\"*** Begin Patch\\n*** End Patch\"}","status":"completed"},{"type":"function_call","id":"fc_shell","call_id":"call_shell","name":"shell_command","arguments":"{\"command\":\"pwd\"}","status":"completed"},{"type":"function_call","id":"fc_email","call_id":"call_email","name":"mcp__codex_apps__gmail___send_email","arguments":"{\"payload\":{\"body\":\"hi\"}}","status":"completed"}],"tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object"}},{"type":"function","name":"shell_command","parameters":{"type":"object"}}]}}`,
 			``,
 			`data: [DONE]`,
 			``,
@@ -662,6 +917,14 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	      "name":"apply_patch",
 	      "output":"Done",
 	      "internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}
+	    },
+	    {
+	      "type":"function_call",
+	      "id":"fc_ns_prior",
+	      "call_id":"call_ns_prior",
+	      "name":"_send_email",
+	      "namespace":"mcp__codex_apps__gmail",
+	      "arguments":"{}"
 	    }
 	  ],
 	  "stream":true,
@@ -683,12 +946,24 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	    },
 	    {
 	      "type":"namespace",
-	      "name":"collaboration",
+	      "name":"mcp__codex_apps__gmail",
 	      "tools":[{
 	        "type":"function",
-	        "name":"list_agents",
+	        "name":"_send_email",
 	        "strict":true,
-	        "parameters":{"type":"object","properties":{"limit":{"type":"integer"}}}
+	        "parameters":{
+	          "type":"object",
+	          "properties":{"payload":{"$ref":"#/$defs/GmailMessagePartRequest"}},
+	          "$defs":{
+	            "GmailMessagePartRequest":{
+	              "type":"object",
+	              "properties":{
+	                "body":{"type":"string"},
+	                "parts":{"type":"array","items":{"$ref":"#/$defs/GmailMessagePartRequest"}}
+	              }
+	            }
+	          }
+	        }
 	      }]
 	    },
 	    {
@@ -749,10 +1024,22 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	if function["strict"] != false {
 		t.Fatalf("strict function was not relaxed for Meta: %#v", function)
 	}
-	namespace := tools[2].(map[string]any)
-	child := namespace["tools"].([]any)[0].(map[string]any)
-	if child["strict"] != false {
-		t.Fatalf("strict namespace function was not relaxed for Meta: %#v", child)
+	// Meta returns namespaced calls as dot-joined names Codex cannot parse, so
+	// the namespace group must reach Meta as a flat function tool.
+	flattened := tools[2].(map[string]any)
+	if flattened["type"] != "function" || flattened["name"] != "mcp__codex_apps__gmail___send_email" || flattened["strict"] != false {
+		t.Fatalf("namespace tool was not flattened for Meta: %#v", flattened)
+	}
+	childParameters := flattened["parameters"].(map[string]any)
+	payload := childParameters["properties"].(map[string]any)["payload"].(map[string]any)
+	if payload["$ref"] != "#/$defs/GmailMessagePartRequest" {
+		t.Fatalf("Meta rewrite removed useful non-recursive schema ref: %#v", childParameters)
+	}
+	messagePart := childParameters["$defs"].(map[string]any)["GmailMessagePartRequest"].(map[string]any)
+	parts := messagePart["properties"].(map[string]any)["parts"].(map[string]any)
+	items := parts["items"].(map[string]any)
+	if _, found := items["$ref"]; found || len(items) != 0 {
+		t.Fatalf("Meta rewrite retained recursive schema ref: %#v", childParameters)
 	}
 	toolSearch := tools[3].(map[string]any)
 	toolSearchParameters := toolSearch["parameters"].(map[string]any)
@@ -783,6 +1070,13 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 	if _, found := priorOutput["name"]; found {
 		t.Fatalf("prior output retained custom tool name: %#v", priorOutput)
 	}
+	priorNamespaced := input[2].(map[string]any)
+	if priorNamespaced["name"] != "mcp__codex_apps__gmail___send_email" {
+		t.Fatalf("prior namespaced call not flattened for Meta: %#v", priorNamespaced)
+	}
+	if _, found := priorNamespaced["namespace"]; found {
+		t.Fatalf("prior namespaced call retained namespace field: %#v", priorNamespaced)
+	}
 
 	stream := string(responseBody)
 	for _, want := range []string{
@@ -791,12 +1085,26 @@ func TestResponsesPassthroughAppliesMetaCompatibilityRewrites(t *testing.T) {
 		`"input":"*** Begin Patch\n*** End Patch"`,
 		`"name":"shell_command"`,
 		`event: response.function_call_arguments.delta`,
+		// Suppressed custom-tool argument deltas surface as metric-only
+		// events under a synthetic id so live tok/s covers patch generation.
+		`"call_id":"metrics_fc_patch"`,
+		// Plain function-call deltas gain a metric-only copy too.
+		`"call_id":"metrics_fc_shell"`,
+		// Flattened namespace calls are restored to the Codex identity.
+		`"namespace":"mcp__codex_apps__gmail"`,
+		`"name":"_send_email"`,
 	} {
 		if !strings.Contains(stream, want) {
 			t.Fatalf("translated stream missing %q:\n%s", want, stream)
 		}
 	}
+	if strings.Contains(stream, "mcp__codex_apps__gmail___send_email") {
+		t.Fatalf("flattened namespace name leaked back to Codex:\n%s", stream)
+	}
 	if strings.Contains(stream, `"item_id":"fc_patch","output_index":0,"delta":"{\"input\"`) {
 		t.Fatalf("custom function argument envelope leaked downstream:\n%s", stream)
+	}
+	if strings.Contains(stream, `"delta":"*** Begin Patch`) {
+		t.Fatalf("terminal argument blob was emitted despite live metric deltas (double count):\n%s", stream)
 	}
 }

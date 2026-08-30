@@ -1,7 +1,7 @@
-From 3e5a0aa23d2c2877db075d654fa6ce2a219a4e5b Mon Sep 17 00:00:00 2001
-From: kdsuomi <kdsuomi@users.noreply.github.com>
+From bf3dd4cedb1a6a627ab6fcabfa43fa9bc242466d Mon Sep 17 00:00:00 2001
+From: Kyle <kdsuomi@users.noreply.github.com>
 Date: Mon, 3 Aug 2026 13:54:57 -0400
-Subject: [PATCH 3/4] feat(tui): report generation throughput across retries
+Subject: [PATCH 3/5] feat(tui): report generation throughput across retries
 
 ---
  codex-rs/.cargo/config.toml                   |   5 +

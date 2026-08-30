@@ -238,6 +238,7 @@ func TestGeminiInteractionsStreamTranslatorPreservesStepsAndCodexItems(t *testin
 	var sawThought, sawSearch bool
 	var message, custom, completed map[string]any
 	var replay geminiInteractionReplayState
+	toolDeltas := 0
 	for _, event := range decoded {
 		switch event["type"] {
 		case "response.reasoning_summary_text.done":
@@ -260,6 +261,8 @@ func TestGeminiInteractionsStreamTranslatorPreservesStepsAndCodexItems(t *testin
 			}
 		case "response.completed":
 			completed = event["response"].(map[string]any)
+		case "response.custom_tool_call_input.delta":
+			toolDeltas++
 		}
 	}
 	if !sawThought || !sawSearch {
@@ -271,6 +274,9 @@ func TestGeminiInteractionsStreamTranslatorPreservesStepsAndCodexItems(t *testin
 	}
 	if custom["name"] != "apply_patch" || custom["input"] != "patch" {
 		t.Fatalf("custom call = %#v", custom)
+	}
+	if toolDeltas != 1 {
+		t.Fatalf("tool argument deltas = %d, want 1:\n%s", toolDeltas, output.String())
 	}
 	if len(replay.Steps) != 5 {
 		t.Fatalf("replay steps = %d, want 5: %#v", len(replay.Steps), replay)
@@ -298,6 +304,79 @@ func TestGeminiInteractionsStreamTranslatorPreservesStepsAndCodexItems(t *testin
 	if usage["output_tokens"] != float64(6) ||
 		usage["output_tokens_details"].(map[string]any)["reasoning_tokens"] != float64(2) {
 		t.Fatalf("usage = %#v", usage)
+	}
+}
+
+func TestGeminiInteractionsFunctionArgumentsIgnoreStartPlaceholder(t *testing.T) {
+	_, registry, err := responsesToolsToGeminiInteractions([]json.RawMessage{
+		json.RawMessage(`{"type":"function","name":"exec_command","parameters":{"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}}`),
+		json.RawMessage(`{"type":"function","name":"get_goal","parameters":{"type":"object","properties":{}}}`),
+	}, "gemini-3.5-flash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	translator := newGeminiInteractionsResponsesTranslator(&output, nil, "gemini-3.5-flash", registry)
+	events := []string{
+		`{"event_type":"interaction.created","interaction":{"id":"v1_test","status":"in_progress","model":"gemini-3.5-flash"}}`,
+		// Verbatim Gemini 3.5 wire shape: step.start announces the call with
+		// an empty placeholder object, then arguments_delta streams the full
+		// serialization. Concatenating both yields the unparseable {}{"cmd":…}.
+		`{"event_type":"step.start","index":0,"step":{"id":"call_145450","type":"function_call","name":"exec_command","arguments":{}}}`,
+		`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"cmd\":\"cat /tmp/notes.txt\"}"}}`,
+		`{"event_type":"step.stop","index":0}`,
+		// Older-model shape: complete arguments in step.start, no deltas.
+		`{"event_type":"step.start","index":1,"step":{"id":"call_9","type":"function_call","name":"get_goal","arguments":{"scope":"turn"}}}`,
+		`{"event_type":"step.stop","index":1}`,
+		`{"event_type":"interaction.requires_action","interaction":{"id":"v1_test","status":"requires_action","model":"gemini-3.5-flash"}}`,
+	}
+	for _, event := range events {
+		if err := translator.onEvent(json.RawMessage(event)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	translator.finish()
+
+	var calls []map[string]any
+	var replay geminiInteractionReplayState
+	for _, event := range decodeTestSSE(t, output.String()) {
+		if event["type"] != "response.output_item.done" {
+			continue
+		}
+		item, _ := event["item"].(map[string]any)
+		switch item["type"] {
+		case "function_call":
+			calls = append(calls, item)
+		case "reasoning":
+			if encrypted, _ := item["encrypted_content"].(string); encrypted != "" {
+				replay, _ = decodeGeminiInteractionReplay(encrypted)
+			}
+		}
+	}
+	if len(calls) != 2 {
+		t.Fatalf("function calls = %d, want 2:\n%s", len(calls), output.String())
+	}
+	if arguments := calls[0]["arguments"]; arguments != `{"cmd":"cat /tmp/notes.txt"}` {
+		t.Fatalf("streamed arguments corrupted: %q", arguments)
+	}
+	if arguments, _ := calls[1]["arguments"].(string); arguments == "" || strings.Contains(arguments, `}{`) {
+		t.Fatalf("start-only arguments lost: %q", arguments)
+	} else {
+		var parsed map[string]any
+		if json.Unmarshal([]byte(arguments), &parsed) != nil || parsed["scope"] != "turn" {
+			t.Fatalf("start-only arguments corrupted: %q", arguments)
+		}
+	}
+	if len(replay.Steps) != 2 {
+		t.Fatalf("replay steps = %d, want 2", len(replay.Steps))
+	}
+	var replayed map[string]any
+	if err := json.Unmarshal(replay.Steps[0], &replayed); err != nil {
+		t.Fatal(err)
+	}
+	arguments, _ := replayed["arguments"].(map[string]any)
+	if arguments["cmd"] != "cat /tmp/notes.txt" {
+		t.Fatalf("replayed arguments lost the streamed value: %#v", replayed)
 	}
 }
 

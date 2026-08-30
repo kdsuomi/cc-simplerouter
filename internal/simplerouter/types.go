@@ -25,6 +25,7 @@ type Model struct {
 	ContextLength             int
 	PromptPrice               string
 	OutputPrice               string
+	Privacy                   string
 	SupportedParameters       []string
 	SupportedReasoningEfforts []string
 	DefaultReasoningEffort    string
@@ -40,6 +41,8 @@ type Endpoint struct {
 	ContextLength int
 	PromptPrice   string
 	OutputPrice   string
+	ThroughputP50 float64
+	Privacy       string
 }
 
 type openRouterEndpointsResponse struct {
@@ -53,6 +56,9 @@ type openRouterEndpointsResponse struct {
 				Prompt     string `json:"prompt"`
 				Completion string `json:"completion"`
 			} `json:"pricing"`
+			ThroughputLast30m struct {
+				P50 float64 `json:"p50"`
+			} `json:"throughput_last_30m"`
 		} `json:"endpoints"`
 	} `json:"data"`
 }
@@ -67,6 +73,13 @@ type openRouterModelsResponse struct {
 			Completion string `json:"completion"`
 		} `json:"pricing"`
 		SupportedParameters []string `json:"supported_parameters"`
+	} `json:"data"`
+}
+
+type openRouterZDRResponse struct {
+	Data []struct {
+		ModelID string `json:"model_id"`
+		Tag     string `json:"tag"`
 	} `json:"data"`
 }
 

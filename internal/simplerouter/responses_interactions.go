@@ -578,6 +578,7 @@ type geminiInteractionStepState struct {
 	raw         map[string]any
 	stopped     bool
 	arguments   strings.Builder
+	itemID      string
 	reasoningID string
 	messageID   string
 	outputIndex int
@@ -745,7 +746,13 @@ func (t *geminiInteractionsResponsesTranslator) startStep(index int, raw json.Ra
 			t.emitModelText(state, text)
 		}
 	case "function_call":
-		state.arguments.WriteString(interactionArgumentsString(step["arguments"]))
+		// Leave start-time arguments in raw form only. Gemini 3.5 announces a
+		// function call with an empty placeholder ({"arguments":{}}) and
+		// streams the real arguments via arguments_delta; seeding the
+		// accumulator with the stringified placeholder would prepend "{}" to
+		// the accumulated deltas and make the arguments unparseable.
+		// emitFunctionCall falls back to the raw arguments when no deltas
+		// arrive (models that send complete arguments in step.start).
 	}
 	return nil
 }
@@ -766,6 +773,17 @@ func (t *geminiInteractionsResponsesTranslator) deltaStep(index int, raw json.Ra
 	if argumentDelta != "" {
 		value := argumentDelta
 		state.arguments.WriteString(value)
+		if state.kind == "function_call" {
+			if state.itemID == "" {
+				state.itemID = newToolUseID()
+			}
+			t.out.event("response.custom_tool_call_input.delta", map[string]any{
+				"type":    "response.custom_tool_call_input.delta",
+				"item_id": state.itemID,
+				"call_id": state.itemID,
+				"delta":   value,
+			})
+		}
 	}
 	kind, _ := delta["type"].(string)
 	switch kind {
@@ -960,8 +978,12 @@ func (t *geminiInteractionsResponsesTranslator) emitFunctionCall(state *geminiIn
 	if strings.TrimSpace(arguments) == "" {
 		arguments = "{}"
 	}
+	if state.itemID == "" {
+		state.itemID = newToolUseID()
+	}
 	item := map[string]any{
 		"type":      "function_call",
+		"id":        state.itemID,
 		"call_id":   callID,
 		"name":      identity.Name,
 		"arguments": arguments,
@@ -971,6 +993,7 @@ func (t *geminiInteractionsResponsesTranslator) emitFunctionCall(state *geminiIn
 	}
 	if identity.Custom {
 		item["type"] = "custom_tool_call"
+		delete(item, "id")
 		delete(item, "arguments")
 		item["input"] = customToolInput(arguments)
 	}

@@ -68,11 +68,48 @@ func lmStudioResponsesOptions() responsesPassthroughOptions {
 	}
 }
 
+// openRouterResponsesOptions configures the Responses passthrough for
+// OpenRouter. Routes served by Meta's own endpoint hit the same API limits as
+// the direct Meta provider (no custom tools, no recursive schemas), so they
+// reuse the Meta tool translation. OpenRouter's Responses schema rejects Codex
+// multi-agent namespace tool groups outright (400 invalid_prompt), so every
+// route flattens them. Routes pinned to Google AI Studio swap Codex web_search
+// for OpenRouter's server-side search: the pinned native grounding lane runs on
+// OpenRouter's shared upstream pool, which rejects it with instant 429s.
+func openRouterResponsesOptions(model, providerTag string) responsesPassthroughOptions {
+	return responsesPassthroughOptions{
+		Label:                         "OpenRouter",
+		ProviderTag:                   providerTag,
+		TranslateCustomTools:          openRouterRouteTargetsMeta(model, providerTag),
+		FlattenNamespaces:             true,
+		SubstituteOpenRouterWebSearch: openRouterRouteTargetsAIStudio(providerTag),
+	}
+}
+
+func openRouterRouteTargetsAIStudio(providerTag string) bool {
+	tag := strings.ToLower(strings.TrimSpace(providerTag))
+	return tag == "google-ai-studio" || strings.HasPrefix(tag, "google-ai-studio/")
+}
+
+func openRouterRouteTargetsMeta(model, providerTag string) bool {
+	if strings.EqualFold(strings.TrimSpace(providerTag), "meta") {
+		return true
+	}
+	// Models authored by Meta (meta/…) are served only by Meta's endpoint;
+	// open-weight Llama models use the distinct meta-llama/… author.
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "meta/")
+}
+
 func metaResponsesOptions() responsesPassthroughOptions {
 	return responsesPassthroughOptions{
 		Label:                "Meta",
 		ReasoningEffortMap:   map[string]string{"max": "xhigh", "ultra": "xhigh"},
 		TranslateCustomTools: true,
+		// Meta accepts Codex namespace tool groups but returns calls as a single
+		// dot-joined name with no namespace field, which Codex rejects as an
+		// unsupported call. Flatten namespaces to plain function names and let
+		// the registry restore the Codex identity on the response stream.
+		FlattenNamespaces: true,
 	}
 }
 
