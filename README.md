@@ -77,8 +77,11 @@ build artifacts. It installs a version-isolated bundle under
 `~/.local/share/simplerouter/simplerouter-codex`, including the two helper
 executables required by Codex's Windows sandbox. Keeping the helpers with the
 patched binary avoids collisions with a separately installed official Codex
-release. Pass `-SkipBuild` to reinstall existing Cargo outputs without
-recompiling, or `-RefreshSource` to recreate the generated checkout.
+release. The installer reuses a matching official signed code-mode host or
+downloads the version-pinned OpenAI binary into `.build/` and verifies its
+SHA-256 digest and Authenticode signer before use. Pass `-SkipBuild` to
+reinstall existing Cargo outputs without recompiling, or `-RefreshSource` to
+recreate the generated checkout.
 
 For a published `simplerouter` release, the download installers are:
 

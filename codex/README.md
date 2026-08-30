@@ -26,8 +26,10 @@ sh ./scripts/build_install_codex_companion.sh
 The installer stages the canonical Codex package layout: `bin/codex`,
 `bin/codex-code-mode-host`, `codex-path/rg`, the platform resources,
 `codex-package.json`, and the root `codex` entrypoint. During fast iteration it
-reuses the signed code-mode host and resource binaries from the installed
-official package when available; only the patched main CLI needs rebuilding.
+reuses the signed code-mode host from the matching installed official package
+when available. Otherwise, it downloads the version-pinned OpenAI release
+binary into `.build/`, verifies its SHA-256 digest and Authenticode signer, and
+reuses that cache. Only the patched main CLI needs rebuilding.
 
 On macOS, Chrome's native host rejects browser-protocol clients whose
 `node_repl` process does not have an OpenAI-signed Codex parent. The package
