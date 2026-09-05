@@ -1,5 +1,5 @@
 param(
-    [string]$SourceRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) ".build\codex-rust-v0.147.0"),
+    [string]$SourceRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) ".build\codex-rust-v0.153.4"),
     [string]$Repository = "https://github.com/openai/codex.git",
     [switch]$Refresh
 )
@@ -7,10 +7,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$upstreamTag = "rust-v0.147.0"
-$upstreamCommit = "be6e8eac029b183056b7e4402879f15d2c85f61b"
-$expectedTree = "49a0c4fa9e35d3552c5bc1557bd837356968749c"
-$patchRoot = Join-Path $repoRoot "codex\patches\0.147.0"
+$upstreamTag = "rust-v0.153.4"
+$upstreamCommit = "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a"
+$expectedTree = "ef97f35f798f367d44c7d0552753c1616d2368c7"
+$patchRoot = Join-Path $repoRoot "codex\patches\0.153.4"
 $defaultBuildRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot ".build"))
 $sourcePath = [System.IO.Path]::GetFullPath($SourceRoot)
 

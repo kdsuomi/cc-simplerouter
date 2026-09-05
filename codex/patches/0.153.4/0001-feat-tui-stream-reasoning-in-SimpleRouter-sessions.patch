@@ -1,0 +1,828 @@
+From 15ed0e09f2a403f61bc3a16a242cbc1e47e0c2dc Mon Sep 17 00:00:00 2001
+From: Kyle <kdsuomi@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 22:54:43 -0400
+Subject: [PATCH 1/7] feat(tui): stream reasoning in SimpleRouter sessions
+
+---
+ codex-rs/tui/src/bottom_pane/chat_composer.rs |   7 +
+ .../bottom_pane/chat_composer/slash_input.rs  |   1 +
+ codex-rs/tui/src/bottom_pane/command_popup.rs |   5 +
+ codex-rs/tui/src/bottom_pane/mod.rs           |   5 +
+ .../tui/src/bottom_pane/slash_commands.rs     |  17 ++
+ codex-rs/tui/src/chatwidget.rs                |  11 ++
+ codex-rs/tui/src/chatwidget/constructor.rs    |   8 +
+ codex-rs/tui/src/chatwidget/input_flow.rs     |   1 +
+ codex-rs/tui/src/chatwidget/live_reasoning.rs | 146 ++++++++++++++++++
+ codex-rs/tui/src/chatwidget/slash_dispatch.rs |  13 ++
+ ...s__simplerouter_live_reasoning_stream.snap |  12 ++
+ codex-rs/tui/src/chatwidget/streaming.rs      |   4 +
+ codex-rs/tui/src/chatwidget/tests.rs          |   1 +
+ codex-rs/tui/src/chatwidget/tests/helpers.rs  |  41 +++++
+ .../src/chatwidget/tests/live_reasoning.rs    | 125 +++++++++++++++
+ codex-rs/tui/src/chatwidget/turn_runtime.rs   |   2 +
+ codex-rs/tui/src/history_cell/messages.rs     |   8 +
+ codex-rs/tui/src/slash_command.rs             |   8 +
+ 18 files changed, 415 insertions(+)
+ create mode 100644 codex-rs/tui/src/chatwidget/live_reasoning.rs
+ create mode 100644 codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_live_reasoning_stream.snap
+ create mode 100644 codex-rs/tui/src/chatwidget/tests/live_reasoning.rs
+
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer.rs b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+index 953f2e92..60830ce3 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer.rs
+@@ -535,6 +535,7 @@ pub(crate) struct ChatComposer {
+     plugins_command_enabled: bool,
+     token_activity_command_enabled: bool,
+     service_tier_commands_enabled: bool,
++    thinking_command_enabled: bool,
+     service_tier_commands: Vec<ServiceTierCommand>,
+     mentions_v2_enabled: bool,
+     goal_command_enabled: bool,
+@@ -602,6 +603,7 @@ impl ChatComposer {
+             plugins_command_enabled: self.plugins_command_enabled,
+             token_activity_command_enabled: self.token_activity_command_enabled,
+             service_tier_commands_enabled: self.service_tier_commands_enabled,
++            thinking_command_enabled: self.thinking_command_enabled,
+             goal_command_enabled: self.goal_command_enabled,
+             personality_command_enabled: self.personality_command_enabled,
+             allow_elevate_sandbox: self.windows_degraded_sandbox_active,
+@@ -710,6 +712,7 @@ impl ChatComposer {
+             plugins_command_enabled: false,
+             token_activity_command_enabled: false,
+             service_tier_commands_enabled: false,
++            thinking_command_enabled: false,
+             service_tier_commands: Vec::new(),
+             mentions_v2_enabled: false,
+             goal_command_enabled: false,
+@@ -910,6 +913,10 @@ impl ChatComposer {
+         self.service_tier_commands_enabled = enabled;
+     }
+ 
++    pub fn set_thinking_command_enabled(&mut self, enabled: bool) {
++        self.thinking_command_enabled = enabled;
++    }
++
+     pub fn set_service_tier_commands(&mut self, commands: Vec<ServiceTierCommand>) {
+         self.service_tier_commands = commands;
+         self.sync_popups();
+diff --git a/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs b/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs
+index 81734f2d..6ca4df6e 100644
+--- a/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs
++++ b/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs
+@@ -176,6 +176,7 @@ impl<'a> SlashInput<'a> {
+                 plugins_command_enabled: self.command_flags.plugins_command_enabled,
+                 token_activity_command_enabled: self.command_flags.token_activity_command_enabled,
+                 service_tier_commands_enabled: self.command_flags.service_tier_commands_enabled,
++                thinking_command_enabled: self.command_flags.thinking_command_enabled,
+                 goal_command_enabled: self.command_flags.goal_command_enabled,
+                 personality_command_enabled: self.command_flags.personality_command_enabled,
+                 windows_degraded_sandbox_active: self.command_flags.allow_elevate_sandbox,
+diff --git a/codex-rs/tui/src/bottom_pane/command_popup.rs b/codex-rs/tui/src/bottom_pane/command_popup.rs
+index f613e5ee..6f5e1552 100644
+--- a/codex-rs/tui/src/bottom_pane/command_popup.rs
++++ b/codex-rs/tui/src/bottom_pane/command_popup.rs
+@@ -46,6 +46,7 @@ pub(crate) struct CommandPopupFlags {
+     pub(crate) plugins_command_enabled: bool,
+     pub(crate) token_activity_command_enabled: bool,
+     pub(crate) service_tier_commands_enabled: bool,
++    pub(crate) thinking_command_enabled: bool,
+     pub(crate) goal_command_enabled: bool,
+     pub(crate) personality_command_enabled: bool,
+     pub(crate) windows_degraded_sandbox_active: bool,
+@@ -60,6 +61,7 @@ impl From<CommandPopupFlags> for BuiltinCommandFlags {
+             plugins_command_enabled: value.plugins_command_enabled,
+             token_activity_command_enabled: value.token_activity_command_enabled,
+             service_tier_commands_enabled: value.service_tier_commands_enabled,
++            thinking_command_enabled: value.thinking_command_enabled,
+             goal_command_enabled: value.goal_command_enabled,
+             personality_command_enabled: value.personality_command_enabled,
+             allow_elevate_sandbox: value.windows_degraded_sandbox_active,
+@@ -533,6 +535,7 @@ mod tests {
+                 plugins_command_enabled: false,
+                 token_activity_command_enabled: false,
+                 service_tier_commands_enabled: false,
++                thinking_command_enabled: false,
+                 goal_command_enabled: false,
+                 personality_command_enabled: true,
+                 windows_degraded_sandbox_active: false,
+@@ -560,6 +563,7 @@ mod tests {
+                 plugins_command_enabled: false,
+                 token_activity_command_enabled: false,
+                 service_tier_commands_enabled: false,
++                thinking_command_enabled: false,
+                 goal_command_enabled: false,
+                 personality_command_enabled: false,
+                 windows_degraded_sandbox_active: false,
+@@ -592,6 +596,7 @@ mod tests {
+                 plugins_command_enabled: false,
+                 token_activity_command_enabled: false,
+                 service_tier_commands_enabled: false,
++                thinking_command_enabled: false,
+                 goal_command_enabled: false,
+                 personality_command_enabled: true,
+                 windows_degraded_sandbox_active: false,
+diff --git a/codex-rs/tui/src/bottom_pane/mod.rs b/codex-rs/tui/src/bottom_pane/mod.rs
+index f4caf924..e8029863 100644
+--- a/codex-rs/tui/src/bottom_pane/mod.rs
++++ b/codex-rs/tui/src/bottom_pane/mod.rs
+@@ -508,6 +508,11 @@ impl BottomPane {
+         self.request_redraw();
+     }
+ 
++    pub fn set_thinking_command_enabled(&mut self, enabled: bool) {
++        self.composer.set_thinking_command_enabled(enabled);
++        self.request_redraw();
++    }
++
+     pub fn set_service_tier_commands(&mut self, commands: Vec<ServiceTierCommand>) {
+         self.composer.set_service_tier_commands(commands);
+         self.request_redraw();
+diff --git a/codex-rs/tui/src/bottom_pane/slash_commands.rs b/codex-rs/tui/src/bottom_pane/slash_commands.rs
+index 52b980e9..701191c2 100644
+--- a/codex-rs/tui/src/bottom_pane/slash_commands.rs
++++ b/codex-rs/tui/src/bottom_pane/slash_commands.rs
+@@ -60,6 +60,7 @@ pub(crate) struct BuiltinCommandFlags {
+     pub(crate) plugins_command_enabled: bool,
+     pub(crate) token_activity_command_enabled: bool,
+     pub(crate) service_tier_commands_enabled: bool,
++    pub(crate) thinking_command_enabled: bool,
+     pub(crate) goal_command_enabled: bool,
+     pub(crate) personality_command_enabled: bool,
+     pub(crate) allow_elevate_sandbox: bool,
+@@ -75,6 +76,7 @@ pub(crate) fn builtins_for_input(flags: BuiltinCommandFlags) -> Vec<(&'static st
+         .filter(|(_, cmd)| flags.connectors_enabled || *cmd != SlashCommand::Apps)
+         .filter(|(_, cmd)| flags.plugins_command_enabled || *cmd != SlashCommand::Plugins)
+         .filter(|(_, cmd)| flags.token_activity_command_enabled || *cmd != SlashCommand::Usage)
++        .filter(|(_, cmd)| flags.thinking_command_enabled || *cmd != SlashCommand::Thinking)
+         .filter(|(_, cmd)| flags.goal_command_enabled || *cmd != SlashCommand::Goal)
+         .filter(|(_, cmd)| flags.personality_command_enabled || *cmd != SlashCommand::Personality)
+         .filter(|(_, cmd)| !flags.side_conversation_active || cmd.available_in_side_conversation())
+@@ -169,6 +171,7 @@ mod tests {
+             plugins_command_enabled: true,
+             token_activity_command_enabled: true,
+             service_tier_commands_enabled: true,
++            thinking_command_enabled: true,
+             goal_command_enabled: true,
+             personality_command_enabled: true,
+             allow_elevate_sandbox: true,
+@@ -227,6 +230,19 @@ mod tests {
+         assert_eq!(find_slash_command("fast", flags, &commands), None);
+     }
+ 
++    #[test]
++    fn thinking_command_is_scoped_by_runtime_flag() {
++        let mut flags = all_enabled_flags();
++        flags.thinking_command_enabled = false;
++        assert_eq!(find_builtin_command("thinking", flags), None);
++
++        flags.thinking_command_enabled = true;
++        assert_eq!(
++            find_builtin_command("thinking", flags),
++            Some(SlashCommand::Thinking)
++        );
++    }
++
+     #[test]
+     fn all_service_tiers_are_exposed_as_commands_after_model() {
+         let commands = vec![
+@@ -307,6 +323,7 @@ mod tests {
+                 SlashCommand::Copy,
+                 SlashCommand::Export,
+                 SlashCommand::Raw,
++                SlashCommand::Thinking,
+                 SlashCommand::Diff,
+                 SlashCommand::Mention,
+                 SlashCommand::Status,
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 40eadfaf..ecdbc45d 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -362,6 +362,7 @@ mod input_submission;
+ mod interrupts;
+ use self::interrupts::InterruptManager;
+ mod keymap_picker;
++mod live_reasoning;
+ mod mcp_startup;
+ use self::mcp_startup::McpStartupStatus;
+ mod misalignment_policy;
+@@ -658,6 +659,12 @@ pub(crate) struct ChatWidget {
+     reasoning_header: Option<String>,
+     // Preserves reasoning-summary part boundaries for transcript-only recording.
+     reasoning_summary_parts: Vec<String>,
++    // Controls SimpleRouter's live reasoning preview for the current TUI session.
++    live_reasoning_enabled: bool,
++    // Tracks whether the active transcript cell is an ephemeral reasoning preview.
++    live_reasoning_active: bool,
++    // Throttles redraws while reasoning deltas arrive quickly.
++    reasoning_redraw_deadline: Option<Instant>,
+     status_state: StatusState,
+     review: ReviewState,
+     // Active hook runs render in a dedicated live cell so they can run alongside tools.
+@@ -1222,6 +1229,10 @@ impl ChatWidget {
+     }
+ 
+     fn flush_active_cell(&mut self) {
++        if self.live_reasoning_active {
++            self.clear_live_reasoning();
++            return;
++        }
+         if let Some(active) = self.transcript.take_active_cell() {
+             self.transcript.needs_final_message_separator = true;
+             self.app_event_tx.send(AppEvent::InsertHistoryCell(active));
+diff --git a/codex-rs/tui/src/chatwidget/constructor.rs b/codex-rs/tui/src/chatwidget/constructor.rs
+index a1079ac7..94fb7c64 100644
+--- a/codex-rs/tui/src/chatwidget/constructor.rs
++++ b/codex-rs/tui/src/chatwidget/constructor.rs
+@@ -35,6 +35,8 @@ impl ChatWidget {
+         let model = model.filter(|m| !m.trim().is_empty());
+         let mut config = config;
+         config.model = model.clone();
++        let live_reasoning_enabled =
++            live_reasoning::is_simplerouter_provider_id(&config.model_provider_id);
+         let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
+         let placeholder = PLACEHOLDER.to_string();
+         let side_placeholder = SIDE_PLACEHOLDER.to_string();
+@@ -189,6 +191,9 @@ impl ChatWidget {
+             reasoning_buffer: String::new(),
+             reasoning_header: None,
+             reasoning_summary_parts: Vec::new(),
++            live_reasoning_enabled,
++            live_reasoning_active: false,
++            reasoning_redraw_deadline: None,
+             status_state: StatusState::default(),
+             review: ReviewState::default(),
+             active_hook_cell: None,
+@@ -299,6 +304,9 @@ impl ChatWidget {
+         widget
+             .bottom_pane
+             .set_token_activity_command_enabled(widget.has_codex_backend_auth);
++        widget
++            .bottom_pane
++            .set_thinking_command_enabled(widget.is_simplerouter_session());
+         widget.refresh_status_surfaces();
+ 
+         widget
+diff --git a/codex-rs/tui/src/chatwidget/input_flow.rs b/codex-rs/tui/src/chatwidget/input_flow.rs
+index 74d872d6..705fe9d7 100644
+--- a/codex-rs/tui/src/chatwidget/input_flow.rs
++++ b/codex-rs/tui/src/chatwidget/input_flow.rs
+@@ -44,6 +44,7 @@ impl ChatWidget {
+                     }
+                     // Submitted is emitted when user submits.
+                     // Reset any reasoning header only when we are actually submitting a turn.
++                    self.clear_live_reasoning();
+                     self.reasoning_buffer.clear();
+                     self.reasoning_header = None;
+                     self.reasoning_summary_parts.clear();
+diff --git a/codex-rs/tui/src/chatwidget/live_reasoning.rs b/codex-rs/tui/src/chatwidget/live_reasoning.rs
+new file mode 100644
+index 00000000..698319e9
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/live_reasoning.rs
+@@ -0,0 +1,146 @@
++//! SimpleRouter-scoped live reasoning preview state.
++
++use super::*;
++
++const SIMPLEROUTER_MODEL_PROVIDER_ID: &str = "simplerouter_session";
++const REASONING_STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(60);
++
++pub(super) fn is_simplerouter_provider_id(provider_id: &str) -> bool {
++    provider_id == SIMPLEROUTER_MODEL_PROVIDER_ID
++}
++
++impl ChatWidget {
++    pub(super) fn is_simplerouter_session(&self) -> bool {
++        is_simplerouter_provider_id(&self.config.model_provider_id)
++    }
++
++    pub(super) fn toggle_live_reasoning_and_notify(&mut self) {
++        self.set_live_reasoning_and_notify(!self.live_reasoning_enabled);
++    }
++
++    pub(super) fn set_live_reasoning_and_notify(&mut self, enabled: bool) {
++        self.live_reasoning_enabled = enabled;
++        if !enabled {
++            self.clear_live_reasoning();
++        }
++        self.notify_live_reasoning_state();
++    }
++
++    pub(super) fn notify_live_reasoning_state(&mut self) {
++        let message = if self.live_reasoning_enabled {
++            "Live thinking is on."
++        } else {
++            "Live thinking is off."
++        };
++        self.add_info_message(message.to_string(), /*hint*/ None);
++        if self.live_reasoning_enabled {
++            self.refresh_live_reasoning();
++        }
++    }
++
++    pub(super) fn refresh_live_reasoning(&mut self) {
++        if !self.live_reasoning_enabled || self.config.hide_agent_reasoning {
++            return;
++        }
++
++        if self.live_reasoning_active {
++            if self
++                .transcript
++                .active_cell
++                .as_ref()
++                .is_some_and(|cell| cell.as_any().is::<history_cell::ReasoningSummaryCell>())
++            {
++                return;
++            }
++            self.live_reasoning_active = false;
++        }
++
++        if self.reasoning_summary_parts.is_empty() && self.reasoning_buffer.trim().is_empty() {
++            return;
++        }
++
++        self.flush_active_cell();
++        let mut cell = history_cell::ReasoningSummaryCell::new(
++            String::new(),
++            String::new(),
++            &self.config.cwd,
++            /*transcript_only*/ false,
++        );
++        for (index, part) in self.reasoning_summary_parts.iter().enumerate() {
++            if index > 0 {
++                cell.push_content("\n\n");
++            }
++            cell.push_content(part);
++        }
++        if !self.reasoning_summary_parts.is_empty() && !self.reasoning_buffer.is_empty() {
++            cell.push_content("\n\n");
++        }
++        cell.push_content(&self.reasoning_buffer);
++        if cell.is_empty() {
++            return;
++        }
++
++        self.live_reasoning_active = true;
++        self.transcript.active_cell = Some(Box::new(cell));
++        self.bump_active_cell_revision();
++        self.schedule_live_reasoning_redraw();
++    }
++
++    pub(super) fn append_live_reasoning_delta(&mut self, delta: &str) {
++        if !self.live_reasoning_enabled || self.config.hide_agent_reasoning {
++            return;
++        }
++
++        if self.live_reasoning_active
++            && let Some(cell) = self.transcript.active_cell.as_mut().and_then(|cell| {
++                cell.as_any_mut()
++                    .downcast_mut::<history_cell::ReasoningSummaryCell>()
++            })
++        {
++            cell.push_content(delta);
++            self.bump_active_cell_revision();
++            self.schedule_live_reasoning_redraw();
++            return;
++        }
++
++        self.refresh_live_reasoning();
++    }
++
++    pub(super) fn append_live_reasoning_section_break(&mut self) {
++        if !self.live_reasoning_enabled || self.config.hide_agent_reasoning {
++            return;
++        }
++        if self.live_reasoning_active
++            && let Some(cell) = self.transcript.active_cell.as_mut().and_then(|cell| {
++                cell.as_any_mut()
++                    .downcast_mut::<history_cell::ReasoningSummaryCell>()
++            })
++        {
++            cell.push_content("\n\n");
++            self.bump_active_cell_revision();
++            self.schedule_live_reasoning_redraw();
++        }
++    }
++
++    pub(super) fn clear_live_reasoning(&mut self) {
++        if self.live_reasoning_active {
++            self.transcript.active_cell = None;
++            self.bump_active_cell_revision();
++        }
++        self.live_reasoning_active = false;
++        self.reasoning_redraw_deadline = None;
++    }
++
++    fn schedule_live_reasoning_redraw(&mut self) {
++        let now = Instant::now();
++        if let Some(deadline) = self.reasoning_redraw_deadline
++            && now < deadline
++        {
++            self.frame_requester
++                .schedule_frame_in(deadline.saturating_duration_since(now));
++            return;
++        }
++        self.frame_requester.schedule_frame();
++        self.reasoning_redraw_deadline = Some(now + REASONING_STREAM_FRAME_INTERVAL);
++    }
++}
+diff --git a/codex-rs/tui/src/chatwidget/slash_dispatch.rs b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
+index 7f2028f3..bb4a4803 100644
+--- a/codex-rs/tui/src/chatwidget/slash_dispatch.rs
++++ b/codex-rs/tui/src/chatwidget/slash_dispatch.rs
+@@ -36,6 +36,7 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
+     "Press Ctrl+C to return to the main thread first.";
+ const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
+ const RAW_USAGE: &str = "Usage: /raw [on|off]";
++const THINKING_USAGE: &str = "Usage: /thinking [on|off|status]";
+ const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to use /usage.";
+ 
+ impl ChatWidget {
+@@ -420,6 +421,9 @@ impl ChatWidget {
+                 let enabled = self.toggle_raw_output_mode_and_notify();
+                 self.emit_raw_output_mode_changed(enabled);
+             }
++            SlashCommand::Thinking => {
++                self.toggle_live_reasoning_and_notify();
++            }
+             SlashCommand::Diff => {
+                 self.add_diff_in_progress();
+                 let tx = self.app_event_tx.clone();
+@@ -765,6 +769,12 @@ impl ChatWidget {
+                 }
+                 _ => self.add_error_message(RAW_USAGE.to_string()),
+             },
++            SlashCommand::Thinking => match trimmed.to_ascii_lowercase().as_str() {
++                "on" => self.set_live_reasoning_and_notify(/*enabled*/ true),
++                "off" => self.set_live_reasoning_and_notify(/*enabled*/ false),
++                "status" => self.notify_live_reasoning_state(),
++                _ => self.add_error_message(THINKING_USAGE.to_string()),
++            },
+             SlashCommand::Rename if !trimmed.is_empty() => {
+                 if !self.ensure_thread_rename_allowed() {
+                     return;
+@@ -818,6 +828,7 @@ impl ChatWidget {
+                     }
+                 }
+                 if self.is_session_configured() {
++                    self.clear_live_reasoning();
+                     self.reasoning_buffer.clear();
+                     self.reasoning_header = None;
+                     self.reasoning_summary_parts.clear();
+@@ -1113,6 +1124,7 @@ impl ChatWidget {
+             token_activity_command_enabled: self.has_codex_backend_auth,
+             goal_command_enabled: self.config.features.enabled(Feature::Goals),
+             service_tier_commands_enabled: self.fast_mode_enabled(),
++            thinking_command_enabled: self.is_simplerouter_session(),
+             personality_command_enabled: self.config.features.enabled(Feature::Personality),
+             allow_elevate_sandbox,
+             side_conversation_active: self.active_side_conversation,
+@@ -1147,6 +1159,7 @@ impl ChatWidget {
+             | SlashCommand::Rollout
+             | SlashCommand::Copy
+             | SlashCommand::Raw
++            | SlashCommand::Thinking
+             | SlashCommand::Vim
+             | SlashCommand::Diff
+             | SlashCommand::App
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_live_reasoning_stream.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_live_reasoning_stream.snap
+new file mode 100644
+index 00000000..05e6ab0b
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_live_reasoning_stream.snap
+@@ -0,0 +1,12 @@
++---
++source: tui/src/chatwidget/tests/live_reasoning.rs
++assertion_line: 46
++expression: "render_chatwidget(&mut chat, 80)"
++---
++"                                                                                "
++"• First chunk. Second step.                                                     "
++"                                                                                "
++"                                                                                "
++"› Ask Codex to do anything                                                      "
++"                                                                                "
++"  gpt-5.6-sol default · /tmp/project                                            "
+diff --git a/codex-rs/tui/src/chatwidget/streaming.rs b/codex-rs/tui/src/chatwidget/streaming.rs
+index b596ac33..4e5ad805 100644
+--- a/codex-rs/tui/src/chatwidget/streaming.rs
++++ b/codex-rs/tui/src/chatwidget/streaming.rs
+@@ -239,6 +239,8 @@ impl ChatWidget {
+             return;
+         }
+ 
++        self.append_live_reasoning_delta(&delta);
++
+         if self.unified_exec_wait_streak.is_some() {
+             // Unified exec waiting should take precedence over reasoning-derived status headers.
+             return;
+@@ -279,6 +281,7 @@ impl ChatWidget {
+             self.reasoning_summary_parts
+                 .push(std::mem::take(&mut self.reasoning_buffer));
+         }
++        self.clear_live_reasoning();
+         if !self.reasoning_summary_parts.is_empty() {
+             let reasoning_parts = std::mem::take(&mut self.reasoning_summary_parts);
+             let cell = history_cell::new_reasoning_summary_block(reasoning_parts, &self.config.cwd);
+@@ -296,6 +299,7 @@ impl ChatWidget {
+             self.reasoning_summary_parts
+                 .push(std::mem::take(&mut self.reasoning_buffer));
+         }
++        self.append_live_reasoning_section_break();
+         self.reasoning_header = None;
+     }
+ 
+diff --git a/codex-rs/tui/src/chatwidget/tests.rs b/codex-rs/tui/src/chatwidget/tests.rs
+index 1eb26d5c..552add38 100644
+--- a/codex-rs/tui/src/chatwidget/tests.rs
++++ b/codex-rs/tui/src/chatwidget/tests.rs
+@@ -246,6 +246,7 @@ mod goal_validation;
+ mod guardian;
+ pub(crate) mod helpers;
+ mod history_replay;
++mod live_reasoning;
+ mod mcp_startup;
+ #[path = "tests/misalignment_policy_tests.rs"]
+ mod misalignment_policy;
+diff --git a/codex-rs/tui/src/chatwidget/tests/helpers.rs b/codex-rs/tui/src/chatwidget/tests/helpers.rs
+index c852995d..84bc64aa 100644
+--- a/codex-rs/tui/src/chatwidget/tests/helpers.rs
++++ b/codex-rs/tui/src/chatwidget/tests/helpers.rs
+@@ -172,11 +172,52 @@ pub(super) async fn make_chatwidget_manual_with_auth(
+     ChatWidget,
+     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+     tokio::sync::mpsc::UnboundedReceiver<Op>,
++) {
++    make_chatwidget_manual_with_auth_and_provider(
++        model_override,
++        has_chatgpt_account,
++        has_codex_backend_auth,
++        frame_requester,
++        /*model_provider_id*/ None,
++    )
++    .await
++}
++
++pub(super) async fn make_chatwidget_manual_with_provider(
++    model_provider_id: &str,
++) -> (
++    ChatWidget,
++    tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
++    tokio::sync::mpsc::UnboundedReceiver<Op>,
++) {
++    make_chatwidget_manual_with_auth_and_provider(
++        /*model_override*/ None,
++        /*has_chatgpt_account*/ false,
++        /*has_codex_backend_auth*/ false,
++        FrameRequester::test_dummy(),
++        Some(model_provider_id),
++    )
++    .await
++}
++
++async fn make_chatwidget_manual_with_auth_and_provider(
++    model_override: Option<&str>,
++    has_chatgpt_account: bool,
++    has_codex_backend_auth: bool,
++    frame_requester: FrameRequester,
++    model_provider_id: Option<&str>,
++) -> (
++    ChatWidget,
++    tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
++    tokio::sync::mpsc::UnboundedReceiver<Op>,
+ ) {
+     let (tx_raw, rx) = unbounded_channel::<AppEvent>();
+     let app_event_tx = AppEventSender::new(tx_raw);
+     let (op_tx, op_rx) = unbounded_channel::<Op>();
+     let mut cfg = test_config().await;
++    if let Some(model_provider_id) = model_provider_id {
++        cfg.model_provider_id = model_provider_id.to_string();
++    }
+     let resolved_model = model_override
+         .map(str::to_owned)
+         .unwrap_or_else(|| get_model_offline_for_tests(cfg.model.as_deref()));
+diff --git a/codex-rs/tui/src/chatwidget/tests/live_reasoning.rs b/codex-rs/tui/src/chatwidget/tests/live_reasoning.rs
+new file mode 100644
+index 00000000..6cbd75af
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/tests/live_reasoning.rs
+@@ -0,0 +1,125 @@
++use super::*;
++use crate::history_cell::ReasoningSummaryCell;
++
++const SIMPLEROUTER_PROVIDER: &str = "simplerouter_session";
++
++fn live_reasoning_text(chat: &ChatWidget) -> Option<String> {
++    chat.transcript
++        .active_cell
++        .as_ref()
++        .and_then(|cell| cell.as_any().downcast_ref::<ReasoningSummaryCell>())
++        .map(|cell| lines_to_single_string(&cell.display_lines(/*width*/ 80)))
++}
++
++fn render_chatwidget(chat: &mut ChatWidget, width: u16) -> String {
++    let height = chat.desired_height(width);
++    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
++        .expect("create terminal");
++    terminal
++        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
++        .expect("draw chat widget");
++    normalized_backend_snapshot(terminal.backend())
++}
++
++#[tokio::test]
++async fn simplerouter_streams_reasoning_live_by_default() {
++    let (mut chat, mut rx, _op_rx) =
++        make_chatwidget_manual_with_provider(SIMPLEROUTER_PROVIDER).await;
++    assert!(chat.is_simplerouter_session());
++    assert!(chat.live_reasoning_enabled);
++
++    handle_agent_reasoning_delta(&mut chat, "First chunk.");
++    let first_live = live_reasoning_text(&chat).expect("first live reasoning cell");
++    assert!(first_live.contains("First chunk."));
++    assert!(drain_insert_history(&mut rx).is_empty());
++
++    handle_agent_reasoning_delta(&mut chat, " Second step.");
++    let combined_live = live_reasoning_text(&chat).expect("updated live reasoning cell");
++    assert!(combined_live.contains("First chunk."));
++    assert!(combined_live.contains("Second step."));
++    assert!(
++        combined_live.find("First chunk.").expect("first chunk")
++            < combined_live.find("Second step.").expect("second chunk")
++    );
++
++    assert_chatwidget_snapshot!(
++        "simplerouter_live_reasoning_stream",
++        render_chatwidget(&mut chat, /*width*/ 80)
++    );
++
++    handle_agent_reasoning_final(&mut chat);
++    let mut final_reasoning = None;
++    while let Ok(event) = rx.try_recv() {
++        if let AppEvent::InsertHistoryCell(cell) = event
++            && let Some(reasoning) = cell.as_any().downcast_ref::<ReasoningSummaryCell>()
++        {
++            final_reasoning = Some(lines_to_single_string(
++                &reasoning.transcript_lines(/*width*/ 80),
++            ));
++        }
++    }
++    assert_eq!(
++        final_reasoning.expect("final reasoning history").trim(),
++        combined_live.trim()
++    );
++    assert!(chat.transcript.active_cell.is_none());
++}
++
++#[tokio::test]
++async fn live_reasoning_preview_is_ephemeral_across_active_cell_flushes() {
++    let (mut chat, mut rx, _op_rx) =
++        make_chatwidget_manual_with_provider(SIMPLEROUTER_PROVIDER).await;
++
++    handle_agent_reasoning_delta(&mut chat, "Before tool.");
++    chat.flush_active_cell();
++    assert!(chat.transcript.active_cell.is_none());
++    assert!(drain_insert_history(&mut rx).is_empty());
++
++    handle_agent_reasoning_delta(&mut chat, " After tool.");
++    let rebuilt = live_reasoning_text(&chat).expect("rebuilt live reasoning cell");
++    assert!(rebuilt.contains("Before tool."));
++    assert!(rebuilt.contains("After tool."));
++}
++
++#[tokio::test]
++async fn thinking_command_toggles_and_restores_the_live_preview() {
++    let (mut chat, mut rx, _op_rx) =
++        make_chatwidget_manual_with_provider(SIMPLEROUTER_PROVIDER).await;
++    handle_agent_reasoning_delta(&mut chat, "Visible thought.");
++    assert!(live_reasoning_text(&chat).is_some());
++
++    chat.dispatch_command_with_args(SlashCommand::Thinking, "off".to_string(), Vec::new());
++    assert!(!chat.live_reasoning_enabled);
++    assert!(chat.transcript.active_cell.is_none());
++
++    chat.dispatch_command(SlashCommand::Thinking);
++    assert!(chat.live_reasoning_enabled);
++    assert!(
++        live_reasoning_text(&chat)
++            .expect("restored live reasoning")
++            .contains("Visible thought.")
++    );
++
++    chat.dispatch_command_with_args(SlashCommand::Thinking, "status".to_string(), Vec::new());
++    let notices = drain_insert_history(&mut rx)
++        .iter()
++        .map(|lines| lines_to_single_string(lines))
++        .collect::<Vec<_>>()
++        .join("\n");
++    assert!(notices.contains("Live thinking is off."));
++    assert!(notices.matches("Live thinking is on.").count() >= 2);
++}
++
++#[tokio::test]
++async fn live_reasoning_is_disabled_outside_simplerouter_and_respects_hide_flag() {
++    let (mut regular_chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
++    assert!(!regular_chat.live_reasoning_enabled);
++    handle_agent_reasoning_delta(&mut regular_chat, "Buffered thought.");
++    assert!(live_reasoning_text(&regular_chat).is_none());
++
++    let (mut hidden_chat, _rx, _op_rx) =
++        make_chatwidget_manual_with_provider(SIMPLEROUTER_PROVIDER).await;
++    hidden_chat.config.hide_agent_reasoning = true;
++    handle_agent_reasoning_delta(&mut hidden_chat, "Hidden thought.");
++    assert!(live_reasoning_text(&hidden_chat).is_none());
++}
+diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+index 2d346747..86358f69 100644
+--- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
++++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+@@ -92,6 +92,7 @@ impl ChatWidget {
+         if self.mcp_startup_status.is_none() || !self.status_header_is_mcp_startup_owned() {
+             self.set_status_header(String::from("Working"));
+         }
++        self.clear_live_reasoning();
+         self.reasoning_summary_parts.clear();
+         self.reasoning_buffer.clear();
+         self.reasoning_header = None;
+@@ -129,6 +130,7 @@ impl ChatWidget {
+         self.transcript.saw_copy_source_this_turn = false;
+         // If a stream is currently active, finalize it.
+         self.flush_answer_stream_with_separator();
++        self.clear_live_reasoning();
+         if let Some(mut controller) = self.plan_stream_controller.take() {
+             let had_live_tail = controller.has_live_tail();
+             self.clear_active_stream_tail();
+diff --git a/codex-rs/tui/src/history_cell/messages.rs b/codex-rs/tui/src/history_cell/messages.rs
+index c026b5dc..1360a87b 100644
+--- a/codex-rs/tui/src/history_cell/messages.rs
++++ b/codex-rs/tui/src/history_cell/messages.rs
+@@ -314,6 +314,14 @@ impl ReasoningSummaryCell {
+         }
+     }
+ 
++    pub(crate) fn push_content(&mut self, content: &str) {
++        self.content.push_str(content);
++    }
++
++    pub(crate) fn is_empty(&self) -> bool {
++        self.content.trim().is_empty()
++    }
++
+     fn lines(&self, width: u16) -> Vec<Line<'static>> {
+         let mut lines: Vec<Line<'static>> = Vec::new();
+         append_markdown(
+diff --git a/codex-rs/tui/src/slash_command.rs b/codex-rs/tui/src/slash_command.rs
+index aab133ff..0ce783a9 100644
+--- a/codex-rs/tui/src/slash_command.rs
++++ b/codex-rs/tui/src/slash_command.rs
+@@ -47,6 +47,7 @@ pub enum SlashCommand {
+     Copy,
+     Export,
+     Raw,
++    Thinking,
+     Diff,
+     Mention,
+     Status,
+@@ -104,6 +105,7 @@ impl SlashCommand {
+             SlashCommand::Copy => "copy the last response, code block, or quote",
+             SlashCommand::Export => "export the conversation as markdown",
+             SlashCommand::Raw => "toggle raw scrollback mode for copy-friendly terminal selection",
++            SlashCommand::Thinking => "toggle live streaming of model thinking",
+             SlashCommand::Diff => "show git diff (including untracked files)",
+             SlashCommand::Mention => "mention a file",
+             SlashCommand::Skills => "use skills to improve how Codex performs specific tasks",
+@@ -177,6 +179,7 @@ impl SlashCommand {
+                 | SlashCommand::Raw
+                 | SlashCommand::Cd
+                 | SlashCommand::Pwd
++                | SlashCommand::Thinking
+                 | SlashCommand::Usage
+                 | SlashCommand::Pets
+                 | SlashCommand::Side
+@@ -194,6 +197,7 @@ impl SlashCommand {
+                 | SlashCommand::Agents
+                 | SlashCommand::Export
+                 | SlashCommand::Raw
++                | SlashCommand::Thinking
+                 | SlashCommand::Diff
+                 | SlashCommand::Mention
+                 | SlashCommand::Status
+@@ -235,6 +239,7 @@ impl SlashCommand {
+             | SlashCommand::Permissions
+             | SlashCommand::Copy
+             | SlashCommand::Raw
++            | SlashCommand::Thinking
+             | SlashCommand::Rename
+             | SlashCommand::Mention
+             | SlashCommand::Skills
+@@ -317,6 +322,9 @@ mod tests {
+         assert!(SlashCommand::Raw.available_during_task());
+         assert!(SlashCommand::Raw.available_in_side_conversation());
+         assert!(SlashCommand::Raw.supports_inline_args());
++        assert!(SlashCommand::Thinking.available_during_task());
++        assert!(SlashCommand::Thinking.available_in_side_conversation());
++        assert!(SlashCommand::Thinking.supports_inline_args());
+         assert!(SlashCommand::App.available_during_task());
+     }
+ 

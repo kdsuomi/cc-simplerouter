@@ -1,0 +1,2275 @@
+From fd54ed1e0e7238ecd0a2e9560346c1ec9eb46af4 Mon Sep 17 00:00:00 2001
+From: SimpleRouter <simplerouter@local>
+Date: Fri, 7 Aug 2026 00:00:04 -0400
+Subject: [PATCH 4/7] feat(tui): improve live generation rate accuracy
+
+---
+ .../schema/json/ServerNotification.json       |  80 +++
+ .../codex_app_server_protocol.schemas.json    |  82 +++
+ .../codex_app_server_protocol.v2.schemas.json |  82 +++
+ .../RawResponseOutputDeltaNotification.json   |  39 ++
+ .../v2/RawResponseStoppedNotification.json    |  24 +
+ .../schema/typescript/ServerNotification.ts   |   3 +-
+ .../typescript/ServerNotificationEnvelope.ts  |   3 +-
+ .../v2/RawResponseOutputDeltaNotification.ts  |   9 +
+ .../typescript/v2/RawResponseOutputKind.ts    |   8 +
+ .../v2/RawResponseStoppedNotification.ts      |  18 +-
+ .../schema/typescript/v2/index.ts             |   2 +
+ .../src/protocol/common.rs                    |   2 +
+ .../src/protocol/v2/thread.rs                 |  39 ++
+ .../app-server/src/bespoke_event_handling.rs  |  34 ++
+ .../request_processors/thread_lifecycle.rs    |   1 +
+ .../app-server/tests/suite/v2/turn_start.rs   |  30 ++
+ codex-rs/core/src/session/turn.rs             |  82 ++-
+ codex-rs/core/src/session/turn_tests.rs       | 105 ++--
+ codex-rs/mcp-server/src/codex_tool_runner.rs  |   1 +
+ codex-rs/protocol/src/protocol.rs             |  35 ++
+ codex-rs/rollout-trace/src/protocol_event.rs  |   2 +
+ codex-rs/rollout/src/policy.rs                |   1 +
+ .../tui/src/app/app_server_event_targets.rs   |   3 +
+ codex-rs/tui/src/chatwidget.rs                |   4 +-
+ .../tui/src/chatwidget/generation_rate.rs     | 486 +++++++++++++++---
+ .../src/chatwidget/generation_rate_tests.rs   | 237 ++++++---
+ codex-rs/tui/src/chatwidget/protocol.rs       |  20 +-
+ ...completed_turn_generation_rate_suffix.snap |   2 +-
+ .../src/chatwidget/tests/generation_rate.rs   |  26 +-
+ 29 files changed, 1235 insertions(+), 225 deletions(-)
+ create mode 100644 codex-rs/app-server-protocol/schema/json/v2/RawResponseOutputDeltaNotification.json
+ create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/RawResponseOutputDeltaNotification.ts
+ create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/RawResponseOutputKind.ts
+
+diff --git a/codex-rs/app-server-protocol/schema/json/ServerNotification.json b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
+index d578604f..ef30d976 100644
+--- a/codex-rs/app-server-protocol/schema/json/ServerNotification.json
++++ b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
+@@ -3491,6 +3491,41 @@
+       ],
+       "type": "object"
+     },
++    "RawResponseOutputDeltaNotification": {
++      "description": "Internal-only character-count progress for one output-bearing stream event.",
++      "properties": {
++        "chars": {
++          "format": "int64",
++          "type": "integer"
++        },
++        "outputKind": {
++          "$ref": "#/definitions/RawResponseOutputKind"
++        },
++        "threadId": {
++          "type": "string"
++        },
++        "turnId": {
++          "type": "string"
++        }
++      },
++      "required": [
++        "chars",
++        "outputKind",
++        "threadId",
++        "turnId"
++      ],
++      "type": "object"
++    },
++    "RawResponseOutputKind": {
++      "description": "Category of output represented by a raw response progress notification.",
++      "enum": [
++        "text",
++        "toolArguments",
++        "reasoningSummary",
++        "reasoningText"
++      ],
++      "type": "string"
++    },
+     "RawResponseStartedNotification": {
+       "description": "Internal-only notification emitted immediately before a model sampling request. The duration contains completed active API time from earlier requests in the same turn.",
+       "properties": {
+@@ -3533,6 +3568,30 @@
+           "format": "int64",
+           "type": "integer"
+         },
++        "streamedReasoningSummaryChars": {
++          "default": 0,
++          "description": "Reasoning-summary characters.",
++          "format": "int64",
++          "type": "integer"
++        },
++        "streamedReasoningTextChars": {
++          "default": 0,
++          "description": "Raw reasoning-text characters.",
++          "format": "int64",
++          "type": "integer"
++        },
++        "streamedTextChars": {
++          "default": 0,
++          "description": "Assistant-message and plan output characters.",
++          "format": "int64",
++          "type": "integer"
++        },
++        "streamedToolArgumentChars": {
++          "default": 0,
++          "description": "Tool-call input/argument characters.",
++          "format": "int64",
++          "type": "integer"
++        },
+         "threadId": {
+           "type": "string"
+         },
+@@ -7382,6 +7441,27 @@
+       "title": "RawResponse/startedNotification",
+       "type": "object"
+     },
++    {
++      "description": "This event is internal-only. Used by clients that measure live model output.",
++      "properties": {
++        "method": {
++          "enum": [
++            "rawResponse/outputDelta"
++          ],
++          "title": "RawResponse/outputDeltaNotificationMethod",
++          "type": "string"
++        },
++        "params": {
++          "$ref": "#/definitions/RawResponseOutputDeltaNotification"
++        }
++      },
++      "required": [
++        "method",
++        "params"
++      ],
++      "title": "RawResponse/outputDeltaNotification",
++      "type": "object"
++    },
+     {
+       "description": "This event is internal-only. Used by clients that need active model sampling time.",
+       "properties": {
+diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
+index f68aa290..9a52b4eb 100644
+--- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
++++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
+@@ -5092,6 +5092,27 @@
+           "title": "RawResponse/startedNotification",
+           "type": "object"
+         },
++        {
++          "description": "This event is internal-only. Used by clients that measure live model output.",
++          "properties": {
++            "method": {
++              "enum": [
++                "rawResponse/outputDelta"
++              ],
++              "title": "RawResponse/outputDeltaNotificationMethod",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/definitions/v2/RawResponseOutputDeltaNotification"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "title": "RawResponse/outputDeltaNotification",
++          "type": "object"
++        },
+         {
+           "description": "This event is internal-only. Used by clients that need active model sampling time.",
+           "properties": {
+@@ -17611,6 +17632,43 @@
+         "title": "RawResponseItemCompletedNotification",
+         "type": "object"
+       },
++      "RawResponseOutputDeltaNotification": {
++        "$schema": "http://json-schema.org/draft-07/schema#",
++        "description": "Internal-only character-count progress for one output-bearing stream event.",
++        "properties": {
++          "chars": {
++            "format": "int64",
++            "type": "integer"
++          },
++          "outputKind": {
++            "$ref": "#/definitions/v2/RawResponseOutputKind"
++          },
++          "threadId": {
++            "type": "string"
++          },
++          "turnId": {
++            "type": "string"
++          }
++        },
++        "required": [
++          "chars",
++          "outputKind",
++          "threadId",
++          "turnId"
++        ],
++        "title": "RawResponseOutputDeltaNotification",
++        "type": "object"
++      },
++      "RawResponseOutputKind": {
++        "description": "Category of output represented by a raw response progress notification.",
++        "enum": [
++          "text",
++          "toolArguments",
++          "reasoningSummary",
++          "reasoningText"
++        ],
++        "type": "string"
++      },
+       "RawResponseStartedNotification": {
+         "$schema": "http://json-schema.org/draft-07/schema#",
+         "description": "Internal-only notification emitted immediately before a model sampling request. The duration contains completed active API time from earlier requests in the same turn.",
+@@ -17656,6 +17714,30 @@
+             "format": "int64",
+             "type": "integer"
+           },
++          "streamedReasoningSummaryChars": {
++            "default": 0,
++            "description": "Reasoning-summary characters.",
++            "format": "int64",
++            "type": "integer"
++          },
++          "streamedReasoningTextChars": {
++            "default": 0,
++            "description": "Raw reasoning-text characters.",
++            "format": "int64",
++            "type": "integer"
++          },
++          "streamedTextChars": {
++            "default": 0,
++            "description": "Assistant-message and plan output characters.",
++            "format": "int64",
++            "type": "integer"
++          },
++          "streamedToolArgumentChars": {
++            "default": 0,
++            "description": "Tool-call input/argument characters.",
++            "format": "int64",
++            "type": "integer"
++          },
+           "threadId": {
+             "type": "string"
+           },
+diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
+index 0abd6648..1707b546 100644
+--- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
++++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
+@@ -13641,6 +13641,43 @@
+       "title": "RawResponseItemCompletedNotification",
+       "type": "object"
+     },
++    "RawResponseOutputDeltaNotification": {
++      "$schema": "http://json-schema.org/draft-07/schema#",
++      "description": "Internal-only character-count progress for one output-bearing stream event.",
++      "properties": {
++        "chars": {
++          "format": "int64",
++          "type": "integer"
++        },
++        "outputKind": {
++          "$ref": "#/definitions/RawResponseOutputKind"
++        },
++        "threadId": {
++          "type": "string"
++        },
++        "turnId": {
++          "type": "string"
++        }
++      },
++      "required": [
++        "chars",
++        "outputKind",
++        "threadId",
++        "turnId"
++      ],
++      "title": "RawResponseOutputDeltaNotification",
++      "type": "object"
++    },
++    "RawResponseOutputKind": {
++      "description": "Category of output represented by a raw response progress notification.",
++      "enum": [
++        "text",
++        "toolArguments",
++        "reasoningSummary",
++        "reasoningText"
++      ],
++      "type": "string"
++    },
+     "RawResponseStartedNotification": {
+       "$schema": "http://json-schema.org/draft-07/schema#",
+       "description": "Internal-only notification emitted immediately before a model sampling request. The duration contains completed active API time from earlier requests in the same turn.",
+@@ -13686,6 +13723,30 @@
+           "format": "int64",
+           "type": "integer"
+         },
++        "streamedReasoningSummaryChars": {
++          "default": 0,
++          "description": "Reasoning-summary characters.",
++          "format": "int64",
++          "type": "integer"
++        },
++        "streamedReasoningTextChars": {
++          "default": 0,
++          "description": "Raw reasoning-text characters.",
++          "format": "int64",
++          "type": "integer"
++        },
++        "streamedTextChars": {
++          "default": 0,
++          "description": "Assistant-message and plan output characters.",
++          "format": "int64",
++          "type": "integer"
++        },
++        "streamedToolArgumentChars": {
++          "default": 0,
++          "description": "Tool-call input/argument characters.",
++          "format": "int64",
++          "type": "integer"
++        },
+         "threadId": {
+           "type": "string"
+         },
+@@ -16165,6 +16226,27 @@
+           "title": "RawResponse/startedNotification",
+           "type": "object"
+         },
++        {
++          "description": "This event is internal-only. Used by clients that measure live model output.",
++          "properties": {
++            "method": {
++              "enum": [
++                "rawResponse/outputDelta"
++              ],
++              "title": "RawResponse/outputDeltaNotificationMethod",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/definitions/RawResponseOutputDeltaNotification"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "title": "RawResponse/outputDeltaNotification",
++          "type": "object"
++        },
+         {
+           "description": "This event is internal-only. Used by clients that need active model sampling time.",
+           "properties": {
+diff --git a/codex-rs/app-server-protocol/schema/json/v2/RawResponseOutputDeltaNotification.json b/codex-rs/app-server-protocol/schema/json/v2/RawResponseOutputDeltaNotification.json
+new file mode 100644
+index 00000000..93f0c49e
+--- /dev/null
++++ b/codex-rs/app-server-protocol/schema/json/v2/RawResponseOutputDeltaNotification.json
+@@ -0,0 +1,39 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "definitions": {
++    "RawResponseOutputKind": {
++      "description": "Category of output represented by a raw response progress notification.",
++      "enum": [
++        "text",
++        "toolArguments",
++        "reasoningSummary",
++        "reasoningText"
++      ],
++      "type": "string"
++    }
++  },
++  "description": "Internal-only character-count progress for one output-bearing stream event.",
++  "properties": {
++    "chars": {
++      "format": "int64",
++      "type": "integer"
++    },
++    "outputKind": {
++      "$ref": "#/definitions/RawResponseOutputKind"
++    },
++    "threadId": {
++      "type": "string"
++    },
++    "turnId": {
++      "type": "string"
++    }
++  },
++  "required": [
++    "chars",
++    "outputKind",
++    "threadId",
++    "turnId"
++  ],
++  "title": "RawResponseOutputDeltaNotification",
++  "type": "object"
++}
+\ No newline at end of file
+diff --git a/codex-rs/app-server-protocol/schema/json/v2/RawResponseStoppedNotification.json b/codex-rs/app-server-protocol/schema/json/v2/RawResponseStoppedNotification.json
+index 3af45160..8b88b438 100644
+--- a/codex-rs/app-server-protocol/schema/json/v2/RawResponseStoppedNotification.json
++++ b/codex-rs/app-server-protocol/schema/json/v2/RawResponseStoppedNotification.json
+@@ -20,6 +20,30 @@
+       "format": "int64",
+       "type": "integer"
+     },
++    "streamedReasoningSummaryChars": {
++      "default": 0,
++      "description": "Reasoning-summary characters.",
++      "format": "int64",
++      "type": "integer"
++    },
++    "streamedReasoningTextChars": {
++      "default": 0,
++      "description": "Raw reasoning-text characters.",
++      "format": "int64",
++      "type": "integer"
++    },
++    "streamedTextChars": {
++      "default": 0,
++      "description": "Assistant-message and plan output characters.",
++      "format": "int64",
++      "type": "integer"
++    },
++    "streamedToolArgumentChars": {
++      "default": 0,
++      "description": "Tool-call input/argument characters.",
++      "format": "int64",
++      "type": "integer"
++    },
+     "threadId": {
+       "type": "string"
+     },
+diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
+index 355883b9..ddbbf38e 100644
+--- a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
++++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
+@@ -41,6 +41,7 @@ import type { ProcessOutputDeltaNotification } from "./v2/ProcessOutputDeltaNoti
+ import type { ProjectChangedNotification } from "./v2/ProjectChangedNotification";
+ import type { RawResponseCompletedNotification } from "./v2/RawResponseCompletedNotification";
+ import type { RawResponseItemCompletedNotification } from "./v2/RawResponseItemCompletedNotification";
++import type { RawResponseOutputDeltaNotification } from "./v2/RawResponseOutputDeltaNotification";
+ import type { RawResponseStartedNotification } from "./v2/RawResponseStartedNotification";
+ import type { RawResponseStoppedNotification } from "./v2/RawResponseStoppedNotification";
+ import type { ReasoningSummaryPartAddedNotification } from "./v2/ReasoningSummaryPartAddedNotification";
+@@ -88,4 +89,4 @@ import type { WindowsWorldWritableWarningNotification } from "./v2/WindowsWorldW
+ /**
+  * Notification sent from the server to the client.
+  */
+-export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/started", "params": RawResponseStartedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "rawResponse/stopped", "params": RawResponseStoppedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "modelProvider/authRecoveryStarted", "params": AuthRecoveryNotification } | { "method": "modelProvider/authRecoveryCompleted", "params": AuthRecoveryNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
++export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/started", "params": RawResponseStartedNotification } | { "method": "rawResponse/outputDelta", "params": RawResponseOutputDeltaNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "rawResponse/stopped", "params": RawResponseStoppedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "modelProvider/authRecoveryStarted", "params": AuthRecoveryNotification } | { "method": "modelProvider/authRecoveryCompleted", "params": AuthRecoveryNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
+diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
+index 63a864e0..0399e0dd 100644
+--- a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
++++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
+@@ -41,6 +41,7 @@ import type { ProcessOutputDeltaNotification } from "./v2/ProcessOutputDeltaNoti
+ import type { ProjectChangedNotification } from "./v2/ProjectChangedNotification";
+ import type { RawResponseCompletedNotification } from "./v2/RawResponseCompletedNotification";
+ import type { RawResponseItemCompletedNotification } from "./v2/RawResponseItemCompletedNotification";
++import type { RawResponseOutputDeltaNotification } from "./v2/RawResponseOutputDeltaNotification";
+ import type { RawResponseStartedNotification } from "./v2/RawResponseStartedNotification";
+ import type { RawResponseStoppedNotification } from "./v2/RawResponseStoppedNotification";
+ import type { ReasoningSummaryPartAddedNotification } from "./v2/ReasoningSummaryPartAddedNotification";
+@@ -98,4 +99,4 @@ export type ServerNotificationEnvelope = {
+  * Optional so clients can decode notifications from older app-server
+  * versions. Current app-server versions always populate it.
+  */
+-emittedAtMs?: number, } & ({ "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/started", "params": RawResponseStartedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "rawResponse/stopped", "params": RawResponseStoppedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "modelProvider/authRecoveryStarted", "params": AuthRecoveryNotification } | { "method": "modelProvider/authRecoveryCompleted", "params": AuthRecoveryNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification });
++emittedAtMs?: number, } & ({ "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/started", "params": RawResponseStartedNotification } | { "method": "rawResponse/outputDelta", "params": RawResponseOutputDeltaNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "rawResponse/stopped", "params": RawResponseStoppedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "modelProvider/authRecoveryStarted", "params": AuthRecoveryNotification } | { "method": "modelProvider/authRecoveryCompleted", "params": AuthRecoveryNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification });
+diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseOutputDeltaNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseOutputDeltaNotification.ts
+new file mode 100644
+index 00000000..ebe11de9
+--- /dev/null
++++ b/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseOutputDeltaNotification.ts
+@@ -0,0 +1,9 @@
++// GENERATED CODE! DO NOT MODIFY BY HAND!
++
++// This file was generated by [ts-rs](https://github.com/Aleph-Alpha/ts-rs). Do not edit this file manually.
++import type { RawResponseOutputKind } from "./RawResponseOutputKind";
++
++/**
++ * Internal-only character-count progress for one output-bearing stream event.
++ */
++export type RawResponseOutputDeltaNotification = { threadId: string, turnId: string, outputKind: RawResponseOutputKind, chars: number, };
+diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseOutputKind.ts b/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseOutputKind.ts
+new file mode 100644
+index 00000000..39a557e6
+--- /dev/null
++++ b/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseOutputKind.ts
+@@ -0,0 +1,8 @@
++// GENERATED CODE! DO NOT MODIFY BY HAND!
++
++// This file was generated by [ts-rs](https://github.com/Aleph-Alpha/ts-rs). Do not edit this file manually.
++
++/**
++ * Category of output represented by a raw response progress notification.
++ */
++export type RawResponseOutputKind = "text" | "toolArguments" | "reasoningSummary" | "reasoningText";
+diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStoppedNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStoppedNotification.ts
+index f34c5eee..e6001a40 100644
+--- a/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStoppedNotification.ts
++++ b/codex-rs/app-server-protocol/schema/typescript/v2/RawResponseStoppedNotification.ts
+@@ -13,4 +13,20 @@ generationDurationMs: number | null,
+ /**
+  * Output characters observed at the raw response layer.
+  */
+-streamedOutputChars: number, };
++streamedOutputChars: number,
++/**
++ * Assistant-message and plan output characters.
++ */
++streamedTextChars: number,
++/**
++ * Tool-call input/argument characters.
++ */
++streamedToolArgumentChars: number,
++/**
++ * Reasoning-summary characters.
++ */
++streamedReasoningSummaryChars: number,
++/**
++ * Raw reasoning-text characters.
++ */
++streamedReasoningTextChars: number, };
+diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
+index 16d05ef1..f1497e99 100644
+--- a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
++++ b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
+@@ -405,6 +405,8 @@ export type { RateLimitSnapshot } from "./RateLimitSnapshot";
+ export type { RateLimitWindow } from "./RateLimitWindow";
+ export type { RawResponseCompletedNotification } from "./RawResponseCompletedNotification";
+ export type { RawResponseItemCompletedNotification } from "./RawResponseItemCompletedNotification";
++export type { RawResponseOutputDeltaNotification } from "./RawResponseOutputDeltaNotification";
++export type { RawResponseOutputKind } from "./RawResponseOutputKind";
+ export type { RawResponseStartedNotification } from "./RawResponseStartedNotification";
+ export type { RawResponseStoppedNotification } from "./RawResponseStoppedNotification";
+ export type { ReasoningEffortOption } from "./ReasoningEffortOption";
+diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
+index 9e36db64..ebdeaad8 100644
+--- a/codex-rs/app-server-protocol/src/protocol/common.rs
++++ b/codex-rs/app-server-protocol/src/protocol/common.rs
+@@ -1881,6 +1881,8 @@ server_notification_definitions! {
+     RawResponseItemCompleted => "rawResponseItem/completed" (v2::RawResponseItemCompletedNotification),
+     /// This event is internal-only. Used by clients that need active model sampling time.
+     RawResponseStarted => "rawResponse/started" (v2::RawResponseStartedNotification),
++    /// This event is internal-only. Used by clients that measure live model output.
++    RawResponseOutputDelta => "rawResponse/outputDelta" (v2::RawResponseOutputDeltaNotification),
+     /// This event is internal-only. Used by clients that need exact upstream usage.
+     RawResponseCompleted => "rawResponse/completed" (v2::RawResponseCompletedNotification),
+     /// This event is internal-only. Used by clients that need active model sampling time.
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
+index ec0fe39a..92d34bac 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
+@@ -1860,6 +1860,29 @@ pub struct RawResponseStartedNotification {
+     pub active_api_duration_ms: i64,
+ }
+ 
++/// Category of output represented by a raw response progress notification.
++#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(rename_all = "camelCase", export_to = "v2/")]
++pub enum RawResponseOutputKind {
++    Text,
++    ToolArguments,
++    ReasoningSummary,
++    ReasoningText,
++}
++
++/// Internal-only character-count progress for one output-bearing stream event.
++#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(export_to = "v2/")]
++pub struct RawResponseOutputDeltaNotification {
++    pub thread_id: String,
++    pub turn_id: String,
++    pub output_kind: RawResponseOutputKind,
++    #[ts(type = "number")]
++    pub chars: i64,
++}
++
+ /// Internal-only notification containing the exact usage from one upstream
+ /// Responses API completion.
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+@@ -1907,6 +1930,22 @@ pub struct RawResponseStoppedNotification {
+     #[serde(default)]
+     #[ts(type = "number")]
+     pub streamed_output_chars: i64,
++    /// Assistant-message and plan output characters.
++    #[serde(default)]
++    #[ts(type = "number")]
++    pub streamed_text_chars: i64,
++    /// Tool-call input/argument characters.
++    #[serde(default)]
++    #[ts(type = "number")]
++    pub streamed_tool_argument_chars: i64,
++    /// Reasoning-summary characters.
++    #[serde(default)]
++    #[ts(type = "number")]
++    pub streamed_reasoning_summary_chars: i64,
++    /// Raw reasoning-text characters.
++    #[serde(default)]
++    #[ts(type = "number")]
++    pub streamed_reasoning_text_chars: i64,
+ }
+ 
+ #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
+index 343ca0c6..b0dab9e9 100644
+--- a/codex-rs/app-server/src/bespoke_event_handling.rs
++++ b/codex-rs/app-server/src/bespoke_event_handling.rs
+@@ -53,6 +53,8 @@ use codex_app_server_protocol::PermissionsRequestApprovalParams;
+ use codex_app_server_protocol::PermissionsRequestApprovalResponse;
+ use codex_app_server_protocol::RawResponseCompletedNotification;
+ use codex_app_server_protocol::RawResponseItemCompletedNotification;
++use codex_app_server_protocol::RawResponseOutputDeltaNotification;
++use codex_app_server_protocol::RawResponseOutputKind;
+ use codex_app_server_protocol::RawResponseStartedNotification;
+ use codex_app_server_protocol::RawResponseStoppedNotification;
+ use codex_app_server_protocol::RequestId;
+@@ -1194,6 +1196,31 @@ pub(crate) async fn apply_bespoke_event_handling(
+                 .send_server_notification(ServerNotification::RawResponseStarted(notification))
+                 .await;
+         }
++        EventMsg::RawResponseOutputDelta(raw_response_output_delta_event) => {
++            let output_kind = match raw_response_output_delta_event.output_kind {
++                codex_protocol::protocol::RawResponseOutputKind::Text => {
++                    RawResponseOutputKind::Text
++                }
++                codex_protocol::protocol::RawResponseOutputKind::ToolArguments => {
++                    RawResponseOutputKind::ToolArguments
++                }
++                codex_protocol::protocol::RawResponseOutputKind::ReasoningSummary => {
++                    RawResponseOutputKind::ReasoningSummary
++                }
++                codex_protocol::protocol::RawResponseOutputKind::ReasoningText => {
++                    RawResponseOutputKind::ReasoningText
++                }
++            };
++            let notification = RawResponseOutputDeltaNotification {
++                thread_id: conversation_id.to_string(),
++                turn_id: event_turn_id,
++                output_kind,
++                chars: raw_response_output_delta_event.chars,
++            };
++            outgoing
++                .send_server_notification(ServerNotification::RawResponseOutputDelta(notification))
++                .await;
++        }
+         EventMsg::RawResponseCompleted(raw_response_completed_event) => {
+             let notification = RawResponseCompletedNotification {
+                 thread_id: conversation_id.to_string(),
+@@ -1213,6 +1240,13 @@ pub(crate) async fn apply_bespoke_event_handling(
+                 active_api_duration_ms: raw_response_stopped_event.active_api_duration_ms,
+                 generation_duration_ms: raw_response_stopped_event.generation_duration_ms,
+                 streamed_output_chars: raw_response_stopped_event.streamed_output_chars,
++                streamed_text_chars: raw_response_stopped_event.streamed_text_chars,
++                streamed_tool_argument_chars: raw_response_stopped_event
++                    .streamed_tool_argument_chars,
++                streamed_reasoning_summary_chars: raw_response_stopped_event
++                    .streamed_reasoning_summary_chars,
++                streamed_reasoning_text_chars: raw_response_stopped_event
++                    .streamed_reasoning_text_chars,
+             };
+             outgoing
+                 .send_server_notification(ServerNotification::RawResponseStopped(notification))
+diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
+index 1224a18c..1fcc1e63 100644
+--- a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
++++ b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
+@@ -334,6 +334,7 @@ pub(super) async fn ensure_listener_task_running(
+                         &event.msg,
+                         EventMsg::RawResponseItem(_)
+                             | EventMsg::RawResponseStarted(_)
++                            | EventMsg::RawResponseOutputDelta(_)
+                             | EventMsg::RawResponseCompleted(_)
+                             | EventMsg::RawResponseStopped(_)
+                     ) && !raw_events_enabled
+diff --git a/codex-rs/app-server/tests/suite/v2/turn_start.rs b/codex-rs/app-server/tests/suite/v2/turn_start.rs
+index 37c0ddaf..dd56abbe 100644
+--- a/codex-rs/app-server/tests/suite/v2/turn_start.rs
++++ b/codex-rs/app-server/tests/suite/v2/turn_start.rs
+@@ -37,6 +37,8 @@ use codex_app_server_protocol::JSONRPCMessage;
+ use codex_app_server_protocol::PatchApplyStatus;
+ use codex_app_server_protocol::PatchChangeKind;
+ use codex_app_server_protocol::RawResponseCompletedNotification;
++use codex_app_server_protocol::RawResponseOutputDeltaNotification;
++use codex_app_server_protocol::RawResponseOutputKind;
+ use codex_app_server_protocol::RawResponseStartedNotification;
+ use codex_app_server_protocol::RequestId;
+ use codex_app_server_protocol::ServerRequest;
+@@ -950,6 +952,8 @@ async fn turn_start_emits_raw_response_lifecycle_with_upstream_usage(
+     });
+     let body = responses::sse(vec![
+         responses::ev_response_created("resp-1"),
++        responses::ev_message_item_added("msg-1", ""),
++        responses::ev_output_text_delta("Done"),
+         responses::ev_assistant_message("msg-1", "Done"),
+         completed,
+     ]);
+@@ -1003,6 +1007,27 @@ async fn turn_start_emits_raw_response_lifecycle_with_upstream_usage(
+         }
+     );
+ 
++    let output_delta = timeout(
++        DEFAULT_READ_TIMEOUT,
++        mcp.read_stream_until_notification_message("rawResponse/outputDelta"),
++    )
++    .await??;
++    let output_delta: codex_app_server_protocol::ServerNotification = output_delta.try_into()?;
++    let codex_app_server_protocol::ServerNotification::RawResponseOutputDelta(output_delta) =
++        output_delta
++    else {
++        anyhow::bail!("expected rawResponse/outputDelta notification");
++    };
++    assert_eq!(
++        output_delta,
++        RawResponseOutputDeltaNotification {
++            thread_id: thread.id.clone(),
++            turn_id: turn.id.clone(),
++            output_kind: RawResponseOutputKind::Text,
++            chars: 4,
++        }
++    );
++
+     let notification = timeout(
+         DEFAULT_READ_TIMEOUT,
+         mcp.read_stream_until_notification_message("rawResponse/completed"),
+@@ -1052,6 +1077,11 @@ async fn turn_start_emits_raw_response_lifecycle_with_upstream_usage(
+     assert_eq!(stopped.thread_id, thread.id);
+     assert_eq!(stopped.turn_id, turn.id);
+     assert!(stopped.active_api_duration_ms >= started.active_api_duration_ms);
++    assert_eq!(stopped.streamed_output_chars, 4);
++    assert_eq!(stopped.streamed_text_chars, 4);
++    assert_eq!(stopped.streamed_tool_argument_chars, 0);
++    assert_eq!(stopped.streamed_reasoning_summary_chars, 0);
++    assert_eq!(stopped.streamed_reasoning_text_chars, 0);
+ 
+     response_mock.single_request();
+     Ok(())
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 43ebe00e..368796fd 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -101,6 +101,8 @@ use codex_protocol::protocol::ErrorEvent;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::InternalSessionSource;
+ use codex_protocol::protocol::PlanDeltaEvent;
++use codex_protocol::protocol::RawResponseOutputDeltaEvent;
++use codex_protocol::protocol::RawResponseOutputKind;
+ use codex_protocol::protocol::RawResponseStartedEvent;
+ use codex_protocol::protocol::RawResponseStoppedEvent;
+ use codex_protocol::protocol::ReasoningContentDeltaEvent;
+@@ -1887,6 +1889,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
+         | EventMsg::ExitedReviewMode(_)
+         | EventMsg::RawResponseItem(_)
+         | EventMsg::RawResponseStarted(_)
++        | EventMsg::RawResponseOutputDelta(_)
+         | EventMsg::RawResponseCompleted(_)
+         | EventMsg::RawResponseStopped(_)
+         | EventMsg::ItemStarted(_)
+@@ -2235,28 +2238,48 @@ struct ResponseGenerationMetrics {
+     first_output_at: Option<Instant>,
+     last_output_at: Option<Instant>,
+     streamed_output_chars: u64,
++    streamed_text_chars: u64,
++    streamed_tool_argument_chars: u64,
++    streamed_reasoning_summary_chars: u64,
++    streamed_reasoning_text_chars: u64,
+ }
+ 
+ impl ResponseGenerationMetrics {
+-    fn observe(&mut self, event: &ResponseEvent, uses_sequential_reasoning_summaries: bool) {
+-        let output_chars = match event {
+-            ResponseEvent::OutputTextDelta(delta)
+-            | ResponseEvent::ToolCallInputDelta { delta, .. }
+-            | ResponseEvent::ReasoningContentDelta { delta, .. } => delta.chars().count(),
++    fn observe(
++        &mut self,
++        event: &ResponseEvent,
++        uses_sequential_reasoning_summaries: bool,
++    ) -> Option<RawResponseOutputDeltaEvent> {
++        let (output_kind, output_chars) = match event {
++            ResponseEvent::OutputTextDelta(delta) => {
++                (RawResponseOutputKind::Text, delta.chars().count())
++            }
++            ResponseEvent::ToolCallInputDelta { delta, .. } => {
++                (RawResponseOutputKind::ToolArguments, delta.chars().count())
++            }
++            ResponseEvent::ReasoningContentDelta { delta, .. } => {
++                (RawResponseOutputKind::ReasoningText, delta.chars().count())
++            }
+             ResponseEvent::ReasoningSummaryDelta { delta, .. }
+                 if !uses_sequential_reasoning_summaries =>
+             {
+-                delta.chars().count()
++                (
++                    RawResponseOutputKind::ReasoningSummary,
++                    delta.chars().count(),
++                )
+             }
+             ResponseEvent::ReasoningSummaryDone { text, .. }
+                 if uses_sequential_reasoning_summaries =>
+             {
+-                text.chars().count()
++                (
++                    RawResponseOutputKind::ReasoningSummary,
++                    text.chars().count(),
++                )
+             }
+-            _ => 0,
++            _ => return None,
+         };
+         if output_chars == 0 {
+-            return;
++            return None;
+         }
+         let now = Instant::now();
+         self.first_output_at.get_or_insert(now);
+@@ -2264,6 +2287,17 @@ impl ResponseGenerationMetrics {
+         self.streamed_output_chars = self
+             .streamed_output_chars
+             .saturating_add(output_chars as u64);
++        let category_total = match output_kind {
++            RawResponseOutputKind::Text => &mut self.streamed_text_chars,
++            RawResponseOutputKind::ToolArguments => &mut self.streamed_tool_argument_chars,
++            RawResponseOutputKind::ReasoningSummary => &mut self.streamed_reasoning_summary_chars,
++            RawResponseOutputKind::ReasoningText => &mut self.streamed_reasoning_text_chars,
++        };
++        *category_total = category_total.saturating_add(output_chars as u64);
++        Some(RawResponseOutputDeltaEvent {
++            output_kind,
++            chars: i64::try_from(output_chars).unwrap_or(i64::MAX),
++        })
+     }
+ 
+     fn generation_duration_ms(&self) -> Option<i64> {
+@@ -2279,6 +2313,22 @@ impl ResponseGenerationMetrics {
+     fn streamed_output_chars(&self) -> i64 {
+         i64::try_from(self.streamed_output_chars).unwrap_or(i64::MAX)
+     }
++
++    fn streamed_text_chars(&self) -> i64 {
++        i64::try_from(self.streamed_text_chars).unwrap_or(i64::MAX)
++    }
++
++    fn streamed_tool_argument_chars(&self) -> i64 {
++        i64::try_from(self.streamed_tool_argument_chars).unwrap_or(i64::MAX)
++    }
++
++    fn streamed_reasoning_summary_chars(&self) -> i64 {
++        i64::try_from(self.streamed_reasoning_summary_chars).unwrap_or(i64::MAX)
++    }
++
++    fn streamed_reasoning_text_chars(&self) -> i64 {
++        i64::try_from(self.streamed_reasoning_text_chars).unwrap_or(i64::MAX)
++    }
+ }
+ 
+ #[allow(clippy::too_many_arguments)]
+@@ -2414,7 +2464,15 @@ async fn try_run_sampling_request(
+             }
+         };
+ 
+-        generation_metrics.observe(&event, uses_sequential_cutoff_reasoning_summaries);
++        if let Some(output_delta) =
++            generation_metrics.observe(&event, uses_sequential_cutoff_reasoning_summaries)
++        {
++            sess.send_event(
++                &turn_context,
++                EventMsg::RawResponseOutputDelta(output_delta),
++            )
++            .await;
++        }
+ 
+         sess.services
+             .session_telemetry
+@@ -2919,6 +2977,10 @@ async fn emit_raw_response_stopped(
+             active_api_duration_ms,
+             generation_duration_ms: generation_metrics.generation_duration_ms(),
+             streamed_output_chars: generation_metrics.streamed_output_chars(),
++            streamed_text_chars: generation_metrics.streamed_text_chars(),
++            streamed_tool_argument_chars: generation_metrics.streamed_tool_argument_chars(),
++            streamed_reasoning_summary_chars: generation_metrics.streamed_reasoning_summary_chars(),
++            streamed_reasoning_text_chars: generation_metrics.streamed_reasoning_text_chars(),
+         }),
+     )
+     .await;
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index 169dd7e2..a620e1b3 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -61,53 +61,84 @@ fn post_sampling_token_estimate_is_disabled_by_always_on_sinks() {
+ #[test]
+ fn generation_metrics_count_text_reasoning_and_tool_arguments() {
+     let mut metrics = ResponseGenerationMetrics::default();
+-    metrics.observe(&ResponseEvent::OutputTextDelta("ab".to_string()), false);
+-    metrics.observe(
+-        &ResponseEvent::ToolCallInputDelta {
+-            item_id: "item".to_string(),
+-            call_id: Some("call".to_string()),
+-            delta: "é".to_string(),
+-        },
+-        false,
+-    );
+-    metrics.observe(
+-        &ResponseEvent::ReasoningSummaryDelta {
+-            delta: "xyz".to_string(),
+-            summary_index: 0,
+-        },
+-        false,
+-    );
+-    metrics.observe(
+-        &ResponseEvent::ReasoningSummaryDone {
+-            item_id: "reasoning".to_string(),
+-            text: "not counted twice".to_string(),
+-            summary_index: 0,
+-        },
+-        false,
++    let text = metrics
++        .observe(&ResponseEvent::OutputTextDelta("ab".to_string()), false)
++        .expect("text delta");
++    let tool = metrics
++        .observe(
++            &ResponseEvent::ToolCallInputDelta {
++                item_id: "item".to_string(),
++                call_id: Some("call".to_string()),
++                delta: "é".to_string(),
++            },
++            false,
++        )
++        .expect("tool argument delta");
++    let reasoning = metrics
++        .observe(
++            &ResponseEvent::ReasoningSummaryDelta {
++                delta: "xyz".to_string(),
++                summary_index: 0,
++            },
++            false,
++        )
++        .expect("reasoning summary delta");
++    assert!(
++        metrics
++            .observe(
++                &ResponseEvent::ReasoningSummaryDone {
++                    item_id: "reasoning".to_string(),
++                    text: "not counted twice".to_string(),
++                    summary_index: 0,
++                },
++                false,
++            )
++            .is_none()
+     );
+ 
++    assert_eq!(text.output_kind, RawResponseOutputKind::Text);
++    assert_eq!(text.chars, 2);
++    assert_eq!(tool.output_kind, RawResponseOutputKind::ToolArguments);
++    assert_eq!(tool.chars, 1);
++    assert_eq!(
++        reasoning.output_kind,
++        RawResponseOutputKind::ReasoningSummary
++    );
++    assert_eq!(reasoning.chars, 3);
+     assert_eq!(metrics.streamed_output_chars(), 6);
++    assert_eq!(metrics.streamed_text_chars(), 2);
++    assert_eq!(metrics.streamed_tool_argument_chars(), 1);
++    assert_eq!(metrics.streamed_reasoning_summary_chars(), 3);
++    assert_eq!(metrics.streamed_reasoning_text_chars(), 0);
+ }
+ 
+ #[test]
+ fn sequential_reasoning_metrics_count_done_instead_of_deltas() {
+     let mut metrics = ResponseGenerationMetrics::default();
+-    metrics.observe(
+-        &ResponseEvent::ReasoningSummaryDelta {
+-            delta: "not counted".to_string(),
+-            summary_index: 0,
+-        },
+-        true,
+-    );
+-    metrics.observe(
+-        &ResponseEvent::ReasoningSummaryDone {
+-            item_id: "reasoning".to_string(),
+-            text: "counted".to_string(),
+-            summary_index: 0,
+-        },
+-        true,
++    assert!(
++        metrics
++            .observe(
++                &ResponseEvent::ReasoningSummaryDelta {
++                    delta: "not counted".to_string(),
++                    summary_index: 0,
++                },
++                true,
++            )
++            .is_none()
+     );
++    let done = metrics
++        .observe(
++            &ResponseEvent::ReasoningSummaryDone {
++                item_id: "reasoning".to_string(),
++                text: "counted".to_string(),
++                summary_index: 0,
++            },
++            true,
++        )
++        .expect("sequential reasoning summary done");
+ 
++    assert_eq!(done.output_kind, RawResponseOutputKind::ReasoningSummary);
++    assert_eq!(done.chars, 7);
+     assert_eq!(metrics.streamed_output_chars(), 7);
+ }
+ 
+diff --git a/codex-rs/mcp-server/src/codex_tool_runner.rs b/codex-rs/mcp-server/src/codex_tool_runner.rs
+index b9057e29..df18ba47 100644
+--- a/codex-rs/mcp-server/src/codex_tool_runner.rs
++++ b/codex-rs/mcp-server/src/codex_tool_runner.rs
+@@ -343,6 +343,7 @@ async fn run_codex_tool_session_inner(
+                     | EventMsg::ViewImageToolCall(_)
+                     | EventMsg::RawResponseItem(_)
+                     | EventMsg::RawResponseStarted(_)
++                    | EventMsg::RawResponseOutputDelta(_)
+                     | EventMsg::RawResponseCompleted(_)
+                     | EventMsg::RawResponseStopped(_)
+                     | EventMsg::EnteredReviewMode(_)
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index ac886f4d..01cfe3ce 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1535,6 +1535,7 @@ pub enum EventMsg {
+ 
+     RawResponseItem(RawResponseItemEvent),
+     RawResponseStarted(RawResponseStartedEvent),
++    RawResponseOutputDelta(RawResponseOutputDeltaEvent),
+     RawResponseCompleted(RawResponseCompletedEvent),
+     RawResponseStopped(RawResponseStoppedEvent),
+ 
+@@ -1925,6 +1926,28 @@ pub struct RawResponseStartedEvent {
+     pub active_api_duration_ms: i64,
+ }
+ 
++/// Category of model output observed while a response is streaming.
++#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "camelCase")]
++#[ts(rename_all = "camelCase")]
++pub enum RawResponseOutputKind {
++    Text,
++    ToolArguments,
++    ReasoningSummary,
++    ReasoningText,
++}
++
++/// Character-count progress for one output-bearing stream event.
++///
++/// This intentionally omits the output contents. It exists so clients can
++/// measure all generated output, including tool-call arguments that do not
++/// otherwise have a generic app-server delta notification.
++#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
++pub struct RawResponseOutputDeltaEvent {
++    pub output_kind: RawResponseOutputKind,
++    pub chars: i64,
++}
++
+ /// Exact usage and metadata reported by one upstream Responses API completion.
+ ///
+ /// Unlike TokenCountEvent, this is not accumulated, estimated, or replayed.
+@@ -1951,6 +1974,18 @@ pub struct RawResponseStoppedEvent {
+     /// is used only when native terminal usage is unavailable.
+     #[serde(default)]
+     pub streamed_output_chars: i64,
++    /// Text characters carried by assistant-message or plan deltas.
++    #[serde(default)]
++    pub streamed_text_chars: i64,
++    /// JSON/input characters carried by tool-call argument deltas.
++    #[serde(default)]
++    pub streamed_tool_argument_chars: i64,
++    /// Characters carried by reasoning-summary deltas.
++    #[serde(default)]
++    pub streamed_reasoning_summary_chars: i64,
++    /// Characters carried by raw reasoning-text deltas.
++    #[serde(default)]
++    pub streamed_reasoning_text_chars: i64,
+ }
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
+index b07ac9f6..eeb975cc 100644
+--- a/codex-rs/rollout-trace/src/protocol_event.rs
++++ b/codex-rs/rollout-trace/src/protocol_event.rs
+@@ -421,6 +421,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
+         | EventMsg::ExitedReviewMode(_)
+         | EventMsg::RawResponseItem(_)
+         | EventMsg::RawResponseStarted(_)
++        | EventMsg::RawResponseOutputDelta(_)
+         | EventMsg::RawResponseCompleted(_)
+         | EventMsg::RawResponseStopped(_)
+         | EventMsg::ItemStarted(_)
+@@ -502,6 +503,7 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
+         | EventMsg::ExitedReviewMode(_)
+         | EventMsg::RawResponseItem(_)
+         | EventMsg::RawResponseStarted(_)
++        | EventMsg::RawResponseOutputDelta(_)
+         | EventMsg::RawResponseCompleted(_)
+         | EventMsg::RawResponseStopped(_)
+         | EventMsg::ItemStarted(_)
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index ff87a6e2..b3e70400 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -163,6 +163,7 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode)
+         | EventMsg::AgentReasoningSectionBreak(_)
+         | EventMsg::RawResponseItem(_)
+         | EventMsg::RawResponseStarted(_)
++        | EventMsg::RawResponseOutputDelta(_)
+         | EventMsg::RawResponseCompleted(_)
+         | EventMsg::RawResponseStopped(_)
+         | EventMsg::SessionConfigured(_)
+diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
+index 7afb3234..d1a7ac64 100644
+--- a/codex-rs/tui/src/app/app_server_event_targets.rs
++++ b/codex-rs/tui/src/app/app_server_event_targets.rs
+@@ -100,6 +100,9 @@ pub(super) fn server_notification_thread_target(
+         ServerNotification::RawResponseStarted(notification) => {
+             Some(notification.thread_id.as_str())
+         }
++        ServerNotification::RawResponseOutputDelta(notification) => {
++            Some(notification.thread_id.as_str())
++        }
+         ServerNotification::RawResponseCompleted(notification) => {
+             Some(notification.thread_id.as_str())
+         }
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 8b1d0d95..769d7cea 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -347,8 +347,8 @@ use self::exec_state::command_execution_command_and_parsed;
+ use self::exec_state::is_standard_tool_call;
+ use self::exec_state::is_unified_exec_source;
+ mod generation_rate;
+-pub(crate) use self::generation_rate::enabled_for_session;
+ use self::generation_rate::GenerationRateTracker;
++pub(crate) use self::generation_rate::enabled_for_session;
+ mod goal_status;
+ use self::goal_status::GoalStatusState;
+ #[cfg(test)]
+@@ -664,7 +664,7 @@ pub(crate) struct ChatWidget {
+     reasoning_summary_parts: Vec<String>,
+     // Controls SimpleRouter's live reasoning preview for the current TUI session.
+     live_reasoning_enabled: bool,
+-    // Tracks SimpleRouter output throughput across active API sampling time.
++    // Tracks SimpleRouter stream and effective API output throughput.
+     generation_rate: GenerationRateTracker,
+     // Tracks whether the active transcript cell is an ephemeral reasoning preview.
+     live_reasoning_active: bool,
+diff --git a/codex-rs/tui/src/chatwidget/generation_rate.rs b/codex-rs/tui/src/chatwidget/generation_rate.rs
+index 95b558d6..62f176a2 100644
+--- a/codex-rs/tui/src/chatwidget/generation_rate.rs
++++ b/codex-rs/tui/src/chatwidget/generation_rate.rs
+@@ -1,51 +1,244 @@
+ //! SimpleRouter generation-rate tracking for the status-line suffix.
+ //!
+-//! Exact native output usage replaces the streaming estimate when a response
+-//! completes. The denominator is cumulative API sampling time, including time
+-//! to first token and stream delivery, while excluding local tools and idle
+-//! time between sampling requests.
++//! The status line deliberately reports two different quantities:
++//!
++//! - `stream` is client-observed generation throughput from the first output
++//!   event to the latest one. It uses one fewer token than the token count
++//!   because N streamed tokens contain N - 1 inter-token intervals.
++//! - `API` is effective throughput across cumulative active API time, including
++//!   time to first output and delivery stalls while excluding local tools and
++//!   between-request orchestration.
++//!
++//! Exact terminal usage replaces live character estimates. Estimated values
++//! are marked with `~` and hidden until a short warm-up has elapsed.
+ 
+ use std::time::Duration;
+ use std::time::Instant;
+ 
++use codex_app_server_protocol::RawResponseOutputKind;
++
+ use super::ChatWidget;
+ use super::live_reasoning::is_simplerouter_provider_id;
+ 
+ const DISABLE_TOKEN_RATE_ENV: &str = "SIMPLEROUTER_DISABLE_TOKEN_RATE";
+ const ENABLE_TOKEN_RATE_ENV: &str = "SIMPLEROUTER_ENABLE_TOKEN_RATE";
+ const DEFAULT_ESTIMATED_CHARS_PER_TOKEN: f64 = 4.0;
++const MIN_ESTIMATED_CHARS_PER_TOKEN: f64 = 1.0;
++const MAX_ESTIMATED_CHARS_PER_TOKEN: f64 = 12.0;
++const CALIBRATION_HISTORY_WEIGHT: f64 = 0.5;
++const MIN_LIVE_ESTIMATED_TOKENS: f64 = 8.0;
++const MIN_LIVE_DURATION: Duration = Duration::from_millis(250);
++
++#[derive(Clone, Copy, Debug)]
++struct DisplayRate {
++    tokens_per_second: f64,
++    estimated: bool,
++}
++
++#[derive(Clone, Copy, Debug)]
++struct DisplayRates {
++    stream: Option<DisplayRate>,
++    api: Option<DisplayRate>,
++}
++
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++struct OutputChars {
++    text: u64,
++    tool_arguments: u64,
++    reasoning_summary: u64,
++    reasoning_text: u64,
++}
++
++impl OutputChars {
++    fn observe(&mut self, output_kind: RawResponseOutputKind, chars: u64) {
++        let category = match output_kind {
++            RawResponseOutputKind::Text => &mut self.text,
++            RawResponseOutputKind::ToolArguments => &mut self.tool_arguments,
++            RawResponseOutputKind::ReasoningSummary => &mut self.reasoning_summary,
++            RawResponseOutputKind::ReasoningText => &mut self.reasoning_text,
++        };
++        *category = category.saturating_add(chars);
++    }
++
++    fn merge_max(&mut self, other: Self) {
++        self.text = self.text.max(other.text);
++        self.tool_arguments = self.tool_arguments.max(other.tool_arguments);
++        self.reasoning_summary = self.reasoning_summary.max(other.reasoning_summary);
++        self.reasoning_text = self.reasoning_text.max(other.reasoning_text);
++    }
++
++    fn total(self) -> u64 {
++        self.text
++            .saturating_add(self.tool_arguments)
++            .saturating_add(self.reasoning_summary)
++            .saturating_add(self.reasoning_text)
++    }
++
++    fn content(self) -> u64 {
++        self.text.saturating_add(self.tool_arguments)
++    }
++
++    fn reasoning_for_estimate(self) -> u64 {
++        // Raw reasoning and its summary can describe the same model work. Raw
++        // text is the better token proxy when both are present; summing both
++        // would double-count that response while it is still streaming.
++        if self.reasoning_text > 0 {
++            self.reasoning_text
++        } else {
++            self.reasoning_summary
++        }
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    fn from_terminal_counts(
++        total: i64,
++        text: i64,
++        tool_arguments: i64,
++        reasoning_summary: i64,
++        reasoning_text: i64,
++    ) -> Option<Self> {
++        let mut counts = Self {
++            text: nonnegative_u64(text),
++            tool_arguments: nonnegative_u64(tool_arguments),
++            reasoning_summary: nonnegative_u64(reasoning_summary),
++            reasoning_text: nonnegative_u64(reasoning_text),
++        };
++        let total = nonnegative_u64(total);
++        let categorized = counts.total();
++        if total > categorized {
++            // Backward-compatible fallback for a stopped notification from a
++            // companion that predates categorized counters.
++            counts.text = counts.text.saturating_add(total - categorized);
++        }
++        (counts.total() > 0).then_some(counts)
++    }
++}
++
++#[derive(Clone, Copy, Debug)]
++struct ExactUsage {
++    output_tokens: f64,
++    reasoning_output_tokens: f64,
++}
++
++impl ExactUsage {
++    fn new(output_tokens: i64, reasoning_output_tokens: i64) -> Self {
++        let output_tokens = output_tokens.max(0) as f64;
++        Self {
++            output_tokens,
++            reasoning_output_tokens: (reasoning_output_tokens.max(0) as f64).min(output_tokens),
++        }
++    }
++}
++
+ #[derive(Debug)]
+ struct ActiveSampling {
+     sampling_started_at: Instant,
+     active_api_duration_at_start: Duration,
+-    observed_output_chars: u64,
+-    exact_output_tokens: Option<f64>,
++    first_output_at: Option<Instant>,
++    last_output_at: Option<Instant>,
++    observed_output_chars: OutputChars,
++    exact_usage: Option<ExactUsage>,
+ }
+ 
+ impl ActiveSampling {
+     fn new(active_api_duration_ms: i64, now: Instant) -> Self {
+         Self {
+             sampling_started_at: now,
+-            active_api_duration_at_start: Duration::from_millis(
+-                active_api_duration_ms.max(0) as u64
+-            ),
+-            observed_output_chars: 0,
+-            exact_output_tokens: None,
++            active_api_duration_at_start: duration_from_millis(active_api_duration_ms),
++            first_output_at: None,
++            last_output_at: None,
++            observed_output_chars: OutputChars::default(),
++            exact_usage: None,
+         }
+     }
+ 
+-    fn observe_delta(&mut self, delta: &str, _now: Instant) {
+-        let output_chars = delta.chars().count() as u64;
+-        if output_chars == 0 {
++    fn observe_delta(&mut self, output_kind: RawResponseOutputKind, chars: i64, now: Instant) {
++        let chars = nonnegative_u64(chars);
++        if chars == 0 {
+             return;
+         }
+-        self.observed_output_chars = self.observed_output_chars.saturating_add(output_chars);
++        self.first_output_at.get_or_insert(now);
++        self.last_output_at = Some(now);
++        self.observed_output_chars.observe(output_kind, chars);
+     }
+ 
+     fn live_api_duration(&self, now: Instant) -> Duration {
+         self.active_api_duration_at_start
+             .saturating_add(now.saturating_duration_since(self.sampling_started_at))
+     }
++
++    fn live_stream_duration(&self, now: Instant) -> Option<Duration> {
++        self.first_output_at
++            .map(|started_at| now.saturating_duration_since(started_at))
++            .filter(|duration| !duration.is_zero())
++    }
++
++    fn final_stream_duration(&self) -> Option<Duration> {
++        Some(
++            self.last_output_at?
++                .saturating_duration_since(self.first_output_at?),
++        )
++        .filter(|duration| !duration.is_zero())
++    }
++}
++
++#[derive(Clone, Copy, Debug, Default)]
++struct CalibrationBucket {
++    weighted_chars: f64,
++    weighted_tokens: f64,
++}
++
++impl CalibrationBucket {
++    fn observe(&mut self, chars: f64, tokens: f64) {
++        if chars <= 0.0 || tokens <= 0.0 || !chars.is_finite() || !tokens.is_finite() {
++            return;
++        }
++        self.weighted_chars = self.weighted_chars * CALIBRATION_HISTORY_WEIGHT + chars;
++        self.weighted_tokens = self.weighted_tokens * CALIBRATION_HISTORY_WEIGHT + tokens;
++    }
++
++    fn chars_per_token(self) -> f64 {
++        if self.weighted_chars > 0.0 && self.weighted_tokens > 0.0 {
++            (self.weighted_chars / self.weighted_tokens)
++                .clamp(MIN_ESTIMATED_CHARS_PER_TOKEN, MAX_ESTIMATED_CHARS_PER_TOKEN)
++        } else {
++            DEFAULT_ESTIMATED_CHARS_PER_TOKEN
++        }
++    }
++}
++
++#[derive(Clone, Copy, Debug, Default)]
++struct TokenCalibration {
++    content: CalibrationBucket,
++    reasoning_text: CalibrationBucket,
++}
++
++impl TokenCalibration {
++    fn observe_exact(&mut self, chars: OutputChars, usage: ExactUsage) {
++        let content_tokens = (usage.output_tokens - usage.reasoning_output_tokens).max(0.0);
++        self.content.observe(chars.content() as f64, content_tokens);
++
++        // Reasoning summaries are not a reliable representation of hidden
++        // reasoning-token volume. Only calibrate that bucket when raw reasoning
++        // text was actually streamed.
++        self.reasoning_text
++            .observe(chars.reasoning_text as f64, usage.reasoning_output_tokens);
++    }
++
++    fn estimate_tokens(self, chars: OutputChars) -> f64 {
++        let content_tokens = chars.content() as f64 / self.content.chars_per_token();
++        let reasoning_chars = chars.reasoning_for_estimate() as f64;
++        let reasoning_chars_per_token = if chars.reasoning_text > 0 {
++            self.reasoning_text.chars_per_token()
++        } else {
++            // A summary-only stream is visible generated text, not a direct
++            // measurement of hidden reasoning. Estimate only its visible token
++            // count and leave the result explicitly approximate until usage
++            // arrives.
++            self.content.chars_per_token()
++        };
++        content_tokens + reasoning_chars / reasoning_chars_per_token
++    }
+ }
+ 
+ #[derive(Debug)]
+@@ -53,12 +246,13 @@ pub(super) struct GenerationRateTracker {
+     enabled: bool,
+     turn_running: bool,
+     turn_exact_output_tokens: f64,
+-    turn_estimated_output_chars: f64,
++    turn_exact_stream_intervals: f64,
++    turn_estimated_samples: Vec<OutputChars>,
+     turn_api_duration: Duration,
++    turn_stream_duration: Duration,
+     active_sampling: Option<ActiveSampling>,
+-    calibration_output_chars: f64,
+-    calibration_output_tokens: f64,
+-    retained_rate: Option<f64>,
++    calibration: TokenCalibration,
++    retained_rates: Option<DisplayRates>,
+ }
+ 
+ impl GenerationRateTracker {
+@@ -67,12 +261,13 @@ impl GenerationRateTracker {
+             enabled,
+             turn_running: false,
+             turn_exact_output_tokens: 0.0,
+-            turn_estimated_output_chars: 0.0,
++            turn_exact_stream_intervals: 0.0,
++            turn_estimated_samples: Vec::new(),
+             turn_api_duration: Duration::ZERO,
++            turn_stream_duration: Duration::ZERO,
+             active_sampling: None,
+-            calibration_output_chars: 0.0,
+-            calibration_output_tokens: 0.0,
+-            retained_rate: None,
++            calibration: TokenCalibration::default(),
++            retained_rates: None,
+         }
+     }
+ 
+@@ -82,10 +277,12 @@ impl GenerationRateTracker {
+         }
+         self.turn_running = true;
+         self.turn_exact_output_tokens = 0.0;
+-        self.turn_estimated_output_chars = 0.0;
++        self.turn_exact_stream_intervals = 0.0;
++        self.turn_estimated_samples.clear();
+         self.turn_api_duration = Duration::ZERO;
++        self.turn_stream_duration = Duration::ZERO;
+         self.active_sampling = None;
+-        self.retained_rate = None;
++        self.retained_rates = None;
+     }
+ 
+     pub(super) fn finish_turn(&mut self, now: Instant) {
+@@ -95,8 +292,12 @@ impl GenerationRateTracker {
+         if let Some(active) = self.active_sampling.as_ref() {
+             self.turn_api_duration = active.live_api_duration(now);
+         }
+-        self.finalize_active_sampling(/*output_chars*/ None);
+-        self.retained_rate = self.turn_rate(now);
++        let stream_duration = self
++            .active_sampling
++            .as_ref()
++            .and_then(ActiveSampling::final_stream_duration);
++        self.finalize_active_sampling(stream_duration, /*output_chars*/ None);
++        self.retained_rates = self.turn_rates(now).or(self.retained_rates);
+         self.turn_running = false;
+     }
+ 
+@@ -106,35 +307,56 @@ impl GenerationRateTracker {
+         }
+         if let Some(active) = self.active_sampling.as_ref() {
+             self.turn_api_duration = active.live_api_duration(now);
+-            self.finalize_active_sampling(/*output_chars*/ None);
+         }
++        let previous_stream_duration = self
++            .active_sampling
++            .as_ref()
++            .and_then(ActiveSampling::final_stream_duration);
++        self.finalize_active_sampling(previous_stream_duration, /*output_chars*/ None);
+         self.turn_api_duration = self
+             .turn_api_duration
+-            .max(Duration::from_millis(active_api_duration_ms.max(0) as u64));
++            .max(duration_from_millis(active_api_duration_ms));
+         self.active_sampling = Some(ActiveSampling::new(active_api_duration_ms, now));
+     }
+ 
+-    pub(super) fn observe_delta(&mut self, delta: &str, now: Instant) {
++    pub(super) fn observe_delta(
++        &mut self,
++        output_kind: RawResponseOutputKind,
++        chars: i64,
++        now: Instant,
++    ) {
+         let Some(active) = self.active_sampling.as_mut() else {
+             return;
+         };
+-        active.observe_delta(delta, now);
++        active.observe_delta(output_kind, chars, now);
+     }
+ 
+-    pub(super) fn response_completed(&mut self, output_tokens: Option<i64>) {
++    pub(super) fn response_completed(
++        &mut self,
++        output_tokens: Option<i64>,
++        reasoning_output_tokens: Option<i64>,
++    ) {
+         let Some(active) = self.active_sampling.as_mut() else {
+             return;
+         };
+         if let Some(output_tokens) = output_tokens {
+-            active.exact_output_tokens = Some(output_tokens.max(0) as f64);
++            active.exact_usage = Some(ExactUsage::new(
++                output_tokens,
++                reasoning_output_tokens.unwrap_or_default(),
++            ));
+         }
+     }
+ 
++    #[allow(clippy::too_many_arguments)]
+     pub(super) fn sampling_stopped(
+         &mut self,
+         active_api_duration_ms: i64,
+-        _generation_duration_ms: Option<i64>,
++        generation_duration_ms: Option<i64>,
+         streamed_output_chars: i64,
++        streamed_text_chars: i64,
++        streamed_tool_argument_chars: i64,
++        streamed_reasoning_summary_chars: i64,
++        streamed_reasoning_text_chars: i64,
+         now: Instant,
+     ) {
+         if !self.enabled || !self.turn_running {
+@@ -142,73 +364,129 @@ impl GenerationRateTracker {
+         }
+         self.turn_api_duration = self
+             .turn_api_duration
+-            .max(Duration::from_millis(active_api_duration_ms.max(0) as u64));
+-        let output_chars = u64::try_from(streamed_output_chars).ok();
+-        self.finalize_active_sampling(output_chars);
+-        self.retained_rate = self.turn_rate(now);
++            .max(duration_from_millis(active_api_duration_ms));
++        let output_chars = OutputChars::from_terminal_counts(
++            streamed_output_chars,
++            streamed_text_chars,
++            streamed_tool_argument_chars,
++            streamed_reasoning_summary_chars,
++            streamed_reasoning_text_chars,
++        );
++        let generation_duration = generation_duration_ms
++            .map(duration_from_millis)
++            .filter(|duration| !duration.is_zero())
++            .or_else(|| {
++                self.active_sampling
++                    .as_ref()
++                    .and_then(ActiveSampling::final_stream_duration)
++            });
++        self.finalize_active_sampling(generation_duration, output_chars);
++        self.retained_rates = self.turn_rates(now);
+     }
+ 
+     pub(super) fn status_suffix(&self, now: Instant) -> Option<String> {
+-        let rate = if self.turn_running {
+-            self.turn_rate(now).or(self.retained_rate)
++        let rates = if self.turn_running {
++            self.turn_rates(now).or(self.retained_rates)
+         } else {
+-            self.retained_rate
++            self.retained_rates
+         }?;
+-        if !rate.is_finite() || rate <= 0.0 {
+-            return None;
++        let mut parts = Vec::with_capacity(2);
++        if let Some(stream) = rates.stream.filter(valid_rate) {
++            parts.push(format_display_rate("stream", stream));
++        }
++        if let Some(api) = rates.api.filter(valid_rate) {
++            parts.push(format_display_rate("API", api));
+         }
+-        Some(format!("{rate:.1} tok/s"))
++        (!parts.is_empty()).then(|| parts.join(" · "))
+     }
+ 
+-    fn finalize_active_sampling(&mut self, streamed_output_chars: Option<u64>) {
+-        let Some(active) = self.active_sampling.take() else {
++    fn finalize_active_sampling(
++        &mut self,
++        generation_duration: Option<Duration>,
++        terminal_output_chars: Option<OutputChars>,
++    ) {
++        let Some(mut active) = self.active_sampling.take() else {
+             return;
+         };
+-        let output_chars = streamed_output_chars
+-            .unwrap_or_default()
+-            .max(active.observed_output_chars) as f64;
+-
+-        match active.exact_output_tokens {
+-            Some(output_tokens) if output_tokens > 0.0 => {
+-                self.turn_exact_output_tokens += output_tokens;
+-                if output_chars > 0.0 {
+-                    self.calibration_output_chars += output_chars;
+-                    self.calibration_output_tokens += output_tokens;
+-                }
++        if let Some(terminal_output_chars) = terminal_output_chars {
++            active
++                .observed_output_chars
++                .merge_max(terminal_output_chars);
++        }
++        if let Some(generation_duration) = generation_duration {
++            self.turn_stream_duration = self
++                .turn_stream_duration
++                .saturating_add(generation_duration);
++        }
++
++        match active.exact_usage {
++            Some(usage) if usage.output_tokens > 0.0 => {
++                self.turn_exact_output_tokens += usage.output_tokens;
++                self.turn_exact_stream_intervals += token_intervals(usage.output_tokens);
++                self.calibration
++                    .observe_exact(active.observed_output_chars, usage);
+             }
+-            _ if output_chars > 0.0 => {
+-                self.turn_estimated_output_chars += output_chars;
++            _ if active.observed_output_chars.total() > 0 => {
++                self.turn_estimated_samples
++                    .push(active.observed_output_chars);
+             }
+-            _ => (),
++            _ => {}
+         }
+     }
+ 
+-    fn turn_rate(&self, now: Instant) -> Option<f64> {
+-        let mut output_tokens =
+-            self.turn_exact_output_tokens + self.estimated_tokens(self.turn_estimated_output_chars);
+-        let mut api_duration = self.turn_api_duration;
++    fn turn_rates(&self, now: Instant) -> Option<DisplayRates> {
++        let mut output_tokens = self.turn_exact_output_tokens;
++        let mut stream_intervals = self.turn_exact_stream_intervals;
++        let mut estimated = false;
+ 
++        for chars in &self.turn_estimated_samples {
++            let tokens = self.calibration.estimate_tokens(*chars);
++            output_tokens += tokens;
++            stream_intervals += token_intervals(tokens);
++            estimated = true;
++        }
++
++        let mut api_duration = self.turn_api_duration;
++        let mut stream_duration = self.turn_stream_duration;
+         if let Some(active) = self.active_sampling.as_ref() {
+-            let active_tokens = active
+-                .exact_output_tokens
+-                .unwrap_or_else(|| self.estimated_tokens(active.observed_output_chars as f64));
++            let (active_tokens, active_estimated) = match active.exact_usage {
++                Some(usage) => (usage.output_tokens, false),
++                None => (
++                    self.calibration
++                        .estimate_tokens(active.observed_output_chars),
++                    true,
++                ),
++            };
++            let active_stream_duration = active.live_stream_duration(now);
++            let no_completed_output = self.turn_exact_output_tokens == 0.0
++                && self.turn_estimated_samples.is_empty()
++                && self.turn_stream_duration.is_zero();
++            if no_completed_output
++                && active_estimated
++                && (active_tokens < MIN_LIVE_ESTIMATED_TOKENS
++                    || active_stream_duration.is_none_or(|duration| duration < MIN_LIVE_DURATION))
++            {
++                return None;
++            }
++
+             output_tokens += active_tokens;
++            stream_intervals += token_intervals(active_tokens);
++            estimated |= active_estimated;
+             api_duration = active.live_api_duration(now);
++            if let Some(active_stream_duration) = active_stream_duration {
++                stream_duration = stream_duration.saturating_add(active_stream_duration);
++            }
+         }
+ 
+-        rate(output_tokens, api_duration)
+-    }
+-
+-    fn estimated_tokens(&self, output_chars: f64) -> f64 {
+-        output_chars / self.estimated_chars_per_token()
+-    }
+-
+-    fn estimated_chars_per_token(&self) -> f64 {
+-        if self.calibration_output_chars > 0.0 && self.calibration_output_tokens > 0.0 {
+-            self.calibration_output_chars / self.calibration_output_tokens
+-        } else {
+-            DEFAULT_ESTIMATED_CHARS_PER_TOKEN
+-        }
++        let stream = rate(stream_intervals, stream_duration).map(|tokens_per_second| DisplayRate {
++            tokens_per_second,
++            estimated,
++        });
++        let api = rate(output_tokens, api_duration).map(|tokens_per_second| DisplayRate {
++            tokens_per_second,
++            estimated,
++        });
++        (stream.is_some() || api.is_some()).then_some(DisplayRates { stream, api })
+     }
+ }
+ 
+@@ -232,11 +510,32 @@ fn token_rate_enabled(
+         && explicit_disable.is_none_or(|value| value.trim().is_empty())
+ }
+ 
++fn token_intervals(output_tokens: f64) -> f64 {
++    (output_tokens - 1.0).max(0.0)
++}
++
++fn duration_from_millis(duration_ms: i64) -> Duration {
++    Duration::from_millis(duration_ms.max(0) as u64)
++}
++
++fn nonnegative_u64(value: i64) -> u64 {
++    u64::try_from(value.max(0)).unwrap_or(u64::MAX)
++}
++
+ fn rate(output_tokens: f64, duration: Duration) -> Option<f64> {
+     let seconds = duration.as_secs_f64();
+     (output_tokens > 0.0 && seconds > 0.0).then_some(output_tokens / seconds)
+ }
+ 
++fn valid_rate(rate: &DisplayRate) -> bool {
++    rate.tokens_per_second.is_finite() && rate.tokens_per_second > 0.0
++}
++
++fn format_display_rate(label: &str, rate: DisplayRate) -> String {
++    let approximation = if rate.estimated { "~" } else { "" };
++    format!("{label} {approximation}{:.1} tok/s", rate.tokens_per_second)
++}
++
+ impl ChatWidget {
+     pub(super) fn on_generation_rate_sampling_started(&mut self, active_api_duration_ms: i64) {
+         self.generation_rate
+@@ -244,26 +543,45 @@ impl ChatWidget {
+         self.refresh_status_line();
+     }
+ 
+-    pub(super) fn on_generation_rate_delta(&mut self, delta: &str) {
+-        self.generation_rate.observe_delta(delta, Instant::now());
++    pub(super) fn on_generation_rate_output_delta(
++        &mut self,
++        output_kind: RawResponseOutputKind,
++        chars: i64,
++    ) {
++        self.generation_rate
++            .observe_delta(output_kind, chars, Instant::now());
+         self.refresh_status_line();
+     }
+ 
+-    pub(super) fn on_generation_rate_response_completed(&mut self, output_tokens: Option<i64>) {
+-        self.generation_rate.response_completed(output_tokens);
++    pub(super) fn on_generation_rate_response_completed(
++        &mut self,
++        output_tokens: Option<i64>,
++        reasoning_output_tokens: Option<i64>,
++    ) {
++        self.generation_rate
++            .response_completed(output_tokens, reasoning_output_tokens);
+         self.refresh_status_line();
+     }
+ 
++    #[allow(clippy::too_many_arguments)]
+     pub(super) fn on_generation_rate_sampling_stopped(
+         &mut self,
+         active_api_duration_ms: i64,
+         generation_duration_ms: Option<i64>,
+         streamed_output_chars: i64,
++        streamed_text_chars: i64,
++        streamed_tool_argument_chars: i64,
++        streamed_reasoning_summary_chars: i64,
++        streamed_reasoning_text_chars: i64,
+     ) {
+         self.generation_rate.sampling_stopped(
+             active_api_duration_ms,
+             generation_duration_ms,
+             streamed_output_chars,
++            streamed_text_chars,
++            streamed_tool_argument_chars,
++            streamed_reasoning_summary_chars,
++            streamed_reasoning_text_chars,
+             Instant::now(),
+         );
+         self.refresh_status_line();
+diff --git a/codex-rs/tui/src/chatwidget/generation_rate_tests.rs b/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
+index bd543d2e..6f057a4c 100644
+--- a/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
++++ b/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
+@@ -1,9 +1,13 @@
+ use std::time::Duration;
+ use std::time::Instant;
+ 
++use codex_app_server_protocol::RawResponseOutputKind;
+ use pretty_assertions::assert_eq;
+ 
++use super::ExactUsage;
+ use super::GenerationRateTracker;
++use super::OutputChars;
++use super::TokenCalibration;
+ use super::token_rate_enabled;
+ 
+ #[test]
+@@ -14,153 +18,218 @@ fn launcher_opt_in_enables_standard_provider_sessions() {
+ }
+ 
+ #[test]
+-fn turn_average_uses_cumulative_api_time_and_persists_until_the_next_turn() {
++fn live_estimate_waits_for_warmup_and_marks_both_rates_approximate() {
+     let started_at = Instant::now();
+     let mut tracker = GenerationRateTracker::new(true);
+     tracker.begin_turn();
+-
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
+-    tracker.observe_delta(&"a".repeat(40), started_at + Duration::from_secs(1));
+-    assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_secs(2)),
+-        Some("5.0 tok/s".to_string())
++
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 28,
++        started_at + Duration::from_millis(100),
+     );
+-    tracker.response_completed(Some(100));
+-    tracker.sampling_stopped(
+-        /*active_api_duration_ms*/ 20_000,
+-        /*generation_duration_ms*/ Some(2_000),
+-        /*streamed_output_chars*/ 40,
+-        started_at + Duration::from_secs(20),
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_millis(300)),
++        None
+     );
+ 
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 4,
++        started_at + Duration::from_millis(350),
++    );
+     assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_secs(100)),
+-        Some("5.0 tok/s".to_string())
++        tracker.status_suffix(started_at + Duration::from_millis(350)),
++        Some("stream ~28.0 tok/s · API ~22.9 tok/s".to_string())
+     );
++}
+ 
+-    tracker.sampling_started(
+-        /*active_api_duration_ms*/ 20_000,
+-        started_at + Duration::from_secs(100),
++#[test]
++fn exact_usage_reports_stream_and_api_rates_with_distinct_denominators() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(true);
++    tracker.begin_turn();
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 80,
++        started_at + Duration::from_secs(1),
+     );
+     tracker.observe_delta(
+-        &"b".repeat(400),
+-        started_at + Duration::from_millis(100_500),
++        RawResponseOutputKind::ReasoningText,
++        /*chars*/ 160,
++        started_at + Duration::from_secs(3),
+     );
+-    tracker.response_completed(Some(300));
++    tracker.response_completed(Some(120), Some(80));
+     tracker.sampling_stopped(
+-        /*active_api_duration_ms*/ 80_000,
+-        /*generation_duration_ms*/ Some(4_000),
+-        /*streamed_output_chars*/ 400,
+-        started_at + Duration::from_secs(180),
+-    );
+-    tracker.finish_turn(started_at + Duration::from_secs(180));
+-
+-    assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_secs(1_000)),
+-        Some("5.0 tok/s".to_string())
++        /*active_api_duration_ms*/ 20_000,
++        /*generation_duration_ms*/ Some(2_000),
++        /*streamed_output_chars*/ 240,
++        /*streamed_text_chars*/ 80,
++        /*streamed_tool_argument_chars*/ 0,
++        /*streamed_reasoning_summary_chars*/ 0,
++        /*streamed_reasoning_text_chars*/ 160,
++        started_at + Duration::from_secs(20),
+     );
++    tracker.finish_turn(started_at + Duration::from_secs(20));
+ 
+-    tracker.begin_turn();
+     assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_secs(2_000)),
+-        None
++        tracker.status_suffix(started_at + Duration::from_secs(100)),
++        Some("stream 59.5 tok/s · API 6.0 tok/s".to_string())
+     );
+ }
+ 
+ #[test]
+-fn exact_completion_usage_replaces_the_streaming_estimate() {
++fn tool_argument_deltas_contribute_to_the_live_rate() {
+     let started_at = Instant::now();
+     let mut tracker = GenerationRateTracker::new(true);
+     tracker.begin_turn();
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
+-    tracker.observe_delta(&"x".repeat(400), started_at + Duration::from_secs(1));
+-    tracker.response_completed(Some(40));
+-    tracker.sampling_stopped(
+-        /*active_api_duration_ms*/ 10_000,
+-        /*generation_duration_ms*/ None,
+-        /*streamed_output_chars*/ 400,
+-        started_at + Duration::from_secs(10),
++    tracker.observe_delta(
++        RawResponseOutputKind::ToolArguments,
++        /*chars*/ 40,
++        started_at,
+     );
+ 
+     assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_secs(20)),
+-        Some("4.0 tok/s".to_string())
++        tracker.status_suffix(started_at + Duration::from_secs(1)),
++        Some("stream ~9.0 tok/s · API ~10.0 tok/s".to_string())
+     );
+ }
+ 
+ #[test]
+-fn sampling_time_includes_stream_delivery_stalls() {
++fn raw_reasoning_is_not_double_counted_with_its_summary() {
+     let started_at = Instant::now();
+     let mut tracker = GenerationRateTracker::new(true);
++
+     tracker.begin_turn();
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
+-    tracker.observe_delta(&"x".repeat(400), started_at + Duration::from_secs(1));
+-    tracker.observe_delta(&"y".repeat(400), started_at + Duration::from_secs(3));
++    tracker.observe_delta(RawResponseOutputKind::Text, 400, started_at);
++    tracker.observe_delta(RawResponseOutputKind::ReasoningSummary, 40, started_at);
++    tracker.observe_delta(RawResponseOutputKind::ReasoningText, 400, started_at);
++    tracker.response_completed(Some(200), Some(100));
+     tracker.sampling_stopped(
+-        /*active_api_duration_ms*/ 100_000,
+-        /*generation_duration_ms*/ Some(2_000),
+-        /*streamed_output_chars*/ 800,
+-        started_at + Duration::from_secs(100),
++        1_000,
++        Some(1_000),
++        840,
++        400,
++        0,
++        40,
++        400,
++        started_at + Duration::from_secs(1),
++    );
++
++    tracker.begin_turn();
++    let second_started_at = started_at + Duration::from_secs(10);
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, second_started_at);
++    tracker.observe_delta(
++        RawResponseOutputKind::ReasoningSummary,
++        400,
++        second_started_at,
+     );
++    tracker.observe_delta(RawResponseOutputKind::ReasoningText, 400, second_started_at);
+ 
+     assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_secs(200)),
+-        Some("2.0 tok/s".to_string())
++        tracker.status_suffix(second_started_at + Duration::from_secs(1)),
++        Some("stream ~99.0 tok/s · API ~100.0 tok/s".to_string())
+     );
+ }
+ 
+ #[test]
+-fn successful_retry_recalibrates_an_incomplete_attempt() {
++fn calibration_is_reasoning_aware_and_recency_weighted() {
++    let mut calibration = TokenCalibration::default();
++    calibration.observe_exact(
++        OutputChars {
++            text: 400,
++            reasoning_text: 800,
++            ..OutputChars::default()
++        },
++        ExactUsage {
++            output_tokens: 300.0,
++            reasoning_output_tokens: 200.0,
++        },
++    );
++    calibration.observe_exact(
++        OutputChars {
++            text: 200,
++            reasoning_text: 800,
++            ..OutputChars::default()
++        },
++        ExactUsage {
++            output_tokens: 300.0,
++            reasoning_output_tokens: 200.0,
++        },
++    );
++
++    assert_eq!(calibration.content.weighted_chars, 400.0);
++    assert_eq!(calibration.content.weighted_tokens, 150.0);
++    assert_eq!(calibration.reasoning_text.weighted_chars, 1_200.0);
++    assert_eq!(calibration.reasoning_text.weighted_tokens, 300.0);
++    assert_eq!(
++        calibration.estimate_tokens(OutputChars {
++            text: 80,
++            reasoning_text: 80,
++            ..OutputChars::default()
++        }),
++        50.0
++    );
++}
++
++#[test]
++fn incomplete_retry_stays_approximate_and_is_recalibrated_by_success() {
+     let started_at = Instant::now();
+     let mut tracker = GenerationRateTracker::new(true);
+     tracker.begin_turn();
+ 
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
+-    tracker.observe_delta(&"x".repeat(200), started_at + Duration::from_secs(1));
++    tracker.observe_delta(RawResponseOutputKind::Text, 40, started_at);
+     tracker.sampling_stopped(
+-        /*active_api_duration_ms*/ 10_000,
+-        /*generation_duration_ms*/ Some(2_000),
+-        /*streamed_output_chars*/ 200,
++        10_000,
++        Some(2_000),
++        40,
++        40,
++        0,
++        0,
++        0,
+         started_at + Duration::from_secs(10),
+     );
+-    assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_secs(20)),
+-        Some("5.0 tok/s".to_string())
+-    );
+ 
+     tracker.sampling_started(
+         /*active_api_duration_ms*/ 10_000,
+         started_at + Duration::from_secs(100),
+     );
+     tracker.observe_delta(
+-        &"y".repeat(100),
+-        started_at + Duration::from_millis(100_500),
++        RawResponseOutputKind::Text,
++        80,
++        started_at + Duration::from_secs(100),
+     );
+-    tracker.response_completed(Some(50));
++    tracker.response_completed(Some(20), Some(0));
+     tracker.sampling_stopped(
+-        /*active_api_duration_ms*/ 20_000,
+-        /*generation_duration_ms*/ Some(1_000),
+-        /*streamed_output_chars*/ 100,
++        20_000,
++        Some(1_000),
++        80,
++        80,
++        0,
++        0,
++        0,
+         started_at + Duration::from_secs(110),
+     );
+ 
+     assert_eq!(
+         tracker.status_suffix(started_at + Duration::from_secs(200)),
+-        Some("7.5 tok/s".to_string())
++        Some("stream ~9.3 tok/s · API ~1.5 tok/s".to_string())
+     );
+ }
+ 
+ #[test]
+-fn live_rate_is_unqualified_from_the_first_delta() {
+-    let started_at = Instant::now();
+-    let mut tracker = GenerationRateTracker::new(true);
+-    tracker.begin_turn();
+-    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
+-    tracker.observe_delta(&"x".repeat(4), started_at + Duration::from_millis(100));
+-
++fn terminal_total_counter_is_a_backward_compatible_fallback() {
+     assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_millis(100)),
+-        Some("10.0 tok/s".to_string())
++        OutputChars::from_terminal_counts(20, 0, 0, 0, 0),
++        Some(OutputChars {
++            text: 20,
++            ..OutputChars::default()
++        })
+     );
+ }
+ 
+@@ -170,12 +239,16 @@ fn disabled_tracker_never_exposes_a_suffix() {
+     let mut tracker = GenerationRateTracker::new(false);
+     tracker.begin_turn();
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
+-    tracker.observe_delta(&"x".repeat(400), started_at + Duration::from_secs(1));
+-    tracker.response_completed(Some(100));
++    tracker.observe_delta(RawResponseOutputKind::Text, 400, started_at);
++    tracker.response_completed(Some(100), Some(0));
+     tracker.sampling_stopped(
+-        /*active_api_duration_ms*/ 1_000,
+-        /*generation_duration_ms*/ Some(1_000),
+-        /*streamed_output_chars*/ 400,
++        1_000,
++        Some(1_000),
++        400,
++        400,
++        0,
++        0,
++        0,
+         started_at + Duration::from_secs(2),
+     );
+ 
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index 306f6b1b..e4f8089c 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -76,19 +76,15 @@ impl ChatWidget {
+                 self.handle_item_completed_notification(notification, replay_kind);
+             }
+             ServerNotification::AgentMessageDelta(notification) => {
+-                self.on_generation_rate_delta(&notification.delta);
+                 self.on_agent_message_delta(notification.delta);
+             }
+             ServerNotification::PlanDelta(notification) => {
+-                self.on_generation_rate_delta(&notification.delta);
+                 self.on_plan_delta(notification.delta);
+             }
+             ServerNotification::ReasoningSummaryTextDelta(notification) => {
+-                self.on_generation_rate_delta(&notification.delta);
+                 self.on_agent_reasoning_delta(notification.delta);
+             }
+             ServerNotification::ReasoningTextDelta(notification) => {
+-                self.on_generation_rate_delta(&notification.delta);
+                 if self.config.show_raw_agent_reasoning {
+                     self.on_agent_reasoning_delta(notification.delta);
+                 }
+@@ -226,10 +222,20 @@ impl ChatWidget {
+                     self.on_generation_rate_sampling_started(notification.active_api_duration_ms);
+                 }
+             }
++            ServerNotification::RawResponseOutputDelta(notification) => {
++                if !is_resume_initial_replay {
++                    self.on_generation_rate_output_delta(
++                        notification.output_kind,
++                        notification.chars,
++                    );
++                }
++            }
+             ServerNotification::RawResponseCompleted(notification) => {
+                 if !is_resume_initial_replay {
++                    let usage = notification.usage;
+                     self.on_generation_rate_response_completed(
+-                        notification.usage.map(|usage| usage.output_tokens),
++                        usage.as_ref().map(|usage| usage.output_tokens),
++                        usage.map(|usage| usage.reasoning_output_tokens),
+                     );
+                 }
+             }
+@@ -239,6 +245,10 @@ impl ChatWidget {
+                         notification.active_api_duration_ms,
+                         notification.generation_duration_ms,
+                         notification.streamed_output_chars,
++                        notification.streamed_text_chars,
++                        notification.streamed_tool_argument_chars,
++                        notification.streamed_reasoning_summary_chars,
++                        notification.streamed_reasoning_text_chars,
+                     );
+                 }
+             }
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap
+index e9303320..99370fd7 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap
+@@ -7,4 +7,4 @@ expression: "render_chatwidget(&mut chat, 80)"
+ "                                                                                "
+ "› Ask Codex to do anything                                                      "
+ "                                                                                "
+-"  6.0 tok/s                                                                     "
++"  stream 59.5 tok/s · API 6.0 tok/s                                             "
+diff --git a/codex-rs/tui/src/chatwidget/tests/generation_rate.rs b/codex-rs/tui/src/chatwidget/tests/generation_rate.rs
+index d21cbded..c4268b32 100644
+--- a/codex-rs/tui/src/chatwidget/tests/generation_rate.rs
++++ b/codex-rs/tui/src/chatwidget/tests/generation_rate.rs
+@@ -1,5 +1,7 @@
+ use super::*;
+ use codex_app_server_protocol::RawResponseCompletedNotification;
++use codex_app_server_protocol::RawResponseOutputDeltaNotification;
++use codex_app_server_protocol::RawResponseOutputKind;
+ use codex_app_server_protocol::RawResponseStartedNotification;
+ use codex_app_server_protocol::RawResponseStoppedNotification;
+ use codex_app_server_protocol::TokenUsageBreakdown;
+@@ -31,6 +33,24 @@ async fn completed_turn_keeps_generation_rate_status_suffix() {
+         }),
+         /*replay_kind*/ None,
+     );
++    chat.handle_server_notification(
++        ServerNotification::RawResponseOutputDelta(RawResponseOutputDeltaNotification {
++            thread_id: "thread-1".to_string(),
++            turn_id: "turn-1".to_string(),
++            output_kind: RawResponseOutputKind::Text,
++            chars: 80,
++        }),
++        /*replay_kind*/ None,
++    );
++    chat.handle_server_notification(
++        ServerNotification::RawResponseOutputDelta(RawResponseOutputDeltaNotification {
++            thread_id: "thread-1".to_string(),
++            turn_id: "turn-1".to_string(),
++            output_kind: RawResponseOutputKind::ReasoningText,
++            chars: 160,
++        }),
++        /*replay_kind*/ None,
++    );
+     chat.handle_server_notification(
+         ServerNotification::RawResponseCompleted(RawResponseCompletedNotification {
+             thread_id: "thread-1".to_string(),
+@@ -54,6 +74,10 @@ async fn completed_turn_keeps_generation_rate_status_suffix() {
+             active_api_duration_ms: 20_000,
+             generation_duration_ms: Some(2_000),
+             streamed_output_chars: 240,
++            streamed_text_chars: 80,
++            streamed_tool_argument_chars: 0,
++            streamed_reasoning_summary_chars: 0,
++            streamed_reasoning_text_chars: 160,
+         }),
+         /*replay_kind*/ None,
+     );
+@@ -65,7 +89,7 @@ async fn completed_turn_keeps_generation_rate_status_suffix() {
+ 
+     assert_eq!(
+         chat.generation_rate.status_suffix(Instant::now()),
+-        Some("6.0 tok/s".to_string())
++        Some("stream 59.5 tok/s · API 6.0 tok/s".to_string())
+     );
+     assert_chatwidget_snapshot!(
+         "simplerouter_completed_turn_generation_rate_suffix",

@@ -1,5 +1,5 @@
 param(
-    [string]$CodexSource = (Join-Path (Split-Path -Parent $PSScriptRoot) ".build\codex-rust-v0.147.0\codex-rs"),
+    [string]$CodexSource = (Join-Path (Split-Path -Parent $PSScriptRoot) ".build\codex-rust-v0.153.4\codex-rs"),
     [string]$CargoTarget = "",
     [string]$InstallRoot = (Join-Path ([Environment]::GetFolderPath("UserProfile")) ".local\share\simplerouter\simplerouter-codex"),
     [ValidateSet("dev-small", "release")]
@@ -15,16 +15,16 @@ if (-not ($IsWindows -or $env:OS -eq "Windows_NT")) {
 }
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$codexVersion = "0.147.0"
+$codexVersion = "0.153.4"
 $officialSignerName = "OpenAI OpCo, LLC"
 $officialCodeModeHostAssets = @{
     "x86_64-pc-windows-msvc" = @{
-        Sha256 = "37c23a542037e1bcfd0fa7eb4a150c697229d7ff31bf675c519d5bff7226b191"
-        Size = 57450288
+        Sha256 = "deaebc21f354f151fcebeac46e12c6e8c4ef75ee448e25e3577502074e04b8d9"
+        Size = 72475952
     }
     "aarch64-pc-windows-msvc" = @{
-        Sha256 = "d322d6d721cf7f7ae523bfe31a504875611ec21bbf9b2bffca4b9fd30bdb1675"
-        Size = 54304560
+        Sha256 = "5143bbc28a1cddbfc9d51327159e4df6f2f8ceff1faa20359ba7d83226033e0f"
+        Size = 67623728
     }
 }
 $defaultSourceRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot ".build\codex-rust-v$codexVersion"))

@@ -1,0 +1,1313 @@
+From 160ae9b557a36b012fd507cc8e86e0b7e3a7d5a4 Mon Sep 17 00:00:00 2001
+From: kdsuomi <kdsuomi@users.noreply.github.com>
+Date: Fri, 28 Aug 2026 23:43:01 -0400
+Subject: [PATCH 5/7] fix(tui): measure stream rate from attributed chunk
+ arrivals
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The stream numerator previously took each response's full exact usage
+(including hidden reasoning and never-streamed terminal payloads) while
+its denominator covered only the observed delta window, inflating the
+displayed rate by up to 10x. The stream rate is now the current delivery
+speed, computed purely from delta arrivals: each chunk's estimated
+tokens are attributed to the interval since the previous chunk, and a
+response's first chunk only starts the clock — the wait before first
+output belongs to the API rate, so single-flush responses show no
+stream figure rather than a fabricated one. Arrivals aggregate over a
+rolling 5s window that decays through stalls, is cleared when a new
+request starts sampling, and freezes with the ticker stopped when the
+turn ends on any path, interrupts and errors included. Exact usage
+feeds only the API rate and the chars-per-token calibration, which is
+keyed per model and per output category and skips samples whose char
+and token sides cover different output. The status line repaints on a
+250ms cadence while a turn runs so a stalled stream visibly decays.
+---
+ codex-rs/tui/src/chatwidget.rs                |   1 +
+ .../tui/src/chatwidget/generation_rate.rs     | 416 +++++++++++------
+ .../src/chatwidget/generation_rate_tests.rs   | 421 +++++++++++++-----
+ ...completed_turn_generation_rate_suffix.snap |   2 +-
+ .../src/chatwidget/tests/generation_rate.rs   |  42 +-
+ codex-rs/tui/src/chatwidget/turn_runtime.rs   |   7 +-
+ 6 files changed, 644 insertions(+), 245 deletions(-)
+
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 769d7cea..cfd01ae6 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -1231,6 +1231,7 @@ impl ChatWidget {
+         }
+         self.refresh_status_line_if_workspace_headline_due();
+         self.refresh_thread_usage_if_settlement_due();
++        self.refresh_generation_rate_if_due();
+     }
+ 
+     fn flush_active_cell(&mut self) {
+diff --git a/codex-rs/tui/src/chatwidget/generation_rate.rs b/codex-rs/tui/src/chatwidget/generation_rate.rs
+index 62f176a2..e835861b 100644
+--- a/codex-rs/tui/src/chatwidget/generation_rate.rs
++++ b/codex-rs/tui/src/chatwidget/generation_rate.rs
+@@ -2,16 +2,33 @@
+ //!
+ //! The status line deliberately reports two different quantities:
+ //!
+-//! - `stream` is client-observed generation throughput from the first output
+-//!   event to the latest one. It uses one fewer token than the token count
+-//!   because N streamed tokens contain N - 1 inter-token intervals.
+-//! - `API` is effective throughput across cumulative active API time, including
+-//!   time to first output and delivery stalls while excluding local tools and
+-//!   between-request orchestration.
++//! - `stream` is the current delivery speed: tokens observed over a short
++//!   rolling window of recent delta arrivals. Each chunk's tokens are
++//!   attributed to the interval since the previous chunk arrived; the first
++//!   chunk of a response only starts the clock. The wait before first output
++//!   is deliberately excluded — it already shows up in the API rate — so the
++//!   stream figure reads correctly within a second of delivery starting
++//!   instead of climbing out of a TTFB-diluted average. A response that
++//!   arrives as one single flush therefore shows no stream figure at all
++//!   (the API rate covers it) rather than a fabricated one. The window is
++//!   cleared when a new request starts sampling so a fresh response never
++//!   inherits the previous regime's dead air. Within a response, stalls are
++//!   never clipped: dead air widens the window denominator and decays the
++//!   rate toward zero until the window empties. The numerator is always
++//!   estimated from observed characters — exact terminal usage never
++//!   rewrites it, because usage counts tokens (hidden reasoning, terminal
++//!   payloads) whose delivery the client never observed.
++//! - `API` is effective throughput across cumulative active API time,
++//!   including time to first output and delivery stalls while excluding local
++//!   tools and between-request orchestration. Exact terminal usage replaces
++//!   character estimates here, and calibrates the per-model chars-per-token
++//!   ratios the stream estimate relies on.
+ //!
+-//! Exact terminal usage replaces live character estimates. Estimated values
+-//! are marked with `~` and hidden until a short warm-up has elapsed.
++//! Estimated values are marked with `~` and hidden until a short warm-up has
++//! elapsed.
+ 
++use std::collections::HashMap;
++use std::collections::VecDeque;
+ use std::time::Duration;
+ use std::time::Instant;
+ 
+@@ -23,11 +40,21 @@ use super::live_reasoning::is_simplerouter_provider_id;
+ const DISABLE_TOKEN_RATE_ENV: &str = "SIMPLEROUTER_DISABLE_TOKEN_RATE";
+ const ENABLE_TOKEN_RATE_ENV: &str = "SIMPLEROUTER_ENABLE_TOKEN_RATE";
+ const DEFAULT_ESTIMATED_CHARS_PER_TOKEN: f64 = 4.0;
++// Wide sanity clamp only. Correctness comes from skipping calibration samples
++// whose char and token sides cover different output, not from tuning bounds.
+ const MIN_ESTIMATED_CHARS_PER_TOKEN: f64 = 1.0;
+ const MAX_ESTIMATED_CHARS_PER_TOKEN: f64 = 12.0;
+ const CALIBRATION_HISTORY_WEIGHT: f64 = 0.5;
+-const MIN_LIVE_ESTIMATED_TOKENS: f64 = 8.0;
+-const MIN_LIVE_DURATION: Duration = Duration::from_millis(250);
++// A calibration sample is attributed to the text or tool-argument bucket only
++// when that category dominates the response's content chars; mixed responses
++// have no clean token attribution and are skipped.
++const CALIBRATION_DOMINANCE_SHARE: f64 = 0.9;
++const STREAM_WINDOW: Duration = Duration::from_secs(5);
++const MIN_STREAM_WINDOW_TIME: Duration = Duration::from_millis(250);
++const MIN_STREAM_WINDOW_TOKENS: f64 = 5.0;
++const MIN_LIVE_API_ESTIMATED_TOKENS: f64 = 8.0;
++const MIN_LIVE_API_DURATION: Duration = Duration::from_millis(250);
++pub(super) const PERIODIC_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+ 
+ #[derive(Clone, Copy, Debug)]
+ struct DisplayRate {
+@@ -130,12 +157,20 @@ impl ExactUsage {
+     }
+ }
+ 
++/// One attributed chunk arrival: the estimated tokens it carried and the
++/// interval since the previous chunk in the same response.
++#[derive(Clone, Copy, Debug)]
++struct StreamChunk {
++    arrived: Instant,
++    tokens: f64,
++    interval: Duration,
++}
++
+ #[derive(Debug)]
+ struct ActiveSampling {
+     sampling_started_at: Instant,
+     active_api_duration_at_start: Duration,
+-    first_output_at: Option<Instant>,
+-    last_output_at: Option<Instant>,
++    last_chunk_at: Option<Instant>,
+     observed_output_chars: OutputChars,
+     exact_usage: Option<ExactUsage>,
+ }
+@@ -145,41 +180,16 @@ impl ActiveSampling {
+         Self {
+             sampling_started_at: now,
+             active_api_duration_at_start: duration_from_millis(active_api_duration_ms),
+-            first_output_at: None,
+-            last_output_at: None,
++            last_chunk_at: None,
+             observed_output_chars: OutputChars::default(),
+             exact_usage: None,
+         }
+     }
+ 
+-    fn observe_delta(&mut self, output_kind: RawResponseOutputKind, chars: i64, now: Instant) {
+-        let chars = nonnegative_u64(chars);
+-        if chars == 0 {
+-            return;
+-        }
+-        self.first_output_at.get_or_insert(now);
+-        self.last_output_at = Some(now);
+-        self.observed_output_chars.observe(output_kind, chars);
+-    }
+-
+     fn live_api_duration(&self, now: Instant) -> Duration {
+         self.active_api_duration_at_start
+             .saturating_add(now.saturating_duration_since(self.sampling_started_at))
+     }
+-
+-    fn live_stream_duration(&self, now: Instant) -> Option<Duration> {
+-        self.first_output_at
+-            .map(|started_at| now.saturating_duration_since(started_at))
+-            .filter(|duration| !duration.is_zero())
+-    }
+-
+-    fn final_stream_duration(&self) -> Option<Duration> {
+-        Some(
+-            self.last_output_at?
+-                .saturating_duration_since(self.first_output_at?),
+-        )
+-        .filter(|duration| !duration.is_zero())
+-    }
+ }
+ 
+ #[derive(Clone, Copy, Debug, Default)]
+@@ -197,47 +207,84 @@ impl CalibrationBucket {
+         self.weighted_tokens = self.weighted_tokens * CALIBRATION_HISTORY_WEIGHT + tokens;
+     }
+ 
+-    fn chars_per_token(self) -> f64 {
+-        if self.weighted_chars > 0.0 && self.weighted_tokens > 0.0 {
++    fn is_calibrated(self) -> bool {
++        self.weighted_chars > 0.0 && self.weighted_tokens > 0.0
++    }
++
++    fn chars_per_token(self) -> Option<f64> {
++        self.is_calibrated().then(|| {
+             (self.weighted_chars / self.weighted_tokens)
+                 .clamp(MIN_ESTIMATED_CHARS_PER_TOKEN, MAX_ESTIMATED_CHARS_PER_TOKEN)
+-        } else {
+-            DEFAULT_ESTIMATED_CHARS_PER_TOKEN
+-        }
++        })
+     }
+ }
+ 
+ #[derive(Clone, Copy, Debug, Default)]
+ struct TokenCalibration {
+-    content: CalibrationBucket,
++    text: CalibrationBucket,
++    tool_arguments: CalibrationBucket,
+     reasoning_text: CalibrationBucket,
+ }
+ 
+ impl TokenCalibration {
+     fn observe_exact(&mut self, chars: OutputChars, usage: ExactUsage) {
++        // When reasoning streamed but the usage report carries no reasoning
++        // split, the char and token sides of every candidate sample cover
++        // different output. There is no valid pair to learn from; a poisoned
++        // sample here is what used to collapse the ratio to the clamp floor.
++        let reasoning_streamed = chars.reasoning_summary > 0 || chars.reasoning_text > 0;
++        if usage.reasoning_output_tokens <= 0.0 && reasoning_streamed {
++            return;
++        }
++
+         let content_tokens = (usage.output_tokens - usage.reasoning_output_tokens).max(0.0);
+-        self.content.observe(chars.content() as f64, content_tokens);
++        let content_chars = chars.content();
++        if content_chars > 0 && content_tokens > 0.0 {
++            let text_share = chars.text as f64 / content_chars as f64;
++            if text_share >= CALIBRATION_DOMINANCE_SHARE {
++                self.text.observe(content_chars as f64, content_tokens);
++            } else if text_share <= 1.0 - CALIBRATION_DOMINANCE_SHARE {
++                self.tool_arguments
++                    .observe(content_chars as f64, content_tokens);
++            }
++        }
+ 
+-        // Reasoning summaries are not a reliable representation of hidden
+-        // reasoning-token volume. Only calibrate that bucket when raw reasoning
+-        // text was actually streamed.
+-        self.reasoning_text
+-            .observe(chars.reasoning_text as f64, usage.reasoning_output_tokens);
++        if chars.reasoning_text > 0 && usage.reasoning_output_tokens > 0.0 {
++            self.reasoning_text
++                .observe(chars.reasoning_text as f64, usage.reasoning_output_tokens);
++        }
+     }
+ 
+-    fn estimate_tokens(self, chars: OutputChars) -> f64 {
+-        let content_tokens = chars.content() as f64 / self.content.chars_per_token();
++    fn chars_per_token(&self, output_kind: RawResponseOutputKind) -> f64 {
++        let (primary, fallback) = match output_kind {
++            // Reasoning summaries are visible prose; estimate them like text.
++            RawResponseOutputKind::Text | RawResponseOutputKind::ReasoningSummary => {
++                (self.text, self.tool_arguments)
++            }
++            RawResponseOutputKind::ToolArguments => (self.tool_arguments, self.text),
++            RawResponseOutputKind::ReasoningText => (self.reasoning_text, self.text),
++        };
++        primary
++            .chars_per_token()
++            .or_else(|| fallback.chars_per_token())
++            .unwrap_or(DEFAULT_ESTIMATED_CHARS_PER_TOKEN)
++    }
++
++    fn estimate_chunk_tokens(&self, output_kind: RawResponseOutputKind, chars: u64) -> f64 {
++        chars as f64 / self.chars_per_token(output_kind)
++    }
++
++    fn estimate_tokens(&self, chars: OutputChars) -> f64 {
++        let text_tokens = chars.text as f64 / self.chars_per_token(RawResponseOutputKind::Text);
++        let tool_tokens = chars.tool_arguments as f64
++            / self.chars_per_token(RawResponseOutputKind::ToolArguments);
+         let reasoning_chars = chars.reasoning_for_estimate() as f64;
+-        let reasoning_chars_per_token = if chars.reasoning_text > 0 {
+-            self.reasoning_text.chars_per_token()
++        let reasoning_kind = if chars.reasoning_text > 0 {
++            RawResponseOutputKind::ReasoningText
+         } else {
+-            // A summary-only stream is visible generated text, not a direct
+-            // measurement of hidden reasoning. Estimate only its visible token
+-            // count and leave the result explicitly approximate until usage
+-            // arrives.
+-            self.content.chars_per_token()
++            RawResponseOutputKind::ReasoningSummary
+         };
+-        content_tokens + reasoning_chars / reasoning_chars_per_token
++        text_tokens + tool_tokens + reasoning_chars / self.chars_per_token(reasoning_kind)
+     }
+ }
+ 
+@@ -245,14 +292,17 @@ impl TokenCalibration {
+ pub(super) struct GenerationRateTracker {
+     enabled: bool,
+     turn_running: bool,
++    active_model: String,
+     turn_exact_output_tokens: f64,
+-    turn_exact_stream_intervals: f64,
+     turn_estimated_samples: Vec<OutputChars>,
+     turn_api_duration: Duration,
+-    turn_stream_duration: Duration,
++    turn_stream_tokens: f64,
++    turn_stream_time: Duration,
++    stream_window: VecDeque<StreamChunk>,
+     active_sampling: Option<ActiveSampling>,
+-    calibration: TokenCalibration,
++    calibrations: HashMap<String, TokenCalibration>,
+     retained_rates: Option<DisplayRates>,
++    last_periodic_refresh: Option<Instant>,
+ }
+ 
+ impl GenerationRateTracker {
+@@ -260,29 +310,35 @@ impl GenerationRateTracker {
+         Self {
+             enabled,
+             turn_running: false,
++            active_model: String::new(),
+             turn_exact_output_tokens: 0.0,
+-            turn_exact_stream_intervals: 0.0,
+             turn_estimated_samples: Vec::new(),
+             turn_api_duration: Duration::ZERO,
+-            turn_stream_duration: Duration::ZERO,
++            turn_stream_tokens: 0.0,
++            turn_stream_time: Duration::ZERO,
++            stream_window: VecDeque::new(),
+             active_sampling: None,
+-            calibration: TokenCalibration::default(),
++            calibrations: HashMap::new(),
+             retained_rates: None,
++            last_periodic_refresh: None,
+         }
+     }
+ 
+-    pub(super) fn begin_turn(&mut self) {
++    pub(super) fn begin_turn(&mut self, model: &str) {
+         if !self.enabled {
+             return;
+         }
+         self.turn_running = true;
++        self.active_model = model.to_string();
+         self.turn_exact_output_tokens = 0.0;
+-        self.turn_exact_stream_intervals = 0.0;
+         self.turn_estimated_samples.clear();
+         self.turn_api_duration = Duration::ZERO;
+-        self.turn_stream_duration = Duration::ZERO;
++        self.turn_stream_tokens = 0.0;
++        self.turn_stream_time = Duration::ZERO;
++        self.stream_window.clear();
+         self.active_sampling = None;
+         self.retained_rates = None;
++        self.last_periodic_refresh = None;
+     }
+ 
+     pub(super) fn finish_turn(&mut self, now: Instant) {
+@@ -292,13 +348,11 @@ impl GenerationRateTracker {
+         if let Some(active) = self.active_sampling.as_ref() {
+             self.turn_api_duration = active.live_api_duration(now);
+         }
+-        let stream_duration = self
+-            .active_sampling
+-            .as_ref()
+-            .and_then(ActiveSampling::final_stream_duration);
+-        self.finalize_active_sampling(stream_duration, /*output_chars*/ None);
+-        self.retained_rates = self.turn_rates(now).or(self.retained_rates);
++        self.finalize_active_sampling(/*terminal_output_chars*/ None);
++        // Flip the flag first so the retained snapshot uses the cumulative
++        // whole-turn stream rate rather than the live window.
+         self.turn_running = false;
++        self.retained_rates = self.turn_rates(now).or(self.retained_rates);
+     }
+ 
+     pub(super) fn sampling_started(&mut self, active_api_duration_ms: i64, now: Instant) {
+@@ -308,14 +362,15 @@ impl GenerationRateTracker {
+         if let Some(active) = self.active_sampling.as_ref() {
+             self.turn_api_duration = active.live_api_duration(now);
+         }
+-        let previous_stream_duration = self
+-            .active_sampling
+-            .as_ref()
+-            .and_then(ActiveSampling::final_stream_duration);
+-        self.finalize_active_sampling(previous_stream_duration, /*output_chars*/ None);
++        self.finalize_active_sampling(/*terminal_output_chars*/ None);
+         self.turn_api_duration = self
+             .turn_api_duration
+             .max(duration_from_millis(active_api_duration_ms));
++        // Each request is a fresh delivery regime: the previous response's
++        // chunks and the dead air after them must not weigh down the new
++        // response's rate. Until the first chunk arrives the stream rate is
++        // simply absent, which is the honest display for a silent prefill.
++        self.stream_window.clear();
+         self.active_sampling = Some(ActiveSampling::new(active_api_duration_ms, now));
+     }
+ 
+@@ -325,10 +380,32 @@ impl GenerationRateTracker {
+         chars: i64,
+         now: Instant,
+     ) {
++        let chars = nonnegative_u64(chars);
++        if chars == 0 {
++            return;
++        }
+         let Some(active) = self.active_sampling.as_mut() else {
+             return;
+         };
+-        active.observe_delta(output_kind, chars, now);
++        active.observed_output_chars.observe(output_kind, chars);
++        // The first chunk of a response only starts the clock: the wait that
++        // produced it belongs to the API rate, never to the stream rate,
++        // which measures current delivery speed between chunk arrivals.
++        let Some(previous) = active.last_chunk_at.replace(now) else {
++            return;
++        };
++        let interval = now.saturating_duration_since(previous);
++        let tokens = self
++            .calibration()
++            .estimate_chunk_tokens(output_kind, chars);
++        self.turn_stream_tokens += tokens;
++        self.turn_stream_time = self.turn_stream_time.saturating_add(interval);
++        self.stream_window.push_back(StreamChunk {
++            arrived: now,
++            tokens,
++            interval,
++        });
++        self.prune_stream_window(now);
+     }
+ 
+     pub(super) fn response_completed(
+@@ -351,13 +428,13 @@ impl GenerationRateTracker {
+     pub(super) fn sampling_stopped(
+         &mut self,
+         active_api_duration_ms: i64,
+-        generation_duration_ms: Option<i64>,
++        _generation_duration_ms: Option<i64>,
+         streamed_output_chars: i64,
+         streamed_text_chars: i64,
+         streamed_tool_argument_chars: i64,
+         streamed_reasoning_summary_chars: i64,
+         streamed_reasoning_text_chars: i64,
+-        now: Instant,
++        _now: Instant,
+     ) {
+         if !self.enabled || !self.turn_running {
+             return;
+@@ -372,16 +449,7 @@ impl GenerationRateTracker {
+             streamed_reasoning_summary_chars,
+             streamed_reasoning_text_chars,
+         );
+-        let generation_duration = generation_duration_ms
+-            .map(duration_from_millis)
+-            .filter(|duration| !duration.is_zero())
+-            .or_else(|| {
+-                self.active_sampling
+-                    .as_ref()
+-                    .and_then(ActiveSampling::final_stream_duration)
+-            });
+-        self.finalize_active_sampling(generation_duration, output_chars);
+-        self.retained_rates = self.turn_rates(now);
++        self.finalize_active_sampling(output_chars);
+     }
+ 
+     pub(super) fn status_suffix(&self, now: Instant) -> Option<String> {
+@@ -400,11 +468,41 @@ impl GenerationRateTracker {
+         (!parts.is_empty()).then(|| parts.join(" · "))
+     }
+ 
+-    fn finalize_active_sampling(
+-        &mut self,
+-        generation_duration: Option<Duration>,
+-        terminal_output_chars: Option<OutputChars>,
+-    ) {
++    /// True while the live display should be repainted periodically so that a
++    /// stalled stream visibly decays instead of freezing at its last value.
++    pub(super) fn wants_periodic_refresh(&self) -> bool {
++        self.enabled && self.turn_running
++    }
++
++    /// Rate-limits the periodic repaint; returns true when a refresh is due.
++    pub(super) fn take_periodic_refresh_due(&mut self, now: Instant) -> bool {
++        match self.last_periodic_refresh {
++            Some(last) if now.saturating_duration_since(last) < PERIODIC_REFRESH_INTERVAL => false,
++            _ => {
++                self.last_periodic_refresh = Some(now);
++                true
++            }
++        }
++    }
++
++    fn calibration(&self) -> TokenCalibration {
++        self.calibrations
++            .get(&self.active_model)
++            .copied()
++            .unwrap_or_default()
++    }
++
++    fn prune_stream_window(&mut self, now: Instant) {
++        while let Some(chunk) = self.stream_window.front() {
++            if now.saturating_duration_since(chunk.arrived) > STREAM_WINDOW {
++                self.stream_window.pop_front();
++            } else {
++                break;
++            }
++        }
++    }
++
++    fn finalize_active_sampling(&mut self, terminal_output_chars: Option<OutputChars>) {
+         let Some(mut active) = self.active_sampling.take() else {
+             return;
+         };
+@@ -413,17 +511,13 @@ impl GenerationRateTracker {
+                 .observed_output_chars
+                 .merge_max(terminal_output_chars);
+         }
+-        if let Some(generation_duration) = generation_duration {
+-            self.turn_stream_duration = self
+-                .turn_stream_duration
+-                .saturating_add(generation_duration);
+-        }
+ 
+         match active.exact_usage {
+             Some(usage) if usage.output_tokens > 0.0 => {
+                 self.turn_exact_output_tokens += usage.output_tokens;
+-                self.turn_exact_stream_intervals += token_intervals(usage.output_tokens);
+-                self.calibration
++                self.calibrations
++                    .entry(self.active_model.clone())
++                    .or_default()
+                     .observe_exact(active.observed_output_chars, usage);
+             }
+             _ if active.observed_output_chars.total() > 0 => {
+@@ -434,54 +528,92 @@ impl GenerationRateTracker {
+         }
+     }
+ 
++    /// Client-observed stream rate over the rolling window.
++    ///
++    /// The denominator is anchored at the start of the earliest surviving
++    /// chunk's interval — the full interval, even when it began before the
++    /// window span, so a blob that arrived after a long generation gap is
++    /// averaged over that gap rather than spiking. The denominator extends to
++    /// `now`, so an ongoing stall keeps widening it: the rate decays smoothly
++    /// toward zero and disappears once every chunk has aged out.
++    fn live_stream_rate(&self, now: Instant) -> Option<DisplayRate> {
++        let mut tokens = 0.0;
++        let mut anchor: Option<Instant> = None;
++        for chunk in &self.stream_window {
++            if now.saturating_duration_since(chunk.arrived) > STREAM_WINDOW {
++                continue;
++            }
++            if anchor.is_none() {
++                anchor = Some(
++                    chunk
++                        .arrived
++                        .checked_sub(chunk.interval)
++                        .unwrap_or(chunk.arrived),
++                );
++            }
++            tokens += chunk.tokens;
++        }
++        let elapsed = now.saturating_duration_since(anchor?);
++        if tokens < MIN_STREAM_WINDOW_TOKENS || elapsed < MIN_STREAM_WINDOW_TIME {
++            return None;
++        }
++        rate(tokens, elapsed).map(|tokens_per_second| DisplayRate {
++            tokens_per_second,
++            estimated: true,
++        })
++    }
++
++    /// Whole-turn stream rate from attributed chunks only, for the retained
++    /// end-of-turn display. Exact usage never contributes here.
++    fn cumulative_stream_rate(&self) -> Option<DisplayRate> {
++        if self.turn_stream_tokens < MIN_STREAM_WINDOW_TOKENS
++            || self.turn_stream_time < MIN_STREAM_WINDOW_TIME
++        {
++            return None;
++        }
++        rate(self.turn_stream_tokens, self.turn_stream_time).map(|tokens_per_second| DisplayRate {
++            tokens_per_second,
++            estimated: true,
++        })
++    }
++
+     fn turn_rates(&self, now: Instant) -> Option<DisplayRates> {
++        let calibration = self.calibration();
+         let mut output_tokens = self.turn_exact_output_tokens;
+-        let mut stream_intervals = self.turn_exact_stream_intervals;
+         let mut estimated = false;
+ 
+         for chars in &self.turn_estimated_samples {
+-            let tokens = self.calibration.estimate_tokens(*chars);
+-            output_tokens += tokens;
+-            stream_intervals += token_intervals(tokens);
++            output_tokens += calibration.estimate_tokens(*chars);
+             estimated = true;
+         }
+ 
+         let mut api_duration = self.turn_api_duration;
+-        let mut stream_duration = self.turn_stream_duration;
+         if let Some(active) = self.active_sampling.as_ref() {
+             let (active_tokens, active_estimated) = match active.exact_usage {
+                 Some(usage) => (usage.output_tokens, false),
+                 None => (
+-                    self.calibration
+-                        .estimate_tokens(active.observed_output_chars),
++                    calibration.estimate_tokens(active.observed_output_chars),
+                     true,
+                 ),
+             };
+-            let active_stream_duration = active.live_stream_duration(now);
+-            let no_completed_output = self.turn_exact_output_tokens == 0.0
+-                && self.turn_estimated_samples.is_empty()
+-                && self.turn_stream_duration.is_zero();
+-            if no_completed_output
+-                && active_estimated
+-                && (active_tokens < MIN_LIVE_ESTIMATED_TOKENS
+-                    || active_stream_duration.is_none_or(|duration| duration < MIN_LIVE_DURATION))
+-            {
+-                return None;
+-            }
+-
+-            output_tokens += active_tokens;
+-            stream_intervals += token_intervals(active_tokens);
+-            estimated |= active_estimated;
+             api_duration = active.live_api_duration(now);
+-            if let Some(active_stream_duration) = active_stream_duration {
+-                stream_duration = stream_duration.saturating_add(active_stream_duration);
++            let no_completed_output =
++                self.turn_exact_output_tokens == 0.0 && self.turn_estimated_samples.is_empty();
++            let warming_up = no_completed_output
++                && active_estimated
++                && (active_tokens < MIN_LIVE_API_ESTIMATED_TOKENS
++                    || api_duration < MIN_LIVE_API_DURATION);
++            if !warming_up {
++                output_tokens += active_tokens;
++                estimated |= active_estimated;
+             }
+         }
+ 
+-        let stream = rate(stream_intervals, stream_duration).map(|tokens_per_second| DisplayRate {
+-            tokens_per_second,
+-            estimated,
+-        });
++        let stream = if self.turn_running {
++            self.live_stream_rate(now)
++        } else {
++            self.cumulative_stream_rate()
++        };
+         let api = rate(output_tokens, api_duration).map(|tokens_per_second| DisplayRate {
+             tokens_per_second,
+             estimated,
+@@ -510,10 +642,6 @@ fn token_rate_enabled(
+         && explicit_disable.is_none_or(|value| value.trim().is_empty())
+ }
+ 
+-fn token_intervals(output_tokens: f64) -> f64 {
+-    (output_tokens - 1.0).max(0.0)
+-}
+-
+ fn duration_from_millis(duration_ms: i64) -> Duration {
+     Duration::from_millis(duration_ms.max(0) as u64)
+ }
+@@ -586,6 +714,20 @@ impl ChatWidget {
+         );
+         self.refresh_status_line();
+     }
++
++    /// Called from `pre_draw_tick`: while a turn is running, repaint the
++    /// status line on a fixed cadence and keep a frame scheduled so a stalled
++    /// stream decays on screen instead of freezing at its last value.
++    pub(super) fn refresh_generation_rate_if_due(&mut self) {
++        if !self.generation_rate.wants_periodic_refresh() {
++            return;
++        }
++        if self.generation_rate.take_periodic_refresh_due(Instant::now()) {
++            self.refresh_status_line();
++        }
++        self.frame_requester
++            .schedule_frame_in(PERIODIC_REFRESH_INTERVAL);
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/codex-rs/tui/src/chatwidget/generation_rate_tests.rs b/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
+index 6f057a4c..14847e78 100644
+--- a/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
++++ b/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
+@@ -18,207 +18,418 @@ fn launcher_opt_in_enables_standard_provider_sessions() {
+ }
+ 
+ #[test]
+-fn live_estimate_waits_for_warmup_and_marks_both_rates_approximate() {
++fn single_flush_response_shows_api_rate_only() {
+     let started_at = Instant::now();
+     let mut tracker = GenerationRateTracker::new(true);
+-    tracker.begin_turn();
++    tracker.begin_turn("model");
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
+ 
++    // An entire response delivered as one buffered flush carries no
++    // between-chunk delivery signal: the wait that produced it belongs to
++    // the API rate, so no stream figure is shown rather than a fabricated
++    // one.
+     tracker.observe_delta(
+         RawResponseOutputKind::Text,
+-        /*chars*/ 28,
+-        started_at + Duration::from_millis(100),
++        /*chars*/ 4_000,
++        started_at + Duration::from_secs(8),
++    );
++
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(8)),
++        Some("API ~125.0 tok/s".to_string())
++    );
++}
++
++#[test]
++fn interval_attribution_measures_between_chunk_arrivals() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(true);
++    tracker.begin_turn("model");
++    tracker.sampling_started(/*active_api_duration_ms*/ 6_000, started_at);
++
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 4_000,
++        started_at + Duration::from_secs(4),
++    );
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 200,
++        started_at + Duration::from_secs(5),
++    );
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 200,
++        started_at + Duration::from_secs(6),
++    );
++
++    // Stream: only the 100 tokens that arrived after the opening flush,
++    // over their 2s of attributed intervals — the 4s wait for the first
++    // chunk is excluded. API: all 1,100 estimated tokens over 12s of
++    // cumulative active API time (6s carried in from earlier requests).
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(6)),
++        Some("stream ~50.0 tok/s · API ~91.7 tok/s".to_string())
++    );
++}
++
++#[test]
++fn late_blob_is_averaged_over_its_generation_gap() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(true);
++    tracker.begin_turn("model");
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 40,
++        started_at + Duration::from_secs(1),
++    );
++    // A 40,000-char tool payload lands as one chunk after 20 quiet seconds of
++    // generation. Its 10,000 estimated tokens divide by the full gap instead
++    // of spiking at the arrival instant.
++    tracker.observe_delta(
++        RawResponseOutputKind::ToolArguments,
++        /*chars*/ 40_000,
++        started_at + Duration::from_secs(21),
++    );
++
++    // The 1s-old opening chunk has aged out of the window; the blob's own
++    // 20s interval carries the denominator: 10,000 tokens over 20s.
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(21)),
++        Some("stream ~500.0 tok/s · API ~476.7 tok/s".to_string())
++    );
++}
++
++#[test]
++fn stalls_decay_the_stream_rate_toward_zero() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(true);
++    tracker.begin_turn("model");
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, started_at);
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 400,
++        started_at + Duration::from_secs(1),
++    );
++
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(1)),
++        Some("stream ~100.0 tok/s · API ~200.0 tok/s".to_string())
++    );
++    // Four seconds of dead air stretch the same 100 tokens over 5s.
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(5)),
++        Some("stream ~20.0 tok/s · API ~40.0 tok/s".to_string())
++    );
++    // Once the last chunk ages out of the window the stream rate disappears
++    // rather than freezing at a stale value.
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(12)),
++        Some("API ~16.7 tok/s".to_string())
++    );
++}
++
++#[test]
++fn new_request_clears_the_stale_window() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(true);
++    tracker.begin_turn("model");
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, started_at);
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 400,
++        started_at + Duration::from_secs(1),
++    );
++
++    // A new request starts mid-decay: the previous response's chunks and
++    // dead air are dropped, so the stream rate is absent during the silent
++    // prefill instead of crawling at a stale residue.
++    tracker.sampling_started(
++        /*active_api_duration_ms*/ 2_000,
++        started_at + Duration::from_secs(6),
++    );
++    assert_eq!(
++        tracker.status_suffix(started_at + Duration::from_secs(7)),
++        Some("API ~66.7 tok/s".to_string())
++    );
++
++    // The new response converges as soon as delivery is measurable: its
++    // first chunk starts the clock, and the second shows the true rate with
++    // no inherited dead air.
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 800,
++        started_at + Duration::from_secs(8),
++    );
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 400,
++        started_at + Duration::from_secs(9),
+     );
+     assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_millis(300)),
+-        None
++        tracker.status_suffix(started_at + Duration::from_secs(9)),
++        Some("stream ~100.0 tok/s · API ~100.0 tok/s".to_string())
+     );
++}
+ 
++#[test]
++fn finished_turn_freezes_the_display_and_stops_the_ticker() {
++    let started_at = Instant::now();
++    let mut tracker = GenerationRateTracker::new(true);
++    tracker.begin_turn("model");
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, started_at);
+     tracker.observe_delta(
+         RawResponseOutputKind::Text,
+-        /*chars*/ 4,
+-        started_at + Duration::from_millis(350),
++        /*chars*/ 400,
++        started_at + Duration::from_secs(1),
++    );
++
++    // An interrupt ends the turn through the same finish path as completion.
++    tracker.finish_turn(started_at + Duration::from_secs(2));
++
++    assert!(!tracker.wants_periodic_refresh());
++    let frozen = tracker.status_suffix(started_at + Duration::from_secs(2));
++    assert_eq!(
++        frozen,
++        Some("stream ~100.0 tok/s · API ~100.0 tok/s".to_string())
+     );
++    // A minute later the display has not decayed or counted down.
+     assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_millis(350)),
+-        Some("stream ~28.0 tok/s · API ~22.9 tok/s".to_string())
++        tracker.status_suffix(started_at + Duration::from_secs(62)),
++        frozen
+     );
+ }
+ 
+ #[test]
+-fn exact_usage_reports_stream_and_api_rates_with_distinct_denominators() {
++fn exact_usage_never_rewrites_the_stream_rate() {
+     let started_at = Instant::now();
+     let mut tracker = GenerationRateTracker::new(true);
+-    tracker.begin_turn();
++    tracker.begin_turn("model");
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
++    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, started_at);
+     tracker.observe_delta(
+         RawResponseOutputKind::Text,
+-        /*chars*/ 80,
++        /*chars*/ 400,
+         started_at + Duration::from_secs(1),
+     );
+     tracker.observe_delta(
+-        RawResponseOutputKind::ReasoningText,
+-        /*chars*/ 160,
+-        started_at + Duration::from_secs(3),
++        RawResponseOutputKind::Text,
++        /*chars*/ 400,
++        started_at + Duration::from_secs(2),
+     );
+-    tracker.response_completed(Some(120), Some(80));
++    // 3,000 billed tokens, 2,600 of them hidden reasoning that never streamed.
++    tracker.response_completed(Some(3_000), Some(2_600));
+     tracker.sampling_stopped(
+-        /*active_api_duration_ms*/ 20_000,
++        /*active_api_duration_ms*/ 10_000,
+         /*generation_duration_ms*/ Some(2_000),
+-        /*streamed_output_chars*/ 240,
+-        /*streamed_text_chars*/ 80,
++        /*streamed_output_chars*/ 1_200,
++        /*streamed_text_chars*/ 1_200,
+         /*streamed_tool_argument_chars*/ 0,
+         /*streamed_reasoning_summary_chars*/ 0,
+-        /*streamed_reasoning_text_chars*/ 160,
+-        started_at + Duration::from_secs(20),
++        /*streamed_reasoning_text_chars*/ 0,
++        started_at + Duration::from_secs(10),
+     );
+-    tracker.finish_turn(started_at + Duration::from_secs(20));
++    tracker.finish_turn(started_at + Duration::from_secs(10));
+ 
++    // Stream stays the delta-only estimate (200 tokens over 2s of attributed
++    // intervals); the hidden reasoning tokens raise only the API rate. The
++    // old accounting showed stream ≈ 1,500 tok/s here.
+     assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_secs(100)),
+-        Some("stream 59.5 tok/s · API 6.0 tok/s".to_string())
++        tracker.status_suffix(started_at + Duration::from_secs(60)),
++        Some("stream ~100.0 tok/s · API 300.0 tok/s".to_string())
+     );
+ }
+ 
+ #[test]
+-fn tool_argument_deltas_contribute_to_the_live_rate() {
++fn terminal_blob_only_response_reports_api_rate_only() {
+     let started_at = Instant::now();
+     let mut tracker = GenerationRateTracker::new(true);
+-    tracker.begin_turn();
++    tracker.begin_turn("model");
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
+-    tracker.observe_delta(
+-        RawResponseOutputKind::ToolArguments,
+-        /*chars*/ 40,
+-        started_at,
++    tracker.response_completed(Some(3_000), Some(2_900));
++    tracker.sampling_stopped(
++        /*active_api_duration_ms*/ 10_000,
++        /*generation_duration_ms*/ Some(50),
++        /*streamed_output_chars*/ 12_000,
++        /*streamed_text_chars*/ 0,
++        /*streamed_tool_argument_chars*/ 0,
++        /*streamed_reasoning_summary_chars*/ 12_000,
++        /*streamed_reasoning_text_chars*/ 0,
++        started_at + Duration::from_millis(50),
+     );
++    tracker.finish_turn(started_at + Duration::from_millis(50));
+ 
+     assert_eq!(
+         tracker.status_suffix(started_at + Duration::from_secs(1)),
+-        Some("stream ~9.0 tok/s · API ~10.0 tok/s".to_string())
++        Some("API 300.0 tok/s".to_string())
+     );
+ }
+ 
+ #[test]
+-fn raw_reasoning_is_not_double_counted_with_its_summary() {
++fn missing_reasoning_attribution_skips_calibration() {
+     let started_at = Instant::now();
+     let mut tracker = GenerationRateTracker::new(true);
+-
+-    tracker.begin_turn();
++    tracker.begin_turn("model");
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
+-    tracker.observe_delta(RawResponseOutputKind::Text, 400, started_at);
+-    tracker.observe_delta(RawResponseOutputKind::ReasoningSummary, 40, started_at);
+-    tracker.observe_delta(RawResponseOutputKind::ReasoningText, 400, started_at);
+-    tracker.response_completed(Some(200), Some(100));
+-    tracker.sampling_stopped(
+-        1_000,
+-        Some(1_000),
+-        840,
+-        400,
+-        0,
+-        40,
+-        400,
++    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, started_at);
++    tracker.observe_delta(
++        RawResponseOutputKind::ReasoningSummary,
++        /*chars*/ 4_000,
+         started_at + Duration::from_secs(1),
+     );
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 400,
++        started_at + Duration::from_secs(2),
++    );
++    // The usage reports zero reasoning tokens even though reasoning streamed:
++    // the char and token sides cover different output, so no calibration
++    // sample may be taken. Absorbing it used to collapse chars-per-token to
++    // the clamp floor and inflate every later estimate ~4x.
++    tracker.response_completed(Some(1_200), Some(0));
++    tracker.sampling_stopped(
++        /*active_api_duration_ms*/ 10_000,
++        /*generation_duration_ms*/ Some(2_000),
++        /*streamed_output_chars*/ 4_800,
++        /*streamed_text_chars*/ 800,
++        /*streamed_tool_argument_chars*/ 0,
++        /*streamed_reasoning_summary_chars*/ 4_000,
++        /*streamed_reasoning_text_chars*/ 0,
++        started_at + Duration::from_secs(10),
++    );
+ 
+-    tracker.begin_turn();
+-    let second_started_at = started_at + Duration::from_secs(10);
+-    tracker.sampling_started(/*active_api_duration_ms*/ 0, second_started_at);
++    let second_started_at = started_at + Duration::from_secs(20);
++    tracker.sampling_started(/*active_api_duration_ms*/ 10_000, second_started_at);
++    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, second_started_at);
+     tracker.observe_delta(
+-        RawResponseOutputKind::ReasoningSummary,
+-        400,
+-        second_started_at,
++        RawResponseOutputKind::Text,
++        /*chars*/ 400,
++        second_started_at + Duration::from_secs(1),
+     );
+-    tracker.observe_delta(RawResponseOutputKind::ReasoningText, 400, second_started_at);
+ 
++    // 100 tok/s proves the second response still estimates at the 4.0
++    // default rather than a poisoned 1.0 chars-per-token (which would show
++    // 400 tok/s here).
+     assert_eq!(
+         tracker.status_suffix(second_started_at + Duration::from_secs(1)),
+-        Some("stream ~99.0 tok/s · API ~100.0 tok/s".to_string())
++        Some("stream ~100.0 tok/s · API ~127.3 tok/s".to_string())
+     );
+ }
+ 
+ #[test]
+-fn calibration_is_reasoning_aware_and_recency_weighted() {
++fn calibration_uses_dominant_category_and_skips_mixed_responses() {
+     let mut calibration = TokenCalibration::default();
+     calibration.observe_exact(
+         OutputChars {
+-            text: 400,
+-            reasoning_text: 800,
++            tool_arguments: 3_000,
+             ..OutputChars::default()
+         },
+         ExactUsage {
+-            output_tokens: 300.0,
+-            reasoning_output_tokens: 200.0,
++            output_tokens: 1_000.0,
++            reasoning_output_tokens: 0.0,
+         },
+     );
++
++    assert_eq!(
++        calibration.estimate_chunk_tokens(RawResponseOutputKind::ToolArguments, 300),
++        100.0
++    );
++    // Text falls back to the calibrated sibling bucket rather than the default.
++    assert_eq!(
++        calibration.estimate_chunk_tokens(RawResponseOutputKind::Text, 300),
++        100.0
++    );
++
++    // A mixed response has no clean char↔token attribution; nothing changes.
++    let before = calibration.estimate_chunk_tokens(RawResponseOutputKind::ToolArguments, 300);
+     calibration.observe_exact(
+         OutputChars {
+-            text: 200,
+-            reasoning_text: 800,
++            text: 500,
++            tool_arguments: 500,
+             ..OutputChars::default()
+         },
+         ExactUsage {
+-            output_tokens: 300.0,
+-            reasoning_output_tokens: 200.0,
++            output_tokens: 250.0,
++            reasoning_output_tokens: 0.0,
+         },
+     );
+-
+-    assert_eq!(calibration.content.weighted_chars, 400.0);
+-    assert_eq!(calibration.content.weighted_tokens, 150.0);
+-    assert_eq!(calibration.reasoning_text.weighted_chars, 1_200.0);
+-    assert_eq!(calibration.reasoning_text.weighted_tokens, 300.0);
+     assert_eq!(
+-        calibration.estimate_tokens(OutputChars {
+-            text: 80,
+-            reasoning_text: 80,
+-            ..OutputChars::default()
+-        }),
+-        50.0
++        calibration.estimate_chunk_tokens(RawResponseOutputKind::ToolArguments, 300),
++        before
+     );
+ }
+ 
+ #[test]
+-fn incomplete_retry_stays_approximate_and_is_recalibrated_by_success() {
++fn raw_reasoning_is_not_double_counted_with_its_summary() {
++    let calibration = TokenCalibration::default();
++    let estimate = calibration.estimate_tokens(OutputChars {
++        reasoning_summary: 400,
++        reasoning_text: 400,
++        ..OutputChars::default()
++    });
++    assert_eq!(estimate, 100.0);
++}
++
++#[test]
++fn calibration_is_kept_per_model() {
+     let started_at = Instant::now();
+     let mut tracker = GenerationRateTracker::new(true);
+-    tracker.begin_turn();
+ 
++    // Model "dense" learns 2.0 chars per token from exact usage.
++    tracker.begin_turn("dense");
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
+-    tracker.observe_delta(RawResponseOutputKind::Text, 40, started_at);
++    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, started_at);
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 400,
++        started_at + Duration::from_secs(1),
++    );
++    tracker.response_completed(Some(400), Some(0));
+     tracker.sampling_stopped(
+-        10_000,
+-        Some(2_000),
+-        40,
+-        40,
+-        0,
+-        0,
+-        0,
+-        started_at + Duration::from_secs(10),
++        /*active_api_duration_ms*/ 2_000,
++        /*generation_duration_ms*/ Some(1_000),
++        /*streamed_output_chars*/ 800,
++        /*streamed_text_chars*/ 800,
++        /*streamed_tool_argument_chars*/ 0,
++        /*streamed_reasoning_summary_chars*/ 0,
++        /*streamed_reasoning_text_chars*/ 0,
++        started_at + Duration::from_secs(2),
+     );
++    tracker.finish_turn(started_at + Duration::from_secs(2));
+ 
+-    tracker.sampling_started(
+-        /*active_api_duration_ms*/ 10_000,
+-        started_at + Duration::from_secs(100),
+-    );
++    // A different model starts from the 4.0 default…
++    let other_started_at = started_at + Duration::from_secs(100);
++    tracker.begin_turn("other");
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, other_started_at);
++    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, other_started_at);
+     tracker.observe_delta(
+         RawResponseOutputKind::Text,
+-        80,
+-        started_at + Duration::from_secs(100),
++        /*chars*/ 400,
++        other_started_at + Duration::from_secs(1),
+     );
+-    tracker.response_completed(Some(20), Some(0));
+-    tracker.sampling_stopped(
+-        20_000,
+-        Some(1_000),
+-        80,
+-        80,
+-        0,
+-        0,
+-        0,
+-        started_at + Duration::from_secs(110),
++    assert_eq!(
++        tracker.status_suffix(other_started_at + Duration::from_secs(1)),
++        Some("stream ~100.0 tok/s · API ~200.0 tok/s".to_string())
+     );
+ 
++    // …while returning to the calibrated model applies its learned ratio.
++    let dense_started_at = started_at + Duration::from_secs(200);
++    tracker.begin_turn("dense");
++    tracker.sampling_started(/*active_api_duration_ms*/ 0, dense_started_at);
++    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, dense_started_at);
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 400,
++        dense_started_at + Duration::from_secs(1),
++    );
+     assert_eq!(
+-        tracker.status_suffix(started_at + Duration::from_secs(200)),
+-        Some("stream ~9.3 tok/s · API ~1.5 tok/s".to_string())
++        tracker.status_suffix(dense_started_at + Duration::from_secs(1)),
++        Some("stream ~200.0 tok/s · API ~400.0 tok/s".to_string())
+     );
+ }
+ 
+@@ -237,7 +448,7 @@ fn terminal_total_counter_is_a_backward_compatible_fallback() {
+ fn disabled_tracker_never_exposes_a_suffix() {
+     let started_at = Instant::now();
+     let mut tracker = GenerationRateTracker::new(false);
+-    tracker.begin_turn();
++    tracker.begin_turn("model");
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, started_at);
+     tracker.observe_delta(RawResponseOutputKind::Text, 400, started_at);
+     tracker.response_completed(Some(100), Some(0));
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap
+index 99370fd7..e03bcdec 100644
+--- a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__tests__simplerouter_completed_turn_generation_rate_suffix.snap
+@@ -7,4 +7,4 @@ expression: "render_chatwidget(&mut chat, 80)"
+ "                                                                                "
+ "› Ask Codex to do anything                                                      "
+ "                                                                                "
+-"  stream 59.5 tok/s · API 6.0 tok/s                                             "
++"  API 6.0 tok/s                                                                 "
+diff --git a/codex-rs/tui/src/chatwidget/tests/generation_rate.rs b/codex-rs/tui/src/chatwidget/tests/generation_rate.rs
+index c4268b32..593f384a 100644
+--- a/codex-rs/tui/src/chatwidget/tests/generation_rate.rs
++++ b/codex-rs/tui/src/chatwidget/tests/generation_rate.rs
+@@ -18,6 +18,44 @@ fn render_chatwidget(chat: &mut ChatWidget, width: u16) -> String {
+     normalized_backend_snapshot(terminal.backend())
+ }
+ 
++#[tokio::test]
++async fn interrupted_turn_freezes_generation_rate_and_stops_ticker() {
++    let (mut chat, _rx, _op_rx) = make_chatwidget_manual_with_provider(SIMPLEROUTER_PROVIDER).await;
++    chat.config.tui_status_line = Some(Vec::new());
++    chat.generation_rate = GenerationRateTracker::new(true);
++    chat.on_task_started();
++    chat.handle_server_notification(
++        ServerNotification::RawResponseStarted(RawResponseStartedNotification {
++            thread_id: "thread-1".to_string(),
++            turn_id: "turn-1".to_string(),
++            active_api_duration_ms: 0,
++        }),
++        /*replay_kind*/ None,
++    );
++    chat.handle_server_notification(
++        ServerNotification::RawResponseOutputDelta(RawResponseOutputDeltaNotification {
++            thread_id: "thread-1".to_string(),
++            turn_id: "turn-1".to_string(),
++            output_kind: RawResponseOutputKind::Text,
++            chars: 80,
++        }),
++        /*replay_kind*/ None,
++    );
++    assert!(chat.generation_rate.wants_periodic_refresh());
++
++    // Esc / Ctrl-C and error paths all end the turn through finalize_turn:
++    // the live display must freeze instead of decaying on a running ticker.
++    chat.finalize_turn();
++
++    assert!(!chat.generation_rate.wants_periodic_refresh());
++    let frozen = chat.generation_rate.status_suffix(Instant::now());
++    assert_eq!(
++        chat.generation_rate
++            .status_suffix(Instant::now() + Duration::from_secs(60)),
++        frozen
++    );
++}
++
+ #[tokio::test]
+ async fn completed_turn_keeps_generation_rate_status_suffix() {
+     let (mut chat, _rx, _op_rx) = make_chatwidget_manual_with_provider(SIMPLEROUTER_PROVIDER).await;
+@@ -87,9 +125,11 @@ async fn completed_turn_keeps_generation_rate_status_suffix() {
+         /*from_replay*/ false,
+     );
+ 
++    // The two deltas arrived within the same instant, so no trustworthy
++    // stream window exists; only the exact API rate is retained.
+     assert_eq!(
+         chat.generation_rate.status_suffix(Instant::now()),
+-        Some("stream 59.5 tok/s · API 6.0 tok/s".to_string())
++        Some("API 6.0 tok/s".to_string())
+     );
+     assert_chatwidget_snapshot!(
+         "simplerouter_completed_turn_generation_rate_suffix",
+diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+index ebce7c66..c26f66db 100644
+--- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
++++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+@@ -71,7 +71,8 @@ impl ChatWidget {
+         self.input_queue.user_turn_pending_start = false;
+         self.reset_safety_buffering_for_turn_start();
+         self.turn_lifecycle.start(Instant::now());
+-        self.generation_rate.begin_turn();
++        let model = self.config.model.clone().unwrap_or_default();
++        self.generation_rate.begin_turn(&model);
+         self.transcript.reset_turn_flags();
+         self.adaptive_chunking.reset();
+         if self.plan_stream_controller.take().is_some() {
+@@ -318,6 +319,10 @@ impl ChatWidget {
+     /// and should continue to drive the bottom-pane running indicator while it is in progress.
+     pub(super) fn finalize_turn(&mut self) {
+         self.clear_safety_buffering();
++        // Interrupts and errors end the turn too: freeze the generation-rate
++        // display at its final summary and stop the periodic refresh ticker,
++        // instead of letting the live window keep decaying on screen.
++        self.generation_rate.finish_turn(Instant::now());
+         // Drop preview-only stream tail content on any termination path before
+         // failed-cell finalization, so transient tail cells are never persisted.
+         self.clear_active_stream_tail();

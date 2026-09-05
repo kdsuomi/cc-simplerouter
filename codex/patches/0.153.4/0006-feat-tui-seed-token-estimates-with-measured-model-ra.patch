@@ -1,0 +1,248 @@
+From ba9d99c25baa91bf92cf41bafadb35ac0b2aab09 Mon Sep 17 00:00:00 2001
+From: SimpleRouter <simplerouter@local>
+Date: Fri, 4 Sep 2026 22:11:01 -0400
+Subject: [PATCH 6/7] feat(tui): seed token estimates with measured model
+ ratios
+
+---
+ .../tui/src/chatwidget/generation_rate.rs     | 47 ++++++++--
+ .../src/chatwidget/generation_rate_tests.rs   | 91 ++++++++++++++++++-
+ ...ng_defaults_and_continued_calibration.snap |  8 ++
+ 3 files changed, 137 insertions(+), 9 deletions(-)
+ create mode 100644 codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__generation_rate__tests__model_starting_defaults_and_continued_calibration.snap
+
+diff --git a/codex-rs/tui/src/chatwidget/generation_rate.rs b/codex-rs/tui/src/chatwidget/generation_rate.rs
+index e835861b..e9f150aa 100644
+--- a/codex-rs/tui/src/chatwidget/generation_rate.rs
++++ b/codex-rs/tui/src/chatwidget/generation_rate.rs
+@@ -224,9 +224,41 @@ struct TokenCalibration {
+     text: CalibrationBucket,
+     tool_arguments: CalibrationBucket,
+     reasoning_text: CalibrationBucket,
++    initial_chars_per_token: Option<f64>,
+ }
+ 
+ impl TokenCalibration {
++    fn for_model(model: &str) -> Self {
++        // Pooled answer characters / answer tokens from SimpleRouter's
++        // 2026-09-04 samples. Reasoning tokens are excluded from these totals.
++        // See codex/token-rate-defaults.md in the SimpleRouter repository.
++        // These are fallbacks, not synthetic observations: the first valid
++        // calibration replaces them without inheriting sample weight.
++        let model = model.strip_suffix(":nitro").unwrap_or(model);
++        let initial_chars_per_token = match model {
++            "anthropic/claude-fable-5" | "claude-fable-5" => Some(5_525.0 / 2_173.0),
++            "anthropic/claude-opus-5" | "claude-opus-5" => Some(22_515.0 / 8_746.0),
++            "deepseek/deepseek-v4-flash-0731" | "deepseek-v4-flash-0731" => {
++                Some(11_131.0 / 2_969.0)
++            }
++            "google/gemini-3.8-flash" | "gemini-3.8-flash" => Some(26_560.0 / 6_963.0),
++            "meta/muse-spark-1.3" | "muse-spark-1.3" => Some(13_313.0 / 3_714.0),
++            "moonshotai/kimi-k3" | "kimi-k3" => Some(32_924.0 / 8_428.0),
++            "openai/gpt-5.6-luna" | "gpt-5.6-luna" => Some(10_093.0 / 2_553.0),
++            "openai/gpt-5.6-sol" | "gpt-5.6-sol" => Some(21_672.0 / 4_967.0),
++            "qwen/qwen3.8-27b" | "qwen3.8-27b" => Some(6_806.0 / 1_907.0),
++            "tencent/hy3" | "hy3" => Some(5_835.0 / 1_639.0),
++            "x-ai/grok-4.6" | "grok-4.6" => Some(13_097.0 / 3_407.0),
++            "z-ai/glm-5.3" | "glm-5.3" => Some(27_173.0 / 7_087.0),
++            "z-ai/glm-5.3-flash" | "glm-5.3-flash" => Some(11_077.0 / 2_971.0),
++            _ => None,
++        };
++        Self {
++            initial_chars_per_token,
++            ..Self::default()
++        }
++    }
++
+     fn observe_exact(&mut self, chars: OutputChars, usage: ExactUsage) {
+         // When reasoning streamed but the usage report carries no reasoning
+         // split, the char and token sides of every candidate sample cover
+@@ -267,6 +299,7 @@ impl TokenCalibration {
+         primary
+             .chars_per_token()
+             .or_else(|| fallback.chars_per_token())
++            .or(self.initial_chars_per_token)
+             .unwrap_or(DEFAULT_ESTIMATED_CHARS_PER_TOKEN)
+     }
+ 
+@@ -395,9 +428,7 @@ impl GenerationRateTracker {
+             return;
+         };
+         let interval = now.saturating_duration_since(previous);
+-        let tokens = self
+-            .calibration()
+-            .estimate_chunk_tokens(output_kind, chars);
++        let tokens = self.calibration().estimate_chunk_tokens(output_kind, chars);
+         self.turn_stream_tokens += tokens;
+         self.turn_stream_time = self.turn_stream_time.saturating_add(interval);
+         self.stream_window.push_back(StreamChunk {
+@@ -489,7 +520,7 @@ impl GenerationRateTracker {
+         self.calibrations
+             .get(&self.active_model)
+             .copied()
+-            .unwrap_or_default()
++            .unwrap_or_else(|| TokenCalibration::for_model(&self.active_model))
+     }
+ 
+     fn prune_stream_window(&mut self, now: Instant) {
+@@ -515,9 +546,10 @@ impl GenerationRateTracker {
+         match active.exact_usage {
+             Some(usage) if usage.output_tokens > 0.0 => {
+                 self.turn_exact_output_tokens += usage.output_tokens;
++                let model = self.active_model.as_str();
+                 self.calibrations
+                     .entry(self.active_model.clone())
+-                    .or_default()
++                    .or_insert_with(|| TokenCalibration::for_model(model))
+                     .observe_exact(active.observed_output_chars, usage);
+             }
+             _ if active.observed_output_chars.total() > 0 => {
+@@ -722,7 +754,10 @@ impl ChatWidget {
+         if !self.generation_rate.wants_periodic_refresh() {
+             return;
+         }
+-        if self.generation_rate.take_periodic_refresh_due(Instant::now()) {
++        if self
++            .generation_rate
++            .take_periodic_refresh_due(Instant::now())
++        {
+             self.refresh_status_line();
+         }
+         self.frame_requester
+diff --git a/codex-rs/tui/src/chatwidget/generation_rate_tests.rs b/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
+index 14847e78..140090c1 100644
+--- a/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
++++ b/codex-rs/tui/src/chatwidget/generation_rate_tests.rs
+@@ -305,7 +305,11 @@ fn missing_reasoning_attribution_skips_calibration() {
+ 
+     let second_started_at = started_at + Duration::from_secs(20);
+     tracker.sampling_started(/*active_api_duration_ms*/ 10_000, second_started_at);
+-    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, second_started_at);
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 400,
++        second_started_at,
++    );
+     tracker.observe_delta(
+         RawResponseOutputKind::Text,
+         /*chars*/ 400,
+@@ -375,6 +379,79 @@ fn raw_reasoning_is_not_double_counted_with_its_summary() {
+     assert_eq!(estimate, 100.0);
+ }
+ 
++#[test]
++fn model_starting_defaults_recognize_nitro_and_bare_ids() {
++    let qualified = TokenCalibration::for_model("openai/gpt-5.6-sol");
++    assert!(qualified.initial_chars_per_token.is_some());
++    assert!(!qualified.text.is_calibrated());
++    for alias in [
++        "gpt-5.6-sol",
++        "gpt-5.6-sol:nitro",
++        "openai/gpt-5.6-sol:nitro",
++    ] {
++        assert_eq!(
++            TokenCalibration::for_model(alias).initial_chars_per_token,
++            qualified.initial_chars_per_token
++        );
++    }
++    for unmeasured in [
++        "openai/gpt-5.6-sol-pro",
++        "custom/gpt-5.6-sol",
++        "tencent/hy4-preview",
++    ] {
++        assert_eq!(
++            TokenCalibration::for_model(unmeasured).initial_chars_per_token,
++            None
++        );
++    }
++}
++
++#[test]
++fn model_starting_defaults_give_way_to_continued_calibration() {
++    let started_at = Instant::now();
++    let model = "openai/gpt-5.6-sol:nitro";
++    let mut tracker = GenerationRateTracker::new(true);
++    let mut suffixes = Vec::new();
++
++    for (index, chars) in [600, 900, 600].into_iter().enumerate() {
++        let start = started_at + Duration::from_secs(index as u64 * 10);
++        tracker.begin_turn(model);
++        tracker.sampling_started(/*active_api_duration_ms*/ 0, start);
++        tracker.observe_delta(RawResponseOutputKind::Text, chars / 2, start);
++        tracker.observe_delta(
++            RawResponseOutputKind::Text,
++            chars / 2,
++            start + Duration::from_secs(1),
++        );
++        suffixes.push(
++            tracker
++                .status_suffix(start + Duration::from_secs(1))
++                .unwrap(),
++        );
++        tracker.response_completed(Some(200), Some(0));
++        tracker.finish_turn(start + Duration::from_secs(1));
++
++        if index == 0 {
++            // No synthetic sample weight: the first response establishes 3.0.
++            assert_eq!(tracker.calibration().text.chars_per_token(), Some(3.0));
++        } else if index == 1 {
++            // Old counts halve before adding the next response: 1200 / 300.
++            assert_eq!(tracker.calibration().text.chars_per_token(), Some(4.0));
++        }
++    }
++
++    insta::assert_snapshot!(
++        "model_starting_defaults_and_continued_calibration",
++        suffixes.join("\n")
++    );
++
++    let learned = tracker.calibration().text.chars_per_token();
++    tracker.begin_turn("anthropic/claude-opus-5");
++    assert!(!tracker.calibration().text.is_calibrated());
++    tracker.begin_turn(model);
++    assert_eq!(tracker.calibration().text.chars_per_token(), learned);
++}
++
+ #[test]
+ fn calibration_is_kept_per_model() {
+     let started_at = Instant::now();
+@@ -406,7 +483,11 @@ fn calibration_is_kept_per_model() {
+     let other_started_at = started_at + Duration::from_secs(100);
+     tracker.begin_turn("other");
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, other_started_at);
+-    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, other_started_at);
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 400,
++        other_started_at,
++    );
+     tracker.observe_delta(
+         RawResponseOutputKind::Text,
+         /*chars*/ 400,
+@@ -421,7 +502,11 @@ fn calibration_is_kept_per_model() {
+     let dense_started_at = started_at + Duration::from_secs(200);
+     tracker.begin_turn("dense");
+     tracker.sampling_started(/*active_api_duration_ms*/ 0, dense_started_at);
+-    tracker.observe_delta(RawResponseOutputKind::Text, /*chars*/ 400, dense_started_at);
++    tracker.observe_delta(
++        RawResponseOutputKind::Text,
++        /*chars*/ 400,
++        dense_started_at,
++    );
+     tracker.observe_delta(
+         RawResponseOutputKind::Text,
+         /*chars*/ 400,
+diff --git a/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__generation_rate__tests__model_starting_defaults_and_continued_calibration.snap b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__generation_rate__tests__model_starting_defaults_and_continued_calibration.snap
+new file mode 100644
+index 00000000..d14af9a0
+--- /dev/null
++++ b/codex-rs/tui/src/chatwidget/snapshots/codex_tui__chatwidget__generation_rate__tests__model_starting_defaults_and_continued_calibration.snap
+@@ -0,0 +1,8 @@
++---
++source: tui/src/chatwidget/generation_rate_tests.rs
++assertion_line: 443
++expression: "suffixes.join(\"\\n\")"
++---
++stream ~68.8 tok/s · API ~137.5 tok/s
++stream ~150.0 tok/s · API ~300.0 tok/s
++stream ~75.0 tok/s · API ~150.0 tok/s

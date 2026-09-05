@@ -3,7 +3,7 @@ set -eu
 
 repo_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 profile="${1:-${SIMPLEROUTER_CODEX_PROFILE:-dev-small}}"
-source_dir="${SIMPLEROUTER_CODEX_SOURCE:-$repo_dir/.build/codex-rust-v0.147.0/codex-rs}"
+source_dir="${SIMPLEROUTER_CODEX_SOURCE:-$repo_dir/.build/codex-rust-v0.153.4/codex-rs}"
 target_dir="${SIMPLEROUTER_CODEX_TARGET:-$repo_dir/.build/codex-target}"
 install_root="${SIMPLEROUTER_CODEX_INSTALL_ROOT:-$HOME/.local/share/simplerouter/simplerouter-codex}"
 cargo_home="${CARGO_HOME:-$repo_dir/.build/cargo-home}"
@@ -51,7 +51,7 @@ fi
 if [ -n "${SIMPLEROUTER_CODEX_OFFICIAL_PACKAGE:-}" ]; then
     official_package="$SIMPLEROUTER_CODEX_OFFICIAL_PACKAGE"
 else
-    pinned_official_package="$HOME/.codex/packages/standalone/releases/0.147.0-$target"
+    pinned_official_package="$HOME/.codex/packages/standalone/releases/0.153.4-$target"
     if [ -d "$pinned_official_package" ]; then
         official_package="$pinned_official_package"
     else
@@ -153,7 +153,7 @@ ln -sfn bin/codex "$install_root/codex"
 cat >"$install_root/codex-package.json.tmp.$$" <<EOF
 {
   "layoutVersion": 1,
-  "version": "0.147.0",
+  "version": "0.153.4",
   "target": "$target",
   "variant": "codex",
   "entrypoint": "bin/codex",

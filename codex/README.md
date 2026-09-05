@@ -1,8 +1,11 @@
 # Patched Codex companion
 
-The companion binary is OpenAI Codex `rust-v0.147.0` plus the ordered patch
-series in `patches/0.147.0`. Those patch files—not a generated Codex checkout—
+The companion binary is OpenAI Codex `rust-v0.153.4` plus the ordered patch
+series in `patches/0.153.4`. Those patch files—not a generated Codex checkout—
 are the source of truth committed to this repository.
+
+Live token estimates start from [measured model ratios](token-rate-defaults.md)
+and continue adapting to valid usage reports during the session.
 
 Prepare a clean checkout and verify its exact resulting Git tree:
 
@@ -75,8 +78,9 @@ same target directory. Make a `release` build only after the user explicitly
 requests it:
 
 ```sh
-cargo test --locked --package codex-tui simplerouter_streams_reasoning_live_by_default \
-  --target-dir ../../codex-target
+just test --locked --cargo-profile dev-small -p codex-tui --lib \
+  --target-dir ../../codex-target \
+  -E 'test(generation_rate) | test(live_reasoning) | test(simplerouter)'
 cargo build --locked --profile release \
   --target-dir ../../codex-target \
   --package codex-cli --bin codex
@@ -107,7 +111,7 @@ migration, recreate the generated checkout with `-RefreshSource`; do not edit,
 delete, or rewrite the user's `state_*.sqlite` migration ledger.
 
 When changing the companion, commit the work in the generated checkout, export
-the complete series from `rust-v0.147.0` with `git format-patch --no-signature`,
-replace the files in `patches/0.147.0`, and update the expected tree in
+the complete series from `rust-v0.153.4` with `git format-patch --no-signature`,
+replace the files in `patches/0.153.4`, and update the expected tree in
 `prepare_codex_companion.ps1`. A clean preparation must reproduce that tree
 before the root repository is committed.
