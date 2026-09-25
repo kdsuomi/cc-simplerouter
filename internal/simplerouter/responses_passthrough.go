@@ -39,6 +39,9 @@ type responsesPassthroughOptions struct {
 	// Used on OpenRouter routes pinned to Google AI Studio, whose native
 	// grounding lane rejects shared-pool web_search requests with 429s.
 	SubstituteOpenRouterWebSearch bool
+	// RetryOpenRouterWebSearch retries a rejected automatic search configuration
+	// with the explicit Exa adapter, retaining native search on working routes.
+	RetryOpenRouterWebSearch bool
 }
 
 type responsesPassthroughProxy struct {
@@ -48,6 +51,7 @@ type responsesPassthroughProxy struct {
 	options         responsesPassthroughOptions
 	jsonObjectOnly  atomic.Bool
 	stripImageInput atomic.Bool
+	exaWebSearch    atomic.Bool
 }
 
 func startResponsesPassthroughProxy(upstreamBase, model string, httpClient *http.Client, options responsesPassthroughOptions) (baseURL string, stop func(), err error) {
@@ -155,9 +159,13 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 		}
 	}
 	var toolTranslation responsesToolTranslation
-	if p.options.TranslateCustomTools || p.options.FlattenNamespaces ||
-		len(p.options.AllowedToolTypes) > 0 || p.options.SubstituteOpenRouterWebSearch {
-		toolTranslation, err = translateResponsesTools(request, p.options)
+	toolOptions := p.options
+	if p.exaWebSearch.Load() {
+		toolOptions.SubstituteOpenRouterWebSearch = true
+	}
+	if toolOptions.TranslateCustomTools || toolOptions.FlattenNamespaces ||
+		len(toolOptions.AllowedToolTypes) > 0 || toolOptions.SubstituteOpenRouterWebSearch {
+		toolTranslation, err = translateResponsesTools(request, toolOptions)
 		if err != nil {
 			writeResponsesError(w, http.StatusInternalServerError, "api_error", "translate tools: "+err.Error())
 			return
@@ -433,7 +441,18 @@ func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWrite
 		var fallbackPayload []byte
 		var changed bool
 		var fallbackErr error
+		var searchFallback bool
 		switch {
+		case readErr == nil && resp.StatusCode == http.StatusBadRequest &&
+			p.options.RetryOpenRouterWebSearch && !toolTranslation.WebSearchSubstituted &&
+			rejectsOpenRouterWebSearch(errorBody):
+			fallbackName = "Exa web-search"
+			changed, fallbackErr = substituteOpenRouterWebSearchTools(request)
+			if changed && fallbackErr == nil {
+				fallbackPayload, fallbackErr = json.Marshal(request)
+				toolTranslation.WebSearchSubstituted = true
+				searchFallback = true
+			}
 		case readErr == nil && rejectsJSONSchemaButSupportsJSONObject(errorBody):
 			p.jsonObjectOnly.Store(true)
 			fallbackName = "JSON-object"
@@ -453,6 +472,9 @@ func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWrite
 				writeResponsesError(w, http.StatusBadGateway, "api_error", p.options.Label+" request failed: "+err.Error())
 				return
 			}
+			if searchFallback && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				p.exaWebSearch.Store(true)
+			}
 		} else {
 			resp.Body = io.NopCloser(bytes.NewReader(errorBody))
 		}
@@ -463,6 +485,18 @@ func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWrite
 		return
 	}
 	p.relayResponsesStream(w, resp, toolTranslation)
+}
+
+func rejectsOpenRouterWebSearch(body []byte) bool {
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return false
+	}
+	return envelope.Error.Message == `Server tool "openrouter:web_search" failed: invalid request (400)`
 }
 
 func (p *responsesPassthroughProxy) sendResponsesRequest(r *http.Request, payload []byte) (*http.Response, error) {

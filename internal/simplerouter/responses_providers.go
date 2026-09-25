@@ -84,6 +84,7 @@ func openRouterResponsesOptions(model, providerTag string) responsesPassthroughO
 		TranslateCustomTools:          openRouterRouteTargetsMeta(model, providerTag),
 		FlattenNamespaces:             true,
 		SubstituteOpenRouterWebSearch: openRouterRouteTargetsAIStudio(providerTag),
+		RetryOpenRouterWebSearch:      true,
 	}
 }
 
