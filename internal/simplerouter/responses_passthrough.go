@@ -24,6 +24,7 @@ type responsesPassthroughOptions struct {
 	CoalesceDeveloperMessages         bool
 	OmitPromptCacheKey                bool
 	OmitEncryptedReasoningInclude     bool
+	PreserveReasoningSignatures       bool
 	EnsureTextFormat                  bool
 	// FlattenNamespaces rewrites Codex multi-agent namespace tools into top-level
 	// function tools (namespace__name). Required for providers such as xAI that
@@ -101,6 +102,12 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 	}
 	model, _ := json.Marshal(p.model)
 	request["model"] = model
+	if p.options.PreserveReasoningSignatures {
+		if err := restoreResponsesReasoningSignatures(request); err != nil {
+			writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
+	}
 	if p.options.CoalesceDeveloperMessages {
 		if err := coalesceResponsesDeveloperMessages(request); err != nil {
 			writeResponsesError(w, http.StatusInternalServerError, "api_error", "normalize developer messages: "+err.Error())
@@ -630,6 +637,9 @@ func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, 
 		for _, block := range blocks {
 			if len(block) == 0 {
 				continue
+			}
+			if p.options.PreserveReasoningSignatures {
+				block = preserveResponsesReasoningSignatures(block)
 			}
 			if _, err := w.Write(block); err != nil {
 				return false

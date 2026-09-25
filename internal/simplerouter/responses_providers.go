@@ -79,6 +79,7 @@ func lmStudioResponsesOptions() responsesPassthroughOptions {
 func openRouterResponsesOptions(model, providerTag string) responsesPassthroughOptions {
 	return responsesPassthroughOptions{
 		Label:                         "OpenRouter",
+		PreserveReasoningSignatures:   true,
 		ProviderTag:                   providerTag,
 		TranslateCustomTools:          openRouterRouteTargetsMeta(model, providerTag),
 		FlattenNamespaces:             true,

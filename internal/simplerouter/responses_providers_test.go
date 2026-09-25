@@ -50,7 +50,7 @@ func TestOpenRouterResponsesOptions(t *testing.T) {
 	// route, so all routes flatten them.
 	got := openRouterResponsesOptions("z-ai/glm-5.2", "")
 	if got.Label != "OpenRouter" || got.ProviderTag != "" || got.TranslateCustomTools ||
-		!got.FlattenNamespaces || got.SubstituteOpenRouterWebSearch {
+		!got.FlattenNamespaces || got.SubstituteOpenRouterWebSearch || !got.PreserveReasoningSignatures {
 		t.Fatalf("OpenRouter options = %+v", got)
 	}
 	pinned := openRouterResponsesOptions("z-ai/glm-5.2", "z-ai")

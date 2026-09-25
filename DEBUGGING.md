@@ -1,5 +1,30 @@
 # Debugging SimpleRouter CLI Patches
 
+## OpenRouter thinking signatures in Codex
+
+OpenRouter can return signed reasoning items with `signature` and `format`
+fields instead of `encrypted_content`. Codex's reasoning type does not retain
+those fields. Without translation, the transcript keeps the readable summary
+but loses the signature, and OpenRouter drops the unsigned thinking on replay.
+
+The OpenRouter Responses proxy wraps this metadata in a versioned
+`simplerouter-responses-reasoning-v1:` envelope carried by `encrypted_content`.
+It restores the original fields before forwarding the next request, including
+any original native `encrypted_content`. The envelope is encoded, not newly
+encrypted; the provider's opaque signature is preserved without decryption.
+Readable reasoning remains in its original display fields. Native reasoning
+without a separate signature passes through unchanged.
+
+This applies to newly received reasoning. Signatures already lost from older
+transcripts cannot be reconstructed. Restart SimpleRouter after installing the
+updated router to use the fix; a Codex companion rebuild is not needed.
+
+Run the focused regression tests with:
+
+```sh
+go test ./internal/simplerouter -run 'TestOpenRouterReasoningSignature|TestResponsesReasoningSignatures'
+```
+
 ## OpenRouter /responses: server-tools reasoning replay
 
 When a `/responses` request carries a server-side tool such as `web_search`,
