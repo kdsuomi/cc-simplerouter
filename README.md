@@ -2,7 +2,7 @@
 
 `simplerouter` launches an installed [OpenAI Codex CLI](https://developers.openai.com/codex)
 with an existing Codex subscription or against OpenRouter, Google AI Studio, OpenAI,
-xAI, DeepSeek, Z.AI, Meta Model API, or a local LM Studio server.
+xAI, DeepSeek, Xiaomi MiMo, Z.AI, Meta Model API, or a local LM Studio server.
 It supplies Codex with one session-scoped Responses provider and a model descriptor
 derived from the installed Codex release, preserving Codex features such as freeform
 `apply_patch`, namespaced tools, parallel tool calls, reasoning, and multi-agent support.
@@ -22,6 +22,7 @@ simplerouter --provider gemini --select-model     # live Google AI Studio catalo
 simplerouter --provider openai --model gpt-5.6-sol
 simplerouter --provider xai --model grok-4.5       # Grok CLI login or XAI_API_KEY
 simplerouter --provider deepseek --model deepseek-v4-flash
+simplerouter --provider mimo --model mimo-v2.6-pro-ultraspeed
 simplerouter --provider zai --model glm-5.2
 simplerouter --provider meta --model muse-spark-1.2
 simplerouter --provider lmstudio                    # models from localhost:1234
@@ -109,6 +110,7 @@ uses a different protocol.
 | OpenAI | `POST https://api.openai.com/v1/responses` | Direct |
 | xAI (Grok) | `POST https://api.x.ai/v1/responses` | Loopback Responses compatibility proxy |
 | DeepSeek | `POST https://api.deepseek.com/chat/completions` | Loopback Responses-to-Chat translator |
+| Xiaomi MiMo | `POST https://api.xiaomimimo.com/v1/chat/completions` | Loopback Responses-to-Chat translator |
 | Z.AI | `POST https://api.z.ai/api/paas/v4/chat/completions` | Loopback Responses-to-Chat translator |
 | Meta Model API | `POST https://api.meta.ai/v1/responses` | Loopback Responses compatibility proxy |
 | LM Studio | `POST http://127.0.0.1:1234/v1/responses` | Loopback Responses compatibility proxy |
@@ -166,6 +168,17 @@ shared upstream pool, which rejects any request carrying `web_search` with an
 instant 429. Substituted searches stream back renamed to Codex's native
 `web_search_call` items, and prior-turn search items replay unchanged.
 
+GPT-4-family OpenRouter routes cap the expanded tool list at 128 to match the
+provider limit. Explicitly selected tools, core coding tools, and recently used
+tools take priority; remaining slots follow the original tool order. Overflow
+integration tools are unavailable for that request. Enable fewer plugins or MCP
+tools if a needed integration is omitted.
+
+If OpenRouter rejects its server-side web search with `invalid request (400)`,
+the proxy retries once without web search. A successful retry disables built-in
+web search for the rest of that proxy session and tells the model about the
+limitation.
+
 OpenRouter model and provider tables include a `Privacy` column. Provider
 endpoints in OpenRouter's zero-data-retention list are marked `zdr`; all others
 are marked `non-zdr`.
@@ -177,7 +190,7 @@ translates Codex functions, custom tools, namespaces, reasoning levels, images,
 and Google Search, then replays the provider's typed steps, thought signatures,
 citations, and search results on later turns.
 
-The DeepSeek and Z.AI adapters translate the complete Responses conversation to
+The DeepSeek, MiMo, and Z.AI adapters translate the complete Responses conversation to
 Chat Completions. They flatten namespaced tools, wrap freeform custom tools such
 as `apply_patch` as functions, and reconstruct the original Codex tool identity
 on the return stream. Provider reasoning is streamed live and preserved
@@ -188,6 +201,11 @@ DeepSeek receives its documented `thinking` object, compatible reasoning-effort
 mapping, and streamed usage request. Z.AI receives `thinking.clear_thinking:
 false`, `tool_stream: true`, and its documented reasoning effort, including
 `none`.
+
+MiMo uses its documented `thinking.type` toggle, with thinking enabled by default
+and disabled by `--disable-thinking`. It preserves `reasoning_content` across
+tool calls and reads usage from the stream without sending `reasoning_effort`
+or provider-specific streaming flags.
 
 The Meta adapter preserves the native Responses protocol and server-managed
 reasoning replay. It caps Codex-only `max` and `ultra` reasoning levels at
@@ -247,8 +265,12 @@ OpenRouter, Gemini, and LM Studio catalogs are fetched from their live model end
 The OpenRouter list keeps the provider's popularity order with recommended
 coding models pinned at the top. The Gemini list is restricted to usable text
 generation models. LM Studio lists installed LLMs and uses loaded-instance
-metadata when available. OpenAI, xAI, DeepSeek, Z.AI, and Meta use small,
+metadata when available. OpenAI, xAI, DeepSeek, MiMo, Z.AI, and Meta use small,
 documented curated lists.
+
+MiMo supports only `mimo-v2.6-pro`, `mimo-v2.6-flash`, and
+`mimo-v2.6-pro-ultraspeed`, each with a 1M-token context window. Older and audio
+models are excluded, including from explicit `--model` passthrough.
 
 xAI's curated list starts with `grok-4.5` (500k context, default high reasoning),
 then `grok-4.3`, `grok-build-0.1`, and the Grok 4.20 reasoning / non-reasoning /
@@ -271,7 +293,7 @@ simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key
 ```
 
 - `--model MODEL`: model ID, display name, or unique suffix
-- `--provider PROVIDER`: `openrouter`, `gemini`, `openai`, `xai` (alias `grok`), `deepseek`, `zai`, `meta`, `lmstudio`, or `codex`
+- `--provider PROVIDER`: `openrouter`, `gemini`, `openai`, `xai` (alias `grok`), `deepseek`, `mimo`, `zai`, `meta`, `lmstudio`, or `codex`
 - `--select-model`: open the provider/model picker even when a choice is saved
 - `--reset-key`: clear every saved provider key before selection
 - `--disable-thinking`: disable Codex reasoning and the provider's thinking mode
@@ -280,7 +302,7 @@ simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key
 If the first positional argument names a directory, Codex starts there. Other
 positional text becomes the initial prompt. A provider can usually be inferred
 from an explicit model ID: slash-qualified IDs select OpenRouter, while
-`gemini-*`, `gpt-*`, `grok-*`, `deepseek-*`, `glm-*`, and `muse-*` select their first-class
+`gemini-*`, `gpt-*`, `grok-*`, `deepseek-*`, `mimo-*`, `glm-*`, and `muse-*` select their first-class
 providers.
 
 ## Keys and local configuration
@@ -294,6 +316,7 @@ Environment variables take precedence over saved values:
 | OpenAI | `OPENAI_API_KEY` |
 | xAI (Grok) | `XAI_API_KEY`, `GROK_API_KEY`, then Grok CLI session in `~/.grok/auth.json` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
+| Xiaomi MiMo | `MIMO_API_KEY` |
 | Z.AI | `ZAI_API_KEY`, `BIGMODEL_API_KEY` |
 | Meta | `META_API_KEY`, `MODEL_API_KEY` |
 | LM Studio | None; the local server is used directly |
@@ -305,6 +328,9 @@ automatically and refreshed via OIDC when expired; that session token is not
 copied into SimpleRouter's config. Selected keys and models are stored in
 `~/.simplerouter/config.json`; `--reset-key` removes the stored keys without
 discarding model choices.
+
+MiMo reuses `mimo_api_key` in that config and remembers its selection in
+`last_mimo_model`.
 
 For LM Studio, start the Local Server before selecting the provider. SimpleRouter
 connects to `http://127.0.0.1:1234/v1`, shows the installed LLMs, and remembers
@@ -331,6 +357,10 @@ marker enables the companion's generation-rate display without changing routing.
   function tools on these Chat endpoints, so Codex server-side web search is
   unavailable on those two routes. Shell, `apply_patch`, MCP/function tools,
   and multi-agent namespace tools remain available.
+- The MiMo Chat adapter currently translates function and custom tools only;
+  MiMo's native web-search extension is not exposed through this route. MiMo
+  uses automatic tool selection; its API treats other `tool_choice` values as
+  `auto`.
 - A model or endpoint can still reject a capability that its provider does not
   implement. `--disable-thinking` is the fallback for models that do not accept
   reasoning.
@@ -345,6 +375,16 @@ go test ./... -count=1
 go vet ./...
 go build ./...
 ```
+
+To run small live tests for all three MiMo V2.6 models (streaming, usage,
+thinking disabled, and reasoning replay after a namespaced tool call):
+
+```sh
+SIMPLEROUTER_LIVE_MIMO=1 go test ./internal/simplerouter -run '^TestLiveMiMoV26$' -count=1 -v
+```
+
+These tests use `MIMO_API_KEY` or the saved `mimo_api_key`, send synthetic
+prompts, and do not change the saved configuration.
 
 Build release artifacts for Windows amd64/arm64, macOS arm64, and Linux
 amd64/arm64 with:
@@ -361,6 +401,8 @@ Protocol references used by this implementation:
 - [OpenRouter provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)
 - [Gemini Interactions API V1](https://ai.google.dev/api/interactions-api-v1)
 - [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion)
+- [MiMo Chat Completions](https://mimo.mi.com/docs/en-US/api/chat/openai-api)
+- [MiMo model catalog](https://mimo.mi.com/docs/en-US/quick-start/summary/model)
 - [Z.AI Chat Completions](https://docs.z.ai/api-reference/llm/chat-completion)
 - [Meta Model API models](https://dev.meta.ai/docs/models) (`muse-spark-1.2`, `muse-spark-1.2-contributor`, `muse-spark-1.1`)
 - [Meta Model API coding agents (Codex)](https://dev.meta.ai/docs/coding-agents)

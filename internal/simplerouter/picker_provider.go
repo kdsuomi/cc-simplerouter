@@ -26,6 +26,7 @@ func providerOptions() []pickOption {
 		{ID: providerOpenAI, Label: "OpenAI", Detail: "GPT models, direct from OpenAI"},
 		{ID: providerXAI, Label: "xAI (Grok)", Detail: "Grok 4.5 / Build, API key or Grok CLI login"},
 		{ID: providerDeepSeek, Label: "DeepSeek", Detail: "DeepSeek models, Chat compatibility"},
+		{ID: providerMiMo, Label: "MiMo", Detail: "V2.6 Flash / Pro / Pro Ultraspeed"},
 		{ID: providerZAI, Label: "Z.AI", Detail: "GLM models, direct from Z.AI"},
 		{ID: providerMeta, Label: "Meta", Detail: "Muse Spark 1.2 / 1.1, native Responses API"},
 		{ID: providerLMStudio, Label: "LM Studio", Detail: "Local models, no API key"},

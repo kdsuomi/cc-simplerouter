@@ -33,25 +33,28 @@ type responsesPassthroughOptions struct {
 	// AllowedToolTypes, when non-empty, drops any tool whose type is not listed
 	// after translation (e.g. Codex tool_search on xAI).
 	AllowedToolTypes []string
+	// MaxTools caps the expanded tool list for endpoints with a hard limit.
+	// Zero leaves the list unlimited.
+	MaxTools int
 	// SubstituteOpenRouterWebSearch replaces Codex web_search tools with
 	// OpenRouter's server-side openrouter:web_search tool (Exa engine) and
 	// renames the resulting stream items back to web_search_call for Codex.
 	// Used on OpenRouter routes pinned to Google AI Studio, whose native
 	// grounding lane rejects shared-pool web_search requests with 429s.
 	SubstituteOpenRouterWebSearch bool
-	// RetryOpenRouterWebSearch retries a rejected automatic search configuration
-	// with the explicit Exa adapter, retaining native search on working routes.
+	// RetryOpenRouterWebSearch retries a rejected search configuration without
+	// web search, retaining search on working routes.
 	RetryOpenRouterWebSearch bool
 }
 
 type responsesPassthroughProxy struct {
-	upstreamBase    string
-	model           string
-	httpClient      *http.Client
-	options         responsesPassthroughOptions
-	jsonObjectOnly  atomic.Bool
-	stripImageInput atomic.Bool
-	exaWebSearch    atomic.Bool
+	upstreamBase     string
+	model            string
+	httpClient       *http.Client
+	options          responsesPassthroughOptions
+	jsonObjectOnly   atomic.Bool
+	stripImageInput  atomic.Bool
+	disableWebSearch atomic.Bool
 }
 
 func startResponsesPassthroughProxy(upstreamBase, model string, httpClient *http.Client, options responsesPassthroughOptions) (baseURL string, stop func(), err error) {
@@ -159,13 +162,15 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 		}
 	}
 	var toolTranslation responsesToolTranslation
-	toolOptions := p.options
-	if p.exaWebSearch.Load() {
-		toolOptions.SubstituteOpenRouterWebSearch = true
+	if p.disableWebSearch.Load() {
+		if _, err := omitOpenRouterWebSearch(request); err != nil {
+			writeResponsesError(w, http.StatusInternalServerError, "api_error", "omit web search: "+err.Error())
+			return
+		}
 	}
-	if toolOptions.TranslateCustomTools || toolOptions.FlattenNamespaces ||
-		len(toolOptions.AllowedToolTypes) > 0 || toolOptions.SubstituteOpenRouterWebSearch {
-		toolTranslation, err = translateResponsesTools(request, toolOptions)
+	if p.options.TranslateCustomTools || p.options.FlattenNamespaces ||
+		len(p.options.AllowedToolTypes) > 0 || p.options.SubstituteOpenRouterWebSearch || p.options.MaxTools > 0 {
+		toolTranslation, err = translateResponsesTools(request, p.options)
 		if err != nil {
 			writeResponsesError(w, http.StatusInternalServerError, "api_error", "translate tools: "+err.Error())
 			return
@@ -444,13 +449,12 @@ func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWrite
 		var searchFallback bool
 		switch {
 		case readErr == nil && resp.StatusCode == http.StatusBadRequest &&
-			p.options.RetryOpenRouterWebSearch && !toolTranslation.WebSearchSubstituted &&
+			p.options.RetryOpenRouterWebSearch &&
 			rejectsOpenRouterWebSearch(errorBody):
-			fallbackName = "Exa web-search"
-			changed, fallbackErr = substituteOpenRouterWebSearchTools(request)
+			fallbackName = "search-free"
+			changed, fallbackErr = omitOpenRouterWebSearch(request)
 			if changed && fallbackErr == nil {
 				fallbackPayload, fallbackErr = json.Marshal(request)
-				toolTranslation.WebSearchSubstituted = true
 				searchFallback = true
 			}
 		case readErr == nil && rejectsJSONSchemaButSupportsJSONObject(errorBody):
@@ -473,7 +477,7 @@ func (p *responsesPassthroughProxy) forwardResponsesPayload(w http.ResponseWrite
 				return
 			}
 			if searchFallback && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				p.exaWebSearch.Store(true)
+				p.disableWebSearch.Store(true)
 			}
 		} else {
 			resp.Body = io.NopCloser(bytes.NewReader(errorBody))

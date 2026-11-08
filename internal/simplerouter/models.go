@@ -44,6 +44,9 @@ var recommendedFirstClassModelIDs = []string{
 	"gpt-5.4-mini",
 	"deepseek-v4-flash",
 	"deepseek-v4-pro",
+	"mimo-v2.6-pro",
+	"mimo-v2.6-flash",
+	"mimo-v2.6-pro-ultraspeed",
 	"glm-5.2",
 	"glm-5",
 }
@@ -83,6 +86,14 @@ func curatedProviderModels(provider string) []Model {
 		models = []Model{
 			{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
 			{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
+		}
+	case providerMiMo:
+		// V2.6 text models and 1M context from Xiaomi's model catalog:
+		// https://mimo.mi.com/docs/en-US/quick-start/summary/model
+		models = []Model{
+			{ID: "mimo-v2.6-pro", Name: "MiMo V2.6 Pro", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
+			{ID: "mimo-v2.6-flash", Name: "MiMo V2.6 Flash", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
+			{ID: "mimo-v2.6-pro-ultraspeed", Name: "MiMo V2.6 Pro Ultraspeed", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
 		}
 	case providerZAI:
 		models = []Model{

@@ -38,6 +38,29 @@ func deepSeekResponsesOptions(disableReasoning bool) responsesChatProxyOptions {
 	}
 }
 
+func startMiMoResponsesProxy(upstreamBase, model string, httpClient *http.Client, disableReasoning bool) (string, func(), error) {
+	return startResponsesChatProxy(upstreamBase, model, httpClient, mimoResponsesOptions(disableReasoning))
+}
+
+// MiMo uses a thinking toggle rather than reasoning_effort. Streaming usage
+// arrives without stream_options, and tool continuations replay reasoning_content.
+// https://mimo.mi.com/docs/en-US/api/chat/openai-api
+func mimoResponsesOptions(disableReasoning bool) responsesChatProxyOptions {
+	thinkingType := "enabled"
+	if disableReasoning {
+		thinkingType = "disabled"
+	}
+	return responsesChatProxyOptions{
+		Label:                "MiMo",
+		ChatPath:             "/chat/completions",
+		DisableReasoning:     disableReasoning,
+		ReasoningReplayField: "reasoning_content",
+		ExtraBody: map[string]any{
+			"thinking": map[string]any{"type": thinkingType},
+		},
+	}
+}
+
 func startZAIResponsesProxy(upstreamBase, model string, httpClient *http.Client, disableReasoning bool) (string, func(), error) {
 	return startResponsesChatProxy(upstreamBase, model, httpClient, zaiResponsesOptions(disableReasoning))
 }
@@ -77,6 +100,12 @@ func lmStudioResponsesOptions() responsesPassthroughOptions {
 // for OpenRouter's server-side search: the pinned native grounding lane runs on
 // OpenRouter's shared upstream pool, which rejects it with instant 429s.
 func openRouterResponsesOptions(model, providerTag string) responsesPassthroughOptions {
+	maxTools := 0
+	// GPT-4-family endpoints reject more than 128 tools after OpenRouter
+	// expands the request. Codex can expose hundreds of installed MCP tools.
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "openai/gpt-4") {
+		maxTools = 128
+	}
 	return responsesPassthroughOptions{
 		Label:                         "OpenRouter",
 		PreserveReasoningSignatures:   true,
@@ -85,6 +114,7 @@ func openRouterResponsesOptions(model, providerTag string) responsesPassthroughO
 		FlattenNamespaces:             true,
 		SubstituteOpenRouterWebSearch: openRouterRouteTargetsAIStudio(providerTag),
 		RetryOpenRouterWebSearch:      true,
+		MaxTools:                      maxTools,
 	}
 }
 

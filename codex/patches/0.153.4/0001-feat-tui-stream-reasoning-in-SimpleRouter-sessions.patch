@@ -1,7 +1,7 @@
 From 15ed0e09f2a403f61bc3a16a242cbc1e47e0c2dc Mon Sep 17 00:00:00 2001
 From: Kyle <kdsuomi@users.noreply.github.com>
 Date: Mon, 27 Jul 2026 22:54:43 -0400
-Subject: [PATCH 1/7] feat(tui): stream reasoning in SimpleRouter sessions
+Subject: [PATCH 1/8] feat(tui): stream reasoning in SimpleRouter sessions
 
 ---
  codex-rs/tui/src/bottom_pane/chat_composer.rs |   7 +

@@ -23,6 +23,7 @@ const (
 	providerGemini     = "gemini"
 	providerOpenAI     = "openai"
 	providerDeepSeek   = "deepseek"
+	providerMiMo       = "mimo"
 	providerZAI        = "zai"
 	providerMeta       = "meta"
 	providerXAI        = "xai"
@@ -40,6 +41,7 @@ type app struct {
 	geminiAPIBase   string // Gemini API base override (tests)
 	openAIAPIBase   string // OpenAI API base override (tests)
 	deepSeekAPIBase string // DeepSeek API base override (tests)
+	mimoAPIBase     string // MiMo API base override (tests)
 	zaiAPIBase      string // Z.AI API base override (tests)
 	metaAPIBase     string // Meta API base override (tests)
 	xaiAPIBase      string // xAI API base override (tests)
@@ -54,6 +56,7 @@ var findCodexFn = findCodex
 var prepareCodexModelCatalogFn = prepareCodexModelCatalog
 var startGeminiResponsesProxyFn = startGeminiResponsesProxy
 var startDeepSeekResponsesProxyFn = startDeepSeekResponsesProxy
+var startMiMoResponsesProxyFn = startMiMoResponsesProxy
 var startZAIResponsesProxyFn = startZAIResponsesProxy
 var startMetaResponsesProxyFn = startMetaResponsesProxy
 var startXAIResponsesProxyFn = startXAIResponsesProxy
@@ -87,7 +90,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("simplerouter", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
 	fs.StringVar(&modelFlag, "model", "", "Model id, name, or unique suffix")
-	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "xai", "deepseek", "zai", "meta", "lmstudio", or "codex"`)
+	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "xai", "deepseek", "mimo", "zai", "meta", "lmstudio", or "codex"`)
 	fs.BoolVar(&selectModel, "select-model", false, "Select a provider and model interactively")
 	fs.BoolVar(&resetKey, "reset-key", false, "Forget the saved API keys before launching")
 	fs.BoolVar(&disableThinking, "disable-thinking", false, "Disable model reasoning for provider compatibility")
@@ -114,7 +117,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 		return err
 	}
 	style := newTerminalStyle(a.stderr)
-	firstRun := modelFlag == "" && cfg.Provider == "" && cfg.LastModel == "" && cfg.LastGeminiModel == "" && cfg.LastOpenAIModel == "" && cfg.LastDeepSeekModel == "" && cfg.LastZAIModel == "" && cfg.LastMetaModel == "" && cfg.LastGrokModel == "" && cfg.LastLMStudioModel == ""
+	firstRun := modelFlag == "" && cfg.Provider == "" && cfg.LastModel == "" && cfg.LastGeminiModel == "" && cfg.LastOpenAIModel == "" && cfg.LastDeepSeekModel == "" && cfg.LastMiMoModel == "" && cfg.LastZAIModel == "" && cfg.LastMetaModel == "" && cfg.LastGrokModel == "" && cfg.LastLMStudioModel == ""
 	if firstRun {
 		printSetupBanner(a.stderr, style)
 		fmt.Fprintln(a.stderr)
@@ -163,6 +166,8 @@ func (a *app) run(ctx context.Context, args []string) error {
 			key, res, err = a.selectOpenAI(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		case providerDeepSeek:
 			key, res, err = a.selectDeepSeek(ctx, cfg, modelFlag, selectModel, firstRun, style)
+		case providerMiMo:
+			key, res, err = a.selectMiMo(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		case providerZAI:
 			key, res, err = a.selectZAI(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		case providerMeta:
@@ -201,6 +206,9 @@ func (a *app) run(ctx context.Context, args []string) error {
 	case providerDeepSeek:
 		cfg.DeepSeekAPIKey = key
 		cfg.LastDeepSeekModel = modelID
+	case providerMiMo:
+		cfg.MiMoAPIKey = key
+		cfg.LastMiMoModel = modelID
 	case providerZAI:
 		cfg.ZAIAPIKey = key
 		cfg.LastZAIModel = modelID
@@ -243,6 +251,13 @@ func (a *app) run(ctx context.Context, args []string) error {
 		proxyURL, stop, perr := startDeepSeekResponsesProxyFn(a.deepSeekBase(), modelID, a.httpClient, disableThinking)
 		if perr != nil {
 			return fmt.Errorf("start DeepSeek Responses proxy: %w", perr)
+		}
+		defer stop()
+		baseURL = proxyURL
+	case provider == providerMiMo:
+		proxyURL, stop, perr := startMiMoResponsesProxyFn(a.mimoBase(), modelID, a.httpClient, disableThinking)
+		if perr != nil {
+			return fmt.Errorf("start MiMo Responses proxy: %w", perr)
 		}
 		defer stop()
 		baseURL = proxyURL
@@ -357,6 +372,9 @@ func inferProviderFromModel(model string) string {
 	if strings.HasPrefix(lower, "deepseek-") {
 		return providerDeepSeek
 	}
+	if strings.HasPrefix(lower, "mimo-") {
+		return providerMiMo
+	}
 	if strings.HasPrefix(lower, "glm-") {
 		return providerZAI
 	}
@@ -387,7 +405,7 @@ func canonicalProvider(input string) string {
 
 func isKnownProvider(provider string) bool {
 	switch provider {
-	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerZAI, providerMeta, providerXAI, providerLMStudio, providerCodex:
+	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerMiMo, providerZAI, providerMeta, providerXAI, providerLMStudio, providerCodex:
 		return true
 	default:
 		return false
@@ -395,7 +413,7 @@ func isKnownProvider(provider string) bool {
 }
 
 func providerNames() []string {
-	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerXAI, providerDeepSeek, providerZAI, providerMeta, providerLMStudio, providerCodex}
+	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerXAI, providerDeepSeek, providerMiMo, providerZAI, providerMeta, providerLMStudio, providerCodex}
 }
 
 func (a *app) openRouterBase() string {
@@ -425,6 +443,13 @@ func (a *app) deepSeekBase() string {
 		return a.deepSeekAPIBase
 	}
 	return defaultDeepSeekAPIBase
+}
+
+func (a *app) mimoBase() string {
+	if strings.TrimSpace(a.mimoAPIBase) != "" {
+		return a.mimoAPIBase
+	}
+	return defaultMiMoAPIBase
 }
 
 func (a *app) zaiBase() string {
@@ -463,6 +488,8 @@ func launchProviderLabel(provider string, res pickResult) string {
 		return "OpenAI"
 	case providerDeepSeek:
 		return "DeepSeek"
+	case providerMiMo:
+		return "MiMo"
 	case providerZAI:
 		return "Z.AI"
 	case providerMeta:
@@ -669,6 +696,12 @@ func (a *app) deepSeekKey(ctx context.Context, cfg Config) (string, error) {
 	})
 }
 
+func (a *app) mimoKey(ctx context.Context, cfg Config) (string, error) {
+	return a.providerKey(ctx, "MiMo", []string{"MIMO_API_KEY"}, cfg.MiMoAPIKey, func(ctx context.Context, key string) error {
+		return validateBearerModelsKey(ctx, a.httpClient, a.mimoBase(), key, "MiMo")
+	})
+}
+
 func (a *app) zaiKey(ctx context.Context, cfg Config) (string, error) {
 	return a.providerKey(ctx, "Z.AI", []string{"ZAI_API_KEY", "BIGMODEL_API_KEY"}, cfg.ZAIAPIKey, nil)
 }
@@ -837,6 +870,21 @@ func (a *app) selectDeepSeek(ctx context.Context, cfg Config, modelFlag string, 
 		return "", pickResult{}, err
 	}
 	return a.selectStaticModel(providerDeepSeek, "DeepSeek", key, cfg.LastDeepSeekModel, modelFlag, selectModel, firstRun, style)
+}
+
+func (a *app) selectMiMo(ctx context.Context, cfg Config, modelFlag string, selectModel, firstRun bool, style terminalStyle) (string, pickResult, error) {
+	// MiMo support is intentionally limited to the V2.6 text models. Do not
+	// offer the generic unknown-model passthrough for older or audio models.
+	if modelID := strings.TrimSpace(modelFlag); modelID != "" {
+		if _, ok := resolveModel(modelID, curatedProviderModels(providerMiMo)); !ok {
+			return "", pickResult{}, fmt.Errorf("unsupported MiMo model %q (use mimo-v2.6-flash, mimo-v2.6-pro, or mimo-v2.6-pro-ultraspeed)", modelID)
+		}
+	}
+	key, err := a.mimoKey(ctx, cfg)
+	if err != nil {
+		return "", pickResult{}, err
+	}
+	return a.selectStaticModel(providerMiMo, "MiMo", key, cfg.LastMiMoModel, modelFlag, selectModel, firstRun, style)
 }
 
 func (a *app) selectZAI(ctx context.Context, cfg Config, modelFlag string, selectModel, firstRun bool, style terminalStyle) (string, pickResult, error) {

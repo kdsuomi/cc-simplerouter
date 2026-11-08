@@ -1,7 +1,7 @@
 From fd54ed1e0e7238ecd0a2e9560346c1ec9eb46af4 Mon Sep 17 00:00:00 2001
 From: SimpleRouter <simplerouter@local>
 Date: Fri, 7 Aug 2026 00:00:04 -0400
-Subject: [PATCH 4/7] feat(tui): improve live generation rate accuracy
+Subject: [PATCH 4/8] feat(tui): improve live generation rate accuracy
 
 ---
  .../schema/json/ServerNotification.json       |  80 +++

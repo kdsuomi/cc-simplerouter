@@ -59,6 +59,9 @@ func translateResponsesTools(request map[string]json.RawMessage, options respons
 			return out, err
 		}
 	}
+	if err := limitResponsesTools(request, options.MaxTools); err != nil {
+		return out, err
+	}
 	return out, nil
 }
 
@@ -109,6 +112,71 @@ func substituteOpenRouterWebSearchTools(request map[string]json.RawMessage) (boo
 	}
 	request["tools"] = encoded
 	return true, nil
+}
+
+// omitOpenRouterWebSearch keeps ordinary tools available when OpenRouter's
+// server-side search rejects the request, including when the Exa adapter fails.
+// Prior search results stay in the conversation; only new searches are disabled.
+func omitOpenRouterWebSearch(request map[string]json.RawMessage) (bool, error) {
+	var tools []json.RawMessage
+	if json.Unmarshal(request["tools"], &tools) != nil {
+		return false, nil
+	}
+	isSearch := func(raw json.RawMessage) bool {
+		var tool struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal(raw, &tool)
+		return tool.Type == "web_search" || tool.Type == "web_search_preview" || tool.Type == "openrouter:web_search"
+	}
+	kept := make([]json.RawMessage, 0, len(tools))
+	for _, tool := range tools {
+		if !isSearch(tool) {
+			kept = append(kept, tool)
+		}
+	}
+	if len(kept) == len(tools) {
+		return false, nil
+	}
+	encoded, err := json.Marshal(kept)
+	if err != nil {
+		return false, err
+	}
+	request["tools"] = encoded
+	if len(kept) == 0 || isSearch(request["tool_choice"]) {
+		delete(request, "tool_choice")
+	} else {
+		// A restricted tool choice must not refer to the removed search tool.
+		var choice map[string]json.RawMessage
+		if json.Unmarshal(request["tool_choice"], &choice) == nil {
+			var allowed []json.RawMessage
+			if json.Unmarshal(choice["tools"], &allowed) == nil {
+				remaining := make([]json.RawMessage, 0, len(allowed))
+				for _, tool := range allowed {
+					if !isSearch(tool) {
+						remaining = append(remaining, tool)
+					}
+				}
+				if len(remaining) == 0 {
+					delete(request, "tool_choice")
+				} else if len(remaining) != len(allowed) {
+					choice["tools"], err = json.Marshal(remaining)
+					if err != nil {
+						return false, err
+					}
+					request["tool_choice"], err = json.Marshal(choice)
+					if err != nil {
+						return false, err
+					}
+				}
+			}
+		}
+	}
+	var instructions string
+	_ = json.Unmarshal(request["instructions"], &instructions)
+	instructions += "\n\nBuilt-in web search is unavailable because the provider rejected its search tool. Continue with the remaining tools and available information. Disclose this limitation when an answer requires current web information."
+	request["instructions"], err = json.Marshal(instructions)
+	return true, err
 }
 
 func translateResponsesCustomTools(request map[string]json.RawMessage) (map[string]struct{}, error) {
@@ -697,7 +765,7 @@ func (t *responsesToolStreamTranslator) processBlock(block []byte) [][]byte {
 			// forward them under a synthetic id so the client counts their
 			// characters for the rate display without any consumer matching
 			// the real call. The actual input arrives via output_item.done.
-			return t.metricOnlyArgumentDelta(block, fields, /*markStreamed*/ true)
+			return t.metricOnlyArgumentDelta(block, fields /*markStreamed*/, true)
 		}
 		blocks := [][]byte{block}
 		if name, ok := t.restoreEventName(fields); ok {
@@ -707,7 +775,7 @@ func (t *responsesToolStreamTranslator) processBlock(block []byte) [][]byte {
 		// Plain function-call argument deltas are ignored by the client's SSE
 		// parser; append a metric-only copy so their generation is visible to
 		// the rate display too.
-		return append(blocks, t.metricOnlyArgumentDelta(block, fields, /*markStreamed*/ false)...)
+		return append(blocks, t.metricOnlyArgumentDelta(block, fields /*markStreamed*/, false)...)
 	}
 	if !needsTranslation {
 		return [][]byte{block}

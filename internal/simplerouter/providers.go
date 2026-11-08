@@ -14,6 +14,7 @@ const (
 	defaultGeminiAPIBase   = "https://generativelanguage.googleapis.com/v1"
 	defaultOpenAIAPIBase   = "https://api.openai.com/v1"
 	defaultDeepSeekAPIBase = "https://api.deepseek.com"
+	defaultMiMoAPIBase     = "https://api.xiaomimimo.com/v1"
 	defaultZAIAPIBase      = "https://api.z.ai/api/paas/v4"
 	defaultMetaAPIBase     = "https://api.meta.ai/v1"
 	defaultXAIAPIBase      = "https://api.x.ai/v1"

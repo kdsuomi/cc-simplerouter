@@ -169,17 +169,21 @@ func buildCodexModelCatalog(raw []byte, model Model, supportsReasoning bool) ([]
 	}
 
 	var template map[string]any
+	fullToolModel := func(candidate map[string]any) bool {
+		// Newer Codex catalogs (0.153+) no longer serialize this capability.
+		// Preserve the older explicit-false opt-out while accepting its absence.
+		parallel, present := candidate["supports_parallel_tool_calls"]
+		return candidate["apply_patch_tool_type"] == "freeform" && (!present || boolValue(parallel))
+	}
 	for _, candidate := range source.Models {
-		if candidate["apply_patch_tool_type"] == "freeform" &&
-			boolValue(candidate["supports_parallel_tool_calls"]) &&
-			candidate["tool_mode"] == nil {
+		if fullToolModel(candidate) && candidate["tool_mode"] == nil {
 			template = candidate
 			break
 		}
 	}
 	if template == nil {
 		for _, candidate := range source.Models {
-			if candidate["apply_patch_tool_type"] == "freeform" && boolValue(candidate["supports_parallel_tool_calls"]) {
+			if fullToolModel(candidate) {
 				template = candidate
 				break
 			}

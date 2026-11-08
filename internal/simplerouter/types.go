@@ -6,6 +6,7 @@ type Config struct {
 	GeminiAPIKey      string `json:"gemini_api_key,omitempty"`
 	OpenAIAPIKey      string `json:"openai_api_key,omitempty"`
 	DeepSeekAPIKey    string `json:"deepseek_api_key,omitempty"`
+	MiMoAPIKey        string `json:"mimo_api_key,omitempty"`
 	ZAIAPIKey         string `json:"zai_api_key,omitempty"`
 	MetaAPIKey        string `json:"meta_api_key,omitempty"`
 	XAIAPIKey         string `json:"xai_api_key,omitempty"`
@@ -13,6 +14,7 @@ type Config struct {
 	LastGeminiModel   string `json:"last_gemini_model,omitempty"`
 	LastOpenAIModel   string `json:"last_openai_model,omitempty"`
 	LastDeepSeekModel string `json:"last_deepseek_model,omitempty"`
+	LastMiMoModel     string `json:"last_mimo_model,omitempty"`
 	LastZAIModel      string `json:"last_zai_model,omitempty"`
 	LastMetaModel     string `json:"last_meta_model,omitempty"`
 	LastGrokModel     string `json:"last_grok_model,omitempty"`

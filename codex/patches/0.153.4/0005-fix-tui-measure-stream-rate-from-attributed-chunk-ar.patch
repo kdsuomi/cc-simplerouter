@@ -1,7 +1,7 @@
 From 160ae9b557a36b012fd507cc8e86e0b7e3a7d5a4 Mon Sep 17 00:00:00 2001
 From: kdsuomi <kdsuomi@users.noreply.github.com>
 Date: Fri, 28 Aug 2026 23:43:01 -0400
-Subject: [PATCH 5/7] fix(tui): measure stream rate from attributed chunk
+Subject: [PATCH 5/8] fix(tui): measure stream rate from attributed chunk
  arrivals
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

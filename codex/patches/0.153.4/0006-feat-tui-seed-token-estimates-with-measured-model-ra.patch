@@ -1,7 +1,7 @@
 From ba9d99c25baa91bf92cf41bafadb35ac0b2aab09 Mon Sep 17 00:00:00 2001
 From: SimpleRouter <simplerouter@local>
 Date: Fri, 4 Sep 2026 22:11:01 -0400
-Subject: [PATCH 6/7] feat(tui): seed token estimates with measured model
+Subject: [PATCH 6/8] feat(tui): seed token estimates with measured model
  ratios
 
 ---

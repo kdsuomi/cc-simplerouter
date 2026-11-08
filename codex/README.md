@@ -4,6 +4,13 @@ The companion binary is OpenAI Codex `rust-v0.153.4` plus the ordered patch
 series in `patches/0.153.4`. Those patch files—not a generated Codex checkout—
 are the source of truth committed to this repository.
 
+The companion advertises backend compatibility version `0.159.2` in its
+User-Agent, OpenAI `version` header, and model catalog requests/cache. This
+allows the backend to return current model metadata, including `gpt-6.1-sol`,
+while retaining the patched `0.153.4` runtime. The package manifest and displayed
+CLI version remain `0.153.4`; this is a compatibility override, not an upstream
+upgrade.
+
 Live token estimates start from [measured model ratios](token-rate-defaults.md)
 and continue adapting to valid usage reports during the session.
 

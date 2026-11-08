@@ -1,0 +1,118 @@
+From 21e074b5905bb15fe5415a6d3e34344d5568e86e Mon Sep 17 00:00:00 2001
+From: SimpleRouter <simplerouter@local>
+Date: Thu, 1 Oct 2026 22:48:19 -0400
+Subject: [PATCH 8/8] fix: advertise compatible backend client version
+
+---
+ codex-rs/login/src/auth/default_client.rs      |  3 ++-
+ .../login/src/auth/default_client_tests.rs     |  2 +-
+ codex-rs/model-provider-info/src/lib.rs        |  5 ++++-
+ .../src/model_provider_info_tests.rs           | 18 ++++++++++++++++++
+ codex-rs/models-manager/src/lib.rs             |  9 ++-------
+ 5 files changed, 27 insertions(+), 10 deletions(-)
+
+diff --git a/codex-rs/login/src/auth/default_client.rs b/codex-rs/login/src/auth/default_client.rs
+index cd4cbd54..e26df812 100644
+--- a/codex-rs/login/src/auth/default_client.rs
++++ b/codex-rs/login/src/auth/default_client.rs
+@@ -11,6 +11,7 @@ use codex_http_client::HttpClientBuilder;
+ use codex_http_client::HttpClientFactory;
+ use codex_http_client::OutboundProxyPolicy;
+ pub use codex_http_client::RequestBuilder as CodexRequestBuilder;
++pub use codex_model_provider_info::CODEX_BACKEND_CLIENT_VERSION;
+ use codex_terminal_detection::user_agent;
+ use http::HeaderMap;
+ use http::HeaderValue;
+@@ -162,7 +163,7 @@ pub fn is_first_party_chat_originator(originator_value: &str) -> bool {
+ }
+ 
+ pub fn get_codex_user_agent() -> String {
+-    let build_version = env!("CARGO_PKG_VERSION");
++    let build_version = CODEX_BACKEND_CLIENT_VERSION;
+     let os_info = os_info::get();
+     let originator = originator();
+     let prefix = format!(
+diff --git a/codex-rs/login/src/auth/default_client_tests.rs b/codex-rs/login/src/auth/default_client_tests.rs
+index 4565f797..e548a447 100644
+--- a/codex-rs/login/src/auth/default_client_tests.rs
++++ b/codex-rs/login/src/auth/default_client_tests.rs
+@@ -42,7 +42,7 @@ impl Write for TestLogSink {
+ fn test_get_codex_user_agent() {
+     let user_agent = get_codex_user_agent();
+     let originator = originator().value;
+-    let prefix = format!("{originator}/");
++    let prefix = format!("{originator}/{CODEX_BACKEND_CLIENT_VERSION} ");
+     assert!(user_agent.starts_with(&prefix));
+ }
+ 
+diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
+index 3fb3e87a..4dc269cd 100644
+--- a/codex-rs/model-provider-info/src/lib.rs
++++ b/codex-rs/model-provider-info/src/lib.rs
+@@ -35,6 +35,9 @@ const MAX_STREAM_MAX_RETRIES: u64 = 100;
+ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
+ 
+ const OPENAI_PROVIDER_NAME: &str = "OpenAI";
++/// Compatibility version advertised by the SimpleRouter companion to the backend.
++/// The source, package manifest, and displayed CLI version remain 0.153.4.
++pub const CODEX_BACKEND_CLIENT_VERSION: &str = "0.159.2";
+ const OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
+ pub const OPENAI_PROVIDER_ID: &str = "openai";
+ pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+@@ -395,7 +398,7 @@ impl ModelProviderInfo {
+             wire_api: WireApi::Responses,
+             query_params: None,
+             http_headers: Some(
+-                [("version".to_string(), env!("CARGO_PKG_VERSION").into())]
++                [("version".to_string(), CODEX_BACKEND_CLIENT_VERSION.into())]
+                     .into_iter()
+                     .collect(),
+             ),
+diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+index d08af0ff..78f7fd90 100644
+--- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
++++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+@@ -136,6 +136,24 @@ supports_websockets = true
+     assert_eq!(provider.websocket_connect_timeout_ms, Some(15_000));
+ }
+ 
++#[test]
++fn test_chatgpt_provider_uses_backend_compatibility_version() {
++    let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
++        .to_api_provider(Some(AuthMode::Chatgpt))
++        .expect("OpenAI provider should build API provider");
++
++    assert_eq!(
++        (
++            api_provider.base_url.as_str(),
++            api_provider
++                .headers
++                .get("version")
++                .and_then(|value| value.to_str().ok()),
++        ),
++        (CHATGPT_CODEX_BASE_URL, Some(CODEX_BACKEND_CLIENT_VERSION))
++    );
++}
++
+ #[test]
+ fn test_personal_access_token_uses_chatgpt_codex_base_url() {
+     let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+diff --git a/codex-rs/models-manager/src/lib.rs b/codex-rs/models-manager/src/lib.rs
+index cd7b59a0..f75df09a 100644
+--- a/codex-rs/models-manager/src/lib.rs
++++ b/codex-rs/models-manager/src/lib.rs
+@@ -15,12 +15,7 @@ pub fn bundled_models_response()
+     serde_json::from_str(include_str!("../models.json"))
+ }
+ 
+-/// Convert the client version string to a whole version string (e.g. "1.2.3-alpha.4" -> "1.2.3").
++/// Use the same backend compatibility version for model discovery and caching as for requests.
+ pub fn client_version_to_whole() -> String {
+-    format!(
+-        "{}.{}.{}",
+-        env!("CARGO_PKG_VERSION_MAJOR"),
+-        env!("CARGO_PKG_VERSION_MINOR"),
+-        env!("CARGO_PKG_VERSION_PATCH")
+-    )
++    codex_login::default_client::CODEX_BACKEND_CLIENT_VERSION.to_owned()
+ }

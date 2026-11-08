@@ -84,6 +84,29 @@ func TestBuildCodexModelCatalogPreservesFullToolDescriptor(t *testing.T) {
 	}
 }
 
+func TestBuildCodexModelCatalogWithOmittedParallelCapability(t *testing.T) {
+	source := []byte(`{"models":[
+	  {"slug":"explicitly-disabled","apply_patch_tool_type":"freeform","supports_parallel_tool_calls":false},
+	  {"slug":"code-mode-only","apply_patch_tool_type":"freeform","tool_mode":"code_mode_only"},
+	  {"slug":"direct-tools","base_instructions":"Direct tools.","apply_patch_tool_type":"freeform","context_window":1000000}
+	]}`)
+	raw, err := buildCodexModelCatalog(source, Model{ID: "mimo-v2.6-pro"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got codexModelCatalog
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	model := got.Models[0]
+	if model["base_instructions"] != "Direct tools." || model["tool_mode"] != nil || !boolValue(model["supports_parallel_tool_calls"]) {
+		t.Fatalf("routed tool descriptor = %#v", model)
+	}
+	if _, err := buildCodexModelCatalog([]byte(`{"models":[{"apply_patch_tool_type":"freeform","supports_parallel_tool_calls":false}]}`), Model{ID: "mimo-v2.6-pro"}, true); err == nil {
+		t.Fatal("explicitly disabled parallel tools must not qualify as a full tool model")
+	}
+}
+
 func TestBuildCodexModelCatalogDisablesUnsupportedReasoning(t *testing.T) {
 	source := []byte(`{"models":[{
 	  "slug":"template",

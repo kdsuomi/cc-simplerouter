@@ -1351,7 +1351,7 @@ func TestBareCommandWithLegacyLastModelShowsProviderPicker(t *testing.T) {
 
 	stderr := &strings.Builder{}
 	a := &app{
-		stdin:      strings.NewReader("6\n\n"), // Z.AI, first model
+		stdin:      strings.NewReader("7\n\n"), // Z.AI, first model
 		stdout:     &strings.Builder{},
 		stderr:     stderr,
 		runCommand: func(launchSpec) error { return nil },
