@@ -17,6 +17,8 @@ type responsesPassthroughOptions struct {
 	Label                             string
 	ProviderTag                       string
 	ReasoningEffortMap                map[string]string
+	RecoverCompletedToolCalls         bool
+	OmitNoneReasoningSummary          bool
 	OmitReasoningEffort               bool
 	OmitReasoningControls             bool
 	TranslateCustomTools              bool
@@ -133,6 +135,12 @@ func (p *responsesPassthroughProxy) forwardResponses(w http.ResponseWriter, r *h
 	if p.options.EnsureTextFormat {
 		if err := ensureResponsesTextFormat(request); err != nil {
 			writeResponsesError(w, http.StatusInternalServerError, "api_error", "normalize text format: "+err.Error())
+			return
+		}
+	}
+	if p.options.OmitNoneReasoningSummary {
+		if err := omitNoneResponsesReasoningSummary(request); err != nil {
+			writeResponsesError(w, http.StatusBadRequest, "invalid_request_error", "normalize reasoning summary: "+err.Error())
 			return
 		}
 	}
@@ -345,6 +353,30 @@ func ensureResponsesTextFormat(request map[string]json.RawMessage) error {
 		return err
 	}
 	request["text"] = encoded
+	return nil
+}
+
+// Some compatible APIs accept auto/concise/detailed summaries but reject
+// Codex's "none" sentinel. Omitting it retains the selected reasoning effort.
+func omitNoneResponsesReasoningSummary(request map[string]json.RawMessage) error {
+	raw := bytes.TrimSpace(request["reasoning"])
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil
+	}
+	var reasoning map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &reasoning); err != nil {
+		return err
+	}
+	var summary string
+	if json.Unmarshal(reasoning["summary"], &summary) != nil || summary != "none" {
+		return nil
+	}
+	delete(reasoning, "summary")
+	encoded, err := json.Marshal(reasoning)
+	if err != nil {
+		return err
+	}
+	request["reasoning"] = encoded
 	return nil
 }
 
@@ -690,6 +722,17 @@ func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, 
 	}
 	filter := newReasoningReplayFilter()
 	toolTranslator := newResponsesToolStreamTranslator(toolTranslation)
+	toolRecovery := newCompletedToolCallRecovery(p.options.RecoverCompletedToolCalls)
+	relayBlock := func(block []byte) bool {
+		for _, translated := range toolTranslator.processBlock(block) {
+			for _, recovered := range toolRecovery.processBlock(translated) {
+				if !writeBlocks(filter.processBlock(recovered)) {
+					return false
+				}
+			}
+		}
+		return true
+	}
 	reader := bufio.NewReaderSize(resp.Body, 32*1024)
 	var block []byte
 	for {
@@ -697,20 +740,16 @@ func (p *responsesPassthroughProxy) relayResponsesStream(w http.ResponseWriter, 
 		if len(line) > 0 {
 			block = append(block, line...)
 			if isBlankSSELine(line) {
-				for _, translated := range toolTranslator.processBlock(block) {
-					if !writeBlocks(filter.processBlock(translated)) {
-						return
-					}
+				if !relayBlock(block) {
+					return
 				}
 				block = nil
 			}
 		}
 		if readErr != nil {
 			if len(block) > 0 {
-				for _, translated := range toolTranslator.processBlock(block) {
-					if !writeBlocks(filter.processBlock(translated)) {
-						return
-					}
+				if !relayBlock(block) {
+					return
 				}
 			}
 			writeBlocks(filter.finish())

@@ -19,35 +19,37 @@ import (
 
 // Backend providers Codex CLI can be launched against.
 const (
-	providerOpenRouter = "openrouter"
-	providerGemini     = "gemini"
-	providerOpenAI     = "openai"
-	providerDeepSeek   = "deepseek"
-	providerMiMo       = "mimo"
-	providerZAI        = "zai"
-	providerMeta       = "meta"
-	providerXAI        = "xai"
-	providerLMStudio   = "lmstudio"
-	providerCodex      = "codex"
-	lmStudioSessionKey = "lmstudio"
+	providerOpenRouter   = "openrouter"
+	providerGemini       = "gemini"
+	providerOpenAI       = "openai"
+	providerDeepSeek     = "deepseek"
+	providerMiMo         = "mimo"
+	providerAbliteration = "abliteration"
+	providerZAI          = "zai"
+	providerMeta         = "meta"
+	providerXAI          = "xai"
+	providerLMStudio     = "lmstudio"
+	providerCodex        = "codex"
+	lmStudioSessionKey   = "lmstudio"
 )
 
 type app struct {
-	stdin           io.Reader
-	stdout          io.Writer
-	stderr          io.Writer
-	httpClient      *http.Client
-	apiBase         string // OpenRouter API base override (tests)
-	geminiAPIBase   string // Gemini API base override (tests)
-	openAIAPIBase   string // OpenAI API base override (tests)
-	deepSeekAPIBase string // DeepSeek API base override (tests)
-	mimoAPIBase     string // MiMo API base override (tests)
-	zaiAPIBase      string // Z.AI API base override (tests)
-	metaAPIBase     string // Meta API base override (tests)
-	xaiAPIBase      string // xAI API base override (tests)
-	lmStudioAPIBase string // LM Studio API base override (tests)
-	lineReader      *bufio.Reader
-	runCommand      func(spec launchSpec) error
+	stdin               io.Reader
+	stdout              io.Writer
+	stderr              io.Writer
+	httpClient          *http.Client
+	apiBase             string // OpenRouter API base override (tests)
+	geminiAPIBase       string // Gemini API base override (tests)
+	openAIAPIBase       string // OpenAI API base override (tests)
+	deepSeekAPIBase     string // DeepSeek API base override (tests)
+	mimoAPIBase         string // MiMo API base override (tests)
+	abliterationAPIBase string // Abliteration API base override (tests)
+	zaiAPIBase          string // Z.AI API base override (tests)
+	metaAPIBase         string // Meta API base override (tests)
+	xaiAPIBase          string // xAI API base override (tests)
+	lmStudioAPIBase     string // LM Studio API base override (tests)
+	lineReader          *bufio.Reader
+	runCommand          func(spec launchSpec) error
 }
 
 // Launch seams keep provider routing and process construction testable without
@@ -90,7 +92,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("simplerouter", flag.ContinueOnError)
 	fs.SetOutput(a.stderr)
 	fs.StringVar(&modelFlag, "model", "", "Model id, name, or unique suffix")
-	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "xai", "deepseek", "mimo", "zai", "meta", "lmstudio", or "codex"`)
+	fs.StringVar(&providerFlag, "provider", "", `Model provider: "openrouter", "gemini", "openai", "xai", "deepseek", "mimo", "abliteration", "zai", "meta", "lmstudio", or "codex"`)
 	fs.BoolVar(&selectModel, "select-model", false, "Select a provider and model interactively")
 	fs.BoolVar(&resetKey, "reset-key", false, "Forget the saved API keys before launching")
 	fs.BoolVar(&disableThinking, "disable-thinking", false, "Disable model reasoning for provider compatibility")
@@ -117,7 +119,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 		return err
 	}
 	style := newTerminalStyle(a.stderr)
-	firstRun := modelFlag == "" && cfg.Provider == "" && cfg.LastModel == "" && cfg.LastGeminiModel == "" && cfg.LastOpenAIModel == "" && cfg.LastDeepSeekModel == "" && cfg.LastMiMoModel == "" && cfg.LastZAIModel == "" && cfg.LastMetaModel == "" && cfg.LastGrokModel == "" && cfg.LastLMStudioModel == ""
+	firstRun := modelFlag == "" && cfg.Provider == "" && cfg.LastModel == "" && cfg.LastGeminiModel == "" && cfg.LastOpenAIModel == "" && cfg.LastDeepSeekModel == "" && cfg.LastMiMoModel == "" && cfg.LastAbliterationModel == "" && cfg.LastZAIModel == "" && cfg.LastMetaModel == "" && cfg.LastGrokModel == "" && cfg.LastLMStudioModel == ""
 	if firstRun {
 		printSetupBanner(a.stderr, style)
 		fmt.Fprintln(a.stderr)
@@ -168,6 +170,8 @@ func (a *app) run(ctx context.Context, args []string) error {
 			key, res, err = a.selectDeepSeek(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		case providerMiMo:
 			key, res, err = a.selectMiMo(ctx, cfg, modelFlag, selectModel, firstRun, style)
+		case providerAbliteration:
+			key, res, err = a.selectAbliteration(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		case providerZAI:
 			key, res, err = a.selectZAI(ctx, cfg, modelFlag, selectModel, firstRun, style)
 		case providerMeta:
@@ -209,6 +213,9 @@ func (a *app) run(ctx context.Context, args []string) error {
 	case providerMiMo:
 		cfg.MiMoAPIKey = key
 		cfg.LastMiMoModel = modelID
+	case providerAbliteration:
+		cfg.AbliterationAPIKey = key
+		cfg.LastAbliterationModel = modelID
 	case providerZAI:
 		cfg.ZAIAPIKey = key
 		cfg.LastZAIModel = modelID
@@ -261,6 +268,13 @@ func (a *app) run(ctx context.Context, args []string) error {
 		}
 		defer stop()
 		baseURL = proxyURL
+	case provider == providerAbliteration:
+		proxyURL, stop, perr := startResponsesPassthroughProxyFn(a.abliterationBase(), modelID, a.httpClient, abliterationResponsesOptions(modelID))
+		if perr != nil {
+			return fmt.Errorf("start Abliteration Responses proxy: %w", perr)
+		}
+		defer stop()
+		baseURL = proxyURL
 	case provider == providerZAI:
 		proxyURL, stop, perr := startZAIResponsesProxyFn(a.zaiBase(), modelID, a.httpClient, disableThinking)
 		if perr != nil {
@@ -308,7 +322,7 @@ func (a *app) run(ctx context.Context, args []string) error {
 	thinkingMode := launchThinkingMode(provider, selected, disableThinking)
 	a.printLaunchSummary(modelID, selected.ContextLength, thinkingMode, dir, launchProviderLabel(provider, res))
 	launchArgs := codexArgs(modelID, baseURL, catalogPath, disableThinking, codexPositionals, passthrough)
-	if provider == providerMeta || provider == providerXAI || provider == providerLMStudio {
+	if provider == providerMeta || provider == providerXAI || provider == providerLMStudio || provider == providerAbliteration {
 		launchArgs = reasoningAwareCodexArgs(selected, baseURL, catalogPath, disableThinking, codexPositionals, passthrough)
 	}
 	launchArgs = codexArgsWithBrowserBridge(codexPath, launchArgs)
@@ -372,6 +386,9 @@ func inferProviderFromModel(model string) string {
 	if strings.HasPrefix(lower, "deepseek-") {
 		return providerDeepSeek
 	}
+	if strings.HasPrefix(lower, "abliterated-") {
+		return providerAbliteration
+	}
 	if strings.HasPrefix(lower, "mimo-") {
 		return providerMiMo
 	}
@@ -396,6 +413,8 @@ func canonicalProvider(input string) string {
 		return providerZAI
 	case "grok", "x-ai", "x.ai", "spacexai":
 		return providerXAI
+	case "abliteration.ai":
+		return providerAbliteration
 	case "lm studio", "lm-studio", "lm_studio", "local":
 		return providerLMStudio
 	default:
@@ -405,7 +424,7 @@ func canonicalProvider(input string) string {
 
 func isKnownProvider(provider string) bool {
 	switch provider {
-	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerMiMo, providerZAI, providerMeta, providerXAI, providerLMStudio, providerCodex:
+	case "", providerOpenRouter, providerGemini, providerOpenAI, providerDeepSeek, providerMiMo, providerAbliteration, providerZAI, providerMeta, providerXAI, providerLMStudio, providerCodex:
 		return true
 	default:
 		return false
@@ -413,7 +432,7 @@ func isKnownProvider(provider string) bool {
 }
 
 func providerNames() []string {
-	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerXAI, providerDeepSeek, providerMiMo, providerZAI, providerMeta, providerLMStudio, providerCodex}
+	return []string{providerOpenRouter, providerGemini, providerOpenAI, providerXAI, providerDeepSeek, providerMiMo, providerAbliteration, providerZAI, providerMeta, providerLMStudio, providerCodex}
 }
 
 func (a *app) openRouterBase() string {
@@ -490,6 +509,8 @@ func launchProviderLabel(provider string, res pickResult) string {
 		return "DeepSeek"
 	case providerMiMo:
 		return "MiMo"
+	case providerAbliteration:
+		return "Abliteration"
 	case providerZAI:
 		return "Z.AI"
 	case providerMeta:
@@ -507,12 +528,12 @@ func launchThinkingMode(provider string, model Model, disableThinking bool) stri
 		return "fixed"
 	}
 	if disableThinking {
-		if provider == providerXAI && modelSupportsReasoning(model) && !slices.Contains(model.SupportedReasoningEfforts, "none") {
+		if (provider == providerXAI || provider == providerAbliteration) && modelSupportsReasoning(model) && !slices.Contains(model.SupportedReasoningEfforts, "none") {
 			return "low"
 		}
 		return "disabled"
 	}
-	if provider == providerMeta || provider == providerXAI || provider == providerLMStudio {
+	if provider == providerMeta || provider == providerXAI || provider == providerLMStudio || provider == providerAbliteration {
 		if !modelSupportsReasoning(model) {
 			return "disabled"
 		}

@@ -2,7 +2,7 @@
 
 `simplerouter` launches an installed [OpenAI Codex CLI](https://developers.openai.com/codex)
 with an existing Codex subscription or against OpenRouter, Google AI Studio, OpenAI,
-xAI, DeepSeek, Xiaomi MiMo, Z.AI, Meta Model API, or a local LM Studio server.
+xAI, DeepSeek, Xiaomi MiMo, Abliteration, Z.AI, Meta Model API, or a local LM Studio server.
 It supplies Codex with one session-scoped Responses provider and a model descriptor
 derived from the installed Codex release, preserving Codex features such as freeform
 `apply_patch`, namespaced tools, parallel tool calls, reasoning, and multi-agent support.
@@ -23,6 +23,7 @@ simplerouter --provider openai --model gpt-5.6-sol
 simplerouter --provider xai --model grok-4.5       # Grok CLI login or XAI_API_KEY
 simplerouter --provider deepseek --model deepseek-v4-flash
 simplerouter --provider mimo --model mimo-v2.6-pro-ultraspeed
+simplerouter --provider abliteration --model abliterated-model-large-v2
 simplerouter --provider zai --model glm-5.2
 simplerouter --provider meta --model muse-spark-1.2
 simplerouter --provider lmstudio                    # models from localhost:1234
@@ -111,6 +112,7 @@ uses a different protocol.
 | xAI (Grok) | `POST https://api.x.ai/v1/responses` | Loopback Responses compatibility proxy |
 | DeepSeek | `POST https://api.deepseek.com/chat/completions` | Loopback Responses-to-Chat translator |
 | Xiaomi MiMo | `POST https://api.xiaomimimo.com/v1/chat/completions` | Loopback Responses-to-Chat translator |
+| Abliteration | `POST https://api.abliteration.ai/v1/responses` | Loopback Responses compatibility proxy |
 | Z.AI | `POST https://api.z.ai/api/paas/v4/chat/completions` | Loopback Responses-to-Chat translator |
 | Meta Model API | `POST https://api.meta.ai/v1/responses` | Loopback Responses compatibility proxy |
 | LM Studio | `POST http://127.0.0.1:1234/v1/responses` | Loopback Responses compatibility proxy |
@@ -261,7 +263,7 @@ model pickers.
 - `Tab`: choose an OpenRouter inference endpoint
 - `Esc`: return to provider selection
 
-OpenRouter, Gemini, and LM Studio catalogs are fetched from their live model endpoints.
+OpenRouter, Gemini, Abliteration, and LM Studio catalogs are fetched from their live model endpoints.
 The OpenRouter list keeps the provider's popularity order with recommended
 coding models pinned at the top. The Gemini list is restricted to usable text
 generation models. LM Studio lists installed LLMs and uses loaded-instance
@@ -271,6 +273,17 @@ documented curated lists.
 MiMo supports only `mimo-v2.6-pro`, `mimo-v2.6-flash`, and
 `mimo-v2.6-pro-ultraspeed`, each with a 1M-token context window. Older and audio
 models are excluded, including from explicit `--model` passthrough.
+
+Abliteration lists models available to the API key's project and uses live pricing
+and context windows. Its current models are `abliterated-model` (262,144 tokens),
+`abliterated-model-large-flash` (1,048,576), `abliterated-model-large-v2`
+(1,000,000), and the deprecated `abliterated-model-large` (1,000,000).
+The adapter translates Codex freeform and namespaced tools, preserves streaming
+and prompt-cache affinity, and supports native web search. Forced tool calls
+returned only in the final response are emitted as item events for Codex. Codex's `xhigh` effort
+selects `max` on large models and stays `xhigh` on the base model. Large v2
+cannot disable reasoning: `--disable-thinking` requests low reasoning with the
+trace hidden, matching the provider's `none` behavior.
 
 xAI's curated list starts with `grok-4.5` (500k context, default high reasoning),
 then `grok-4.3`, `grok-build-0.1`, and the Grok 4.20 reasoning / non-reasoning /
@@ -293,7 +306,7 @@ simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key
 ```
 
 - `--model MODEL`: model ID, display name, or unique suffix
-- `--provider PROVIDER`: `openrouter`, `gemini`, `openai`, `xai` (alias `grok`), `deepseek`, `mimo`, `zai`, `meta`, `lmstudio`, or `codex`
+- `--provider PROVIDER`: `openrouter`, `gemini`, `openai`, `xai` (alias `grok`), `deepseek`, `mimo`, `abliteration` (alias `abliteration.ai`), `zai`, `meta`, `lmstudio`, or `codex`
 - `--select-model`: open the provider/model picker even when a choice is saved
 - `--reset-key`: clear every saved provider key before selection
 - `--disable-thinking`: disable Codex reasoning and the provider's thinking mode
@@ -302,7 +315,7 @@ simplerouter [--model MODEL] [--provider PROVIDER] [--select-model] [--reset-key
 If the first positional argument names a directory, Codex starts there. Other
 positional text becomes the initial prompt. A provider can usually be inferred
 from an explicit model ID: slash-qualified IDs select OpenRouter, while
-`gemini-*`, `gpt-*`, `grok-*`, `deepseek-*`, `mimo-*`, `glm-*`, and `muse-*` select their first-class
+`gemini-*`, `gpt-*`, `grok-*`, `deepseek-*`, `mimo-*`, `abliterated-*`, `glm-*`, and `muse-*` select their first-class
 providers.
 
 ## Keys and local configuration
@@ -317,6 +330,7 @@ Environment variables take precedence over saved values:
 | xAI (Grok) | `XAI_API_KEY`, `GROK_API_KEY`, then Grok CLI session in `~/.grok/auth.json` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 | Xiaomi MiMo | `MIMO_API_KEY` |
+| Abliteration | `ABLITERATION_API_KEY`, `ABLIT_KEY` |
 | Z.AI | `ZAI_API_KEY`, `BIGMODEL_API_KEY` |
 | Meta | `META_API_KEY`, `MODEL_API_KEY` |
 | LM Studio | None; the local server is used directly |
@@ -330,7 +344,8 @@ copied into SimpleRouter's config. Selected keys and models are stored in
 discarding model choices.
 
 MiMo reuses `mimo_api_key` in that config and remembers its selection in
-`last_mimo_model`.
+`last_mimo_model`. Abliteration uses `abliteration_api_key` and
+`last_abliteration_model`.
 
 For LM Studio, start the Local Server before selecting the provider. SimpleRouter
 connects to `http://127.0.0.1:1234/v1`, shows the installed LLMs, and remembers
@@ -376,6 +391,16 @@ go vet ./...
 go build ./...
 ```
 
+To test Abliteration streaming, usage, reasoning controls, and simulated tool
+continuations across available models:
+
+```sh
+SIMPLEROUTER_LIVE_ABLITERATION=1 go test ./internal/simplerouter -run '^TestLiveAbliteration$' -count=1 -v
+```
+
+These tests use the configured Abliteration key, send synthetic prompts, and
+leave saved configuration unchanged. Returned tool calls are simulated.
+
 To run small live tests for all three MiMo V2.6 models (streaming, usage,
 thinking disabled, and reasoning replay after a namespaced tool call):
 
@@ -401,6 +426,8 @@ Protocol references used by this implementation:
 - [OpenRouter provider routing](https://openrouter.ai/docs/guides/routing/provider-selection)
 - [Gemini Interactions API V1](https://ai.google.dev/api/interactions-api-v1)
 - [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion)
+- [Abliteration API](https://docs.abliteration.ai/api/introduction)
+- [Abliteration reasoning controls](https://docs.abliteration.ai/capabilities/thinking)
 - [MiMo Chat Completions](https://mimo.mi.com/docs/en-US/api/chat/openai-api)
 - [MiMo model catalog](https://mimo.mi.com/docs/en-US/quick-start/summary/model)
 - [Z.AI Chat Completions](https://docs.z.ai/api-reference/llm/chat-completion)

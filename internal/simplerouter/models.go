@@ -29,6 +29,9 @@ var recommendedGeminiModelIDs = []string{
 }
 
 var recommendedFirstClassModelIDs = []string{
+	"abliterated-model-large-v2",
+	"abliterated-model-large-flash",
+	"abliterated-model",
 	"grok-4.5",
 	"grok-4.3",
 	"grok-build-0.1",
@@ -52,22 +55,26 @@ var recommendedFirstClassModelIDs = []string{
 }
 
 var testedModelIDs = map[string]bool{
-	"z-ai/glm-5.2":                 true,
-	"qwen/qwen3-coder":             true,
-	"google/gemini-2.5-flash-lite": true,
-	"openai/gpt-4.1-mini":          true,
-	"openai/gpt-4.1-nano":          true,
-	"deepseek/deepseek-v4-flash":   true,
-	"deepseek/deepseek-v4-pro":     true,
-	"moonshotai/kimi-k2.6":         true,
-	"minimax/minimax-m3":           true,
-	"deepseek-v4-flash":            true,
-	"deepseek-v4-pro":              true,
-	"glm-5.2":                      true,
-	"glm-5":                        true,
-	"muse-spark-1.2":               true,
-	"muse-spark-1.2-contributor":   true,
-	"muse-spark-1.1":               true,
+	"abliterated-model":             true,
+	"abliterated-model-large-flash": true,
+	"abliterated-model-large-v2":    true,
+	"abliterated-model-large":       true,
+	"z-ai/glm-5.2":                  true,
+	"qwen/qwen3-coder":              true,
+	"google/gemini-2.5-flash-lite":  true,
+	"openai/gpt-4.1-mini":           true,
+	"openai/gpt-4.1-nano":           true,
+	"deepseek/deepseek-v4-flash":    true,
+	"deepseek/deepseek-v4-pro":      true,
+	"moonshotai/kimi-k2.6":          true,
+	"minimax/minimax-m3":            true,
+	"deepseek-v4-flash":             true,
+	"deepseek-v4-pro":               true,
+	"glm-5.2":                       true,
+	"glm-5":                         true,
+	"muse-spark-1.2":                true,
+	"muse-spark-1.2-contributor":    true,
+	"muse-spark-1.1":                true,
 }
 
 func curatedProviderModels(provider string) []Model {
@@ -95,6 +102,8 @@ func curatedProviderModels(provider string) []Model {
 			{ID: "mimo-v2.6-flash", Name: "MiMo V2.6 Flash", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
 			{ID: "mimo-v2.6-pro-ultraspeed", Name: "MiMo V2.6 Pro Ultraspeed", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning"}},
 		}
+	case providerAbliteration:
+		models = abliterationModelDefaults()
 	case providerZAI:
 		models = []Model{
 			{ID: "glm-5.2", Name: "GLM-5.2", ContextLength: 1_000_000, SupportedParameters: []string{"tools", "reasoning", "reasoning_effort"}},

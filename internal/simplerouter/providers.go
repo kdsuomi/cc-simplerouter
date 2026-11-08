@@ -11,14 +11,15 @@ import (
 var errProviderKeyRejected = errors.New("provider rejected the API key")
 
 const (
-	defaultGeminiAPIBase   = "https://generativelanguage.googleapis.com/v1"
-	defaultOpenAIAPIBase   = "https://api.openai.com/v1"
-	defaultDeepSeekAPIBase = "https://api.deepseek.com"
-	defaultMiMoAPIBase     = "https://api.xiaomimimo.com/v1"
-	defaultZAIAPIBase      = "https://api.z.ai/api/paas/v4"
-	defaultMetaAPIBase     = "https://api.meta.ai/v1"
-	defaultXAIAPIBase      = "https://api.x.ai/v1"
-	defaultLMStudioAPIBase = "http://127.0.0.1:1234/v1"
+	defaultGeminiAPIBase       = "https://generativelanguage.googleapis.com/v1"
+	defaultOpenAIAPIBase       = "https://api.openai.com/v1"
+	defaultDeepSeekAPIBase     = "https://api.deepseek.com"
+	defaultMiMoAPIBase         = "https://api.xiaomimimo.com/v1"
+	defaultAbliterationAPIBase = "https://api.abliteration.ai/v1"
+	defaultZAIAPIBase          = "https://api.z.ai/api/paas/v4"
+	defaultMetaAPIBase         = "https://api.meta.ai/v1"
+	defaultXAIAPIBase          = "https://api.x.ai/v1"
+	defaultLMStudioAPIBase     = "http://127.0.0.1:1234/v1"
 )
 
 func validateBearerModels(ctx context.Context, httpClient *http.Client, apiBase, key, label string) error {

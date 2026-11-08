@@ -50,6 +50,7 @@ func loadConfig() (Config, error) {
 	cfg.OpenAIAPIKey = cleanAPIKey(cfg.OpenAIAPIKey)
 	cfg.DeepSeekAPIKey = cleanAPIKey(cfg.DeepSeekAPIKey)
 	cfg.MiMoAPIKey = cleanAPIKey(cfg.MiMoAPIKey)
+	cfg.AbliterationAPIKey = cleanAPIKey(cfg.AbliterationAPIKey)
 	cfg.ZAIAPIKey = cleanAPIKey(cfg.ZAIAPIKey)
 	cfg.MetaAPIKey = cleanAPIKey(cfg.MetaAPIKey)
 	cfg.XAIAPIKey = cleanAPIKey(cfg.XAIAPIKey)
@@ -58,6 +59,7 @@ func loadConfig() (Config, error) {
 	cfg.LastOpenAIModel = strings.TrimSpace(cfg.LastOpenAIModel)
 	cfg.LastDeepSeekModel = strings.TrimSpace(cfg.LastDeepSeekModel)
 	cfg.LastMiMoModel = strings.TrimSpace(cfg.LastMiMoModel)
+	cfg.LastAbliterationModel = strings.TrimSpace(cfg.LastAbliterationModel)
 	cfg.LastZAIModel = strings.TrimSpace(cfg.LastZAIModel)
 	cfg.LastMetaModel = strings.TrimSpace(cfg.LastMetaModel)
 	cfg.LastGrokModel = strings.TrimSpace(cfg.LastGrokModel)
@@ -120,6 +122,7 @@ func resetSavedKey() error {
 	cfg.OpenAIAPIKey = ""
 	cfg.DeepSeekAPIKey = ""
 	cfg.MiMoAPIKey = ""
+	cfg.AbliterationAPIKey = ""
 	cfg.ZAIAPIKey = ""
 	cfg.MetaAPIKey = ""
 	cfg.XAIAPIKey = ""
